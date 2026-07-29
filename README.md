@@ -10,6 +10,17 @@ Même procédure que pour l'application tablette : créez un dépôt GitHub
 dossier, activez **GitHub Pages** avec la source **GitHub Actions** dans les
 paramètres du dépôt. La publication se fait ensuite automatiquement.
 
+## Sécurité
+
+Au premier lancement, l'application demande de créer un mot de passe. Il
+verrouille l'accès et **chiffre les données consolidées** sur cet ordinateur.
+Verrouillage automatique à la mise en veille et après 15 minutes d'inactivité,
+blocage progressif après plusieurs essais erronés.
+
+> Le mot de passe perdu, les données consolidées ne sont pas récupérables. Ce
+> n'est pas dramatique ici : il suffit de tout effacer et de réimporter les
+> sauvegardes depuis le dossier partagé.
+
 ## Installer sur PC
 
 Une fois en ligne, ouvrez l'adresse dans **Chrome** ou **Edge** : une icône
@@ -40,8 +51,15 @@ chiffrée, la clé est demandée ; en clair, l'import est immédiat. Un rapport
 Excel présenté par erreur est refusé avec l'explication de quel fichier
 utiliser.
 
-**Bilan** — tous les objectifs de toutes les personnes, classés en Acquis /
-En cours d'acquisition / Non acquis, filtrables par état.
+**Tableau de bord** — la situation d'un coup d'œil : répartition des objectifs
+en Acquis / En cours d'acquisition / Non acquis, et volume de crises sur
+30 jours avec sa tendance, le comportement et l'antécédent les plus fréquents.
+La liste détaillée reste filtrable par état.
+
+**Accord observateurs** — les paires de relevés sont repérées automatiquement :
+deux séances du même jour, du même atelier, marquées « deux observateurs en
+parallèle » dans DatABA et venues d'appareils différents. Sélectionnez-en une
+pour obtenir le pourcentage d'accord, global et objectif par objectif.
 
 **Par personne** — une courbe par objectif, avec **quatre styles de graphique**
 (courbe, barres, aire, points) et une **fenêtre temporelle** au choix : 30 jours,
