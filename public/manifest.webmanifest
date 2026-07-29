@@ -1,7 +1,8 @@
 {
-  "name": "Suivi ABA — cadres pédagogiques",
-  "short_name": "Suivi ABA",
-  "description": "Consolidation et bilan des cotations ABA remontées des tablettes",
+  "name": "DatABA Manager",
+  "short_name": "DatABA Manager",
+  "description": "Consolidation et bilan des cotations DatABA, pour les cadres pédagogiques",
+  "lang": "fr",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
