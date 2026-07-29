@@ -10,6 +10,13 @@ Même procédure que pour l'application tablette : créez un dépôt GitHub
 dossier, activez **GitHub Pages** avec la source **GitHub Actions** dans les
 paramètres du dépôt. La publication se fait ensuite automatiquement.
 
+## Installer sur PC
+
+Une fois en ligne, ouvrez l'adresse dans **Chrome** ou **Edge** : une icône
+d'installation apparaît dans la barre d'adresse (ou menu **⋮ → Installer
+l'application…**). L'app s'ouvre ensuite dans sa propre fenêtre, avec une
+icône sur le bureau, sans dépendre d'un onglet de navigateur resté ouvert.
+
 ## Utilisation
 
 1. Un éducateur exporte une sauvegarde chiffrée depuis la tablette
