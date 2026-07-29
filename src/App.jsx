@@ -548,7 +548,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
               récupérables. Vous pouvez tout effacer et réimporter les sauvegardes depuis le dossier partagé.
             </p>
             <div className="flex gap-2">
-              <Btn onClick={() => { window.localStorage.clear(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
+              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
                 Effacer et recommencer
               </Btn>
               <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
@@ -1159,6 +1159,20 @@ function RapportScreen({ donnees, lignes, logo, association, onLogo, onAssociati
 
 /* ==================== Application ==================== */
 const SECU_KEY = 'aba-cadre:securite';
+
+/* Efface UNIQUEMENT les clés de DatABA Manager. Les deux applications sont
+   publiées sous la même adresse et partagent le même espace de stockage :
+   un effacement global emporterait les données de DatABA. */
+function effacerDonneesManager() {
+  try {
+    const aSupprimer = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith('aba-cadre:')) aSupprimer.push(k);
+    }
+    aSupprimer.forEach((k) => window.localStorage.removeItem(k));
+  } catch (e) { /* stockage indisponible */ }
+}
 
 export default function App() {
   const [donnees, setDonnees] = useState(VIDE);
