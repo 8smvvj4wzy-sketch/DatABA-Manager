@@ -417,7 +417,7 @@ export default function App() {
   return (
     <div className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
       <div className="max-w-3xl mx-auto px-6 py-8">
-        <h1 className="text-2xl font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>Suivi ABA — cadres pédagogiques</h1>
+        <h1 className="text-2xl font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
         <p className="text-sm mb-6" style={{ color: INK_SOFT }}>
           {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''} importée{donnees.seances.length !== 1 ? 's' : ''}
         </p>
