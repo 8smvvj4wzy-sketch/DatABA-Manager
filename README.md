@@ -1,4 +1,4 @@
-# Suivi ABA — cadres pédagogiques
+# DatABA Manager
 
 Application web pour consolider et analyser les cotations remontées des
 tablettes ABA. Fonctionne dans un navigateur, sans installation.
@@ -33,8 +33,28 @@ Les personnes provenant de tablettes différentes sont rapprochées par leurs
 sur deux tablettes distinctes seraient à tort confondues — à éviter en
 harmonisant les initiales entre tablettes si le cas peut se présenter.
 
-## À venir
+## Les quatre onglets
 
-Graphiques personnalisables, vue par personne avec temporalité ajustable, et
-génération de documents PDF (rapports, bilans) avec logo de l'association,
-pensés pour un export direct vers Airmes ou une impression.
+**Importer** — charge une sauvegarde DatABA. Le format est reconnu au contenu :
+chiffrée, la clé est demandée ; en clair, l'import est immédiat. Un rapport
+Excel présenté par erreur est refusé avec l'explication de quel fichier
+utiliser.
+
+**Bilan** — tous les objectifs de toutes les personnes, classés en Acquis /
+En cours d'acquisition / Non acquis, filtrables par état.
+
+**Par personne** — une courbe par objectif, avec **quatre styles de graphique**
+(courbe, barres, aire, points) et une **fenêtre temporelle** au choix : 30 jours,
+3 mois, 6 mois, 1 an ou tout l'historique. Le seuil d'acquisition apparaît en
+pointillé.
+
+**Document** — compose un bilan imprimable, avec le **logo de l'association** et
+son nom en en-tête, pour une personne ou pour toutes. Le bouton ouvre la fenêtre
+d'impression du navigateur : choisissez votre imprimante, ou « Enregistrer au
+format PDF » pour obtenir un fichier à déposer dans Airmes. Logo et nom sont
+conservés d'une session à l'autre.
+
+## Mise à jour
+
+Après chaque mise en ligne, incrémentez `CACHE_VERSION` dans `public/sw.js`,
+puis fermez et rouvrez l'application.
