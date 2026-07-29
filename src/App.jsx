@@ -41,6 +41,50 @@ async function decryptEnvelope(envelope, passphrase) {
   const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(envelope.iv) }, key, fromB64(envelope.data));
   return JSON.parse(new TextDecoder().decode(plain));
 }
+async function encryptJSON(obj, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const data = new TextEncoder().encode(JSON.stringify(obj));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  return { format: 'aba-backup-encrypted', version: 1, salt: toB64(salt), iv: toB64(iv), data: toB64(ct) };
+}
+
+/* --- Verrouillage et chiffrement des données du poste ---
+   Mêmes principes que sur DatABA : le code sert à la fois de verrou et de clé
+   de chiffrement, et n'est jamais enregistré, seule son empreinte l'est. */
+async function hashPin(pin, saltB64) {
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromB64(saltB64), iterations: 150000, hash: 'SHA-256' }, keyMaterial, 256);
+  return toB64(bits);
+}
+function newSalt() {
+  return toB64(crypto.getRandomValues(new Uint8Array(16)));
+}
+let dataKey = null;
+async function deriveDataKey(pin, saltB64) {
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: fromB64(saltB64), iterations: 150000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptValue(texte, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(texte));
+  return JSON.stringify({ __enc: 1, iv: toB64(iv), data: toB64(ct) });
+}
+async function decryptValue(raw, key) {
+  let env = null;
+  try { env = JSON.parse(raw); } catch (e) { return raw; }
+  if (!env || env.__enc !== 1) return raw;
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(env.iv) }, key, fromB64(env.data));
+  return new TextDecoder().decode(plain);
+}
+function lockDelayMs(failed) {
+  if (failed < 3) return 0;
+  if (failed < 5) return 30 * 1000;
+  if (failed < 8) return 5 * 60 * 1000;
+  return 15 * 60 * 1000;
+}
 
 /* ==================== Stockage local du cadre ====================
    Un seul jeu de données, accumulé au fil des imports. localStorage suffit
@@ -48,18 +92,22 @@ async function decryptEnvelope(envelope, passphrase) {
    plusieurs tablettes, IndexedDB prendrait le relais sans changer l'usage. */
 const STORE_KEY = 'aba-cadre:data';
 
+const VIDE = { personnes: [], seances: [], crises: [], sources: [] };
+
 async function chargerDonnees() {
   try {
     const raw = window.localStorage.getItem(STORE_KEY);
-    if (!raw) return { personnes: [], seances: [], crises: [], sources: [] };
-    return JSON.parse(raw);
+    if (!raw) return VIDE;
+    const texte = dataKey ? await decryptValue(raw, dataKey) : raw;
+    return JSON.parse(texte);
   } catch (e) {
-    return { personnes: [], seances: [], crises: [], sources: [] };
+    return VIDE;
   }
 }
-function sauverDonnees(d) {
+async function sauverDonnees(d) {
   try {
-    window.localStorage.setItem(STORE_KEY, JSON.stringify(d));
+    const texte = JSON.stringify(d);
+    window.localStorage.setItem(STORE_KEY, dataKey ? await encryptValue(texte, dataKey) : texte);
   } catch (e) {
     /* silencieux : un échec d'écriture ne doit pas interrompre l'usage */
   }
@@ -206,6 +254,311 @@ const ETATS = {
   en_cours: { label: "En cours d'acquisition", color: EN_COURS },
   non_acquis: { label: 'Non acquis', color: NON_ACQUIS },
 };
+
+/* ==================== Accord inter-observateurs ====================
+   Les paires sont repérées seules : deux séances du même jour, marquées
+   « deux observateurs en parallèle », venues de sources différentes. Le cadre
+   n'a rien à apparier à la main. */
+function ioaPourEntree(obj, ea, eb) {
+  if (!ea || !eb) return null;
+  const t = obj.type;
+  const codeEssai = (x) => (x && typeof x === 'object' ? x.code : x);
+
+  if (t === 'trials') {
+    const n = Math.max((ea.trials || []).length, (eb.trials || []).length);
+    let pts = 0, acc = 0;
+    for (let i = 0; i < n; i++) {
+      const a = codeEssai((ea.trials || [])[i]);
+      const b = codeEssai((eb.trials || [])[i]);
+      if (!a && !b) continue;
+      pts += 1;
+      if (a === b) acc += 1;
+    }
+    return pts ? { points: pts, accords: acc } : null;
+  }
+  if (t === 'probe') {
+    const a = ea.guidance != null ? ea.guidance : ea.value;
+    const b = eb.guidance != null ? eb.guidance : eb.value;
+    if (a == null && b == null) return null;
+    return { points: 1, accords: a === b ? 1 : 0 };
+  }
+  if (t === 'chaining') {
+    const steps = (obj.config && obj.config.steps) || [];
+    let pts = 0, acc = 0;
+    steps.forEach((st) => {
+      const a = (ea.steps || {})[st.id];
+      const b = (eb.steps || {})[st.id];
+      if (!a && !b) return;
+      pts += 1;
+      if (a === b) acc += 1;
+    });
+    return pts ? { points: pts, accords: acc } : null;
+  }
+  if (t === 'balance') {
+    const steps = (obj.config && obj.config.steps) || [];
+    const ta = Array.isArray(ea.trials) ? ea.trials : [{ steps: ea.steps || {} }];
+    const tb = Array.isArray(eb.trials) ? eb.trials : [{ steps: eb.steps || {} }];
+    const n = Math.max(ta.length, tb.length);
+    let pts = 0, acc = 0;
+    for (let i = 0; i < n; i++) {
+      steps.forEach((st) => {
+        const a = ((ta[i] || {}).steps || {})[st.id];
+        const b = ((tb[i] || {}).steps || {})[st.id];
+        const oa = a && a.outcome;
+        const ob = b && b.outcome;
+        if (!oa && !ob) return;
+        pts += 1;
+        if (oa === ob) acc += 1;
+      });
+    }
+    return pts ? { points: pts, accords: acc } : null;
+  }
+  if (t === 'interval') {
+    const cles = new Set([...Object.keys(ea.marks || {}), ...Object.keys(eb.marks || {})]);
+    let pts = 0, acc = 0;
+    cles.forEach((k) => { pts += 1; if ((ea.marks || {})[k] === (eb.marks || {})[k]) acc += 1; });
+    return pts ? { points: pts, accords: acc } : null;
+  }
+  /* Mesures continues : l'accord exact n'aurait pas de sens, on retient le
+     rapport entre la plus petite et la plus grande valeur. */
+  const proportionnel = (a, b) => (!a && !b ? null : { points: 1, accords: Math.min(a, b) / Math.max(a, b), proportionnel: true });
+  if (t === 'occurrence') return proportionnel(ea.count || 0, eb.count || 0);
+  if (t === 'timer') return proportionnel(ea.elapsedMs || 0, eb.elapsedMs || 0);
+  if (t === 'latency') {
+    const moy = (l) => (l && l.length ? l.reduce((x, y) => x + y, 0) / l.length : 0);
+    return proportionnel(moy(ea.latencies), moy(eb.latencies));
+  }
+  return null;
+}
+
+function trouverPaires(donnees) {
+  const candidates = donnees.seances.filter((s) => s.doubleCotation);
+  const parJour = new Map();
+  candidates.forEach((s) => {
+    const jour = new Date(s.date).toLocaleDateString('fr-FR');
+    const cle = `${jour}|${s.atelierId || 'libre'}`;
+    if (!parJour.has(cle)) parJour.set(cle, []);
+    parJour.get(cle).push(s);
+  });
+
+  const paires = [];
+  parJour.forEach((liste, cle) => {
+    for (let i = 0; i < liste.length; i++) {
+      for (let j = i + 1; j < liste.length; j++) {
+        // Deux relevés de la même séance viennent forcément d'appareils différents
+        if (liste[i].source === liste[j].source) continue;
+        paires.push({ cle, jour: cle.split('|')[0], a: liste[i], b: liste[j] });
+      }
+    }
+  });
+  return paires;
+}
+
+function comparerPaire(paire, donnees) {
+  const lignes = [];
+  const initialesDe = (sess, sid) => ((donnees._idVersInitiales || {})[sess.source] || {})[sid] || '?';
+
+  (paire.a.studentIds || []).forEach((sidA) => {
+    const ini = initialesDe(paire.a, sidA);
+    const sidB = (paire.b.studentIds || []).find((id) => initialesDe(paire.b, id) === ini);
+    if (!sidB) return;
+
+    (paire.a.selectedObjectives[sidA] || []).forEach((oidA) => {
+      const objA = (paire.a.objectiveSnapshot || {})[oidA];
+      if (!objA) return;
+      const oidB = (paire.b.selectedObjectives[sidB] || []).find(
+        (o) => ((paire.b.objectiveSnapshot || {})[o] || {}).name === objA.name
+      );
+      if (!oidB) return;
+      const r = ioaPourEntree(objA, (paire.a.data[sidA] || {})[oidA], (paire.b.data[sidB] || {})[oidB]);
+      if (!r) return;
+      lignes.push({ initials: ini, objectif: objA.name, type: objA.type, ...r, pct: Math.round((r.accords / r.points) * 100) });
+    });
+  });
+
+  const points = lignes.reduce((a, l) => a + l.points, 0);
+  const accords = lignes.reduce((a, l) => a + l.accords, 0);
+  return { lignes, points, accords, pct: points ? Math.round((accords / points) * 100) : null };
+}
+
+function AccordScreen({ donnees }) {
+  const paires = trouverPaires(donnees);
+  const [choisie, setChoisie] = useState(null);
+
+  if (paires.length === 0) {
+    return (
+      <Card>
+        <p className="text-sm" style={{ color: INK_SOFT }}>
+          Aucune séance en double cotation détectée. Pour qu'une paire apparaisse ici, les deux
+          intervenants doivent avoir coché <strong>« Deux observateurs en parallèle »</strong> dans
+          DatABA, sur la même séance et le même jour, chacun sur son appareil.
+        </p>
+      </Card>
+    );
+  }
+
+  const res = choisie ? comparerPaire(choisie, donnees) : null;
+  const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
+
+  return (
+    <div>
+      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+        {paires.length} paire{paires.length !== 1 ? 's' : ''} de relevés détectée{paires.length !== 1 ? 's' : ''}.
+        Sélectionnez-en une pour mesurer l'accord entre les deux observateurs.
+      </p>
+
+      <div className="space-y-1.5 mb-4">
+        {paires.map((p, i) => (
+          <button key={i} onClick={() => setChoisie(p)}
+            className="w-full text-left rounded-xl border px-3.5 py-3"
+            style={{ borderColor: choisie === p ? INK : BORDER, backgroundColor: CARD }}>
+            <div className="text-sm font-medium">{p.jour}</div>
+            <div className="text-xs" style={{ color: INK_SOFT }}>{p.a.source} · {p.b.source}</div>
+          </button>
+        ))}
+      </div>
+
+      {res && (
+        <>
+          <Card className="mb-3">
+            <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
+              {res.pct != null ? `${res.pct} %` : '—'}
+            </div>
+            <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
+              d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
+            </div>
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
+              En dessous, il vaut mieux reprendre ensemble les définitions avant de poursuivre.
+            </p>
+          </Card>
+
+          <div className="space-y-1.5">
+            {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
+              <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+                <div className="min-w-0">
+                  <div className="text-sm break-words">
+                    <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
+                  </div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>
+                    {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
+                  </div>
+                </div>
+                <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
+                  {l.pct} %
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ==================== Écran de verrouillage ==================== */
+function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
+  const [step, setStep] = useState(security.pinHash ? 'enter' : 'create1');
+  const [premier, setPremier] = useState('');
+  const [valeur, setValeur] = useState('');
+  const [erreur, setErreur] = useState('');
+  const [now, setNow] = useState(Date.now());
+  const [reset, setReset] = useState(false);
+
+  const bloqueJusqua = security.lockUntil || 0;
+  const attente = bloqueJusqua > now;
+
+  useEffect(() => {
+    if (!attente) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [attente]);
+
+  async function valider() {
+    if (attente || valeur.length < 4) return;
+    if (step === 'enter') {
+      const hash = await hashPin(valeur, security.pinSalt);
+      if (hash === security.pinHash) { onUnlock(valeur); return; }
+      const failed = (security.failedAttempts || 0) + 1;
+      const delai = lockDelayMs(failed);
+      onFailedAttempt(failed, delai ? Date.now() + delai : 0);
+      setErreur(delai ? 'Code incorrect — saisie suspendue' : 'Code incorrect');
+      setValeur('');
+      setTimeout(() => setErreur(''), 1500);
+      return;
+    }
+    if (step === 'create1') { setPremier(valeur); setValeur(''); setStep('create2'); return; }
+    if (valeur !== premier) {
+      setErreur('Les deux saisies ne correspondent pas');
+      setPremier(''); setValeur(''); setStep('create1');
+      setTimeout(() => setErreur(''), 1800);
+      return;
+    }
+    const salt = newSalt();
+    const hash = await hashPin(valeur, salt);
+    await onSetup(hash, salt, valeur);
+  }
+
+  const titres = {
+    enter: attente ? 'Saisie suspendue' : 'DatABA Manager',
+    create1: 'Protéger ce poste',
+    create2: 'Confirmez',
+  };
+  const soustitres = {
+    enter: attente
+      ? `Trop d'essais. Nouvel essai possible dans ${Math.ceil((bloqueJusqua - now) / 1000)} s.`
+      : 'Saisissez votre mot de passe',
+    create1: "Ce mot de passe verrouille l'accès et chiffre les données consolidées sur cet ordinateur.",
+    create2: 'Ressaisissez le même mot de passe',
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER, fontFamily: F_BODY }}>
+      <div className="w-full max-w-sm">
+        <h1 className="text-xl font-semibold text-center mb-1" style={{ fontFamily: F_DISPLAY, color: INK }}>{titres[step]}</h1>
+        <p className="text-sm text-center mb-5" style={{ color: INK_SOFT }}>{soustitres[step]}</p>
+        {erreur && <p className="text-sm text-center mb-3" style={{ color: NON_ACQUIS }}>{erreur}</p>}
+        <input
+          type="password"
+          value={valeur}
+          autoFocus
+          disabled={attente}
+          onChange={(e) => setValeur(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') valider(); }}
+          placeholder="Mot de passe"
+          className="w-full rounded-xl border px-3 py-3 text-base bg-transparent mb-3"
+          style={{ borderColor: BORDER, color: INK }}
+        />
+        <Btn onClick={valider} disabled={attente || valeur.length < 4} className="w-full">
+          {step === 'enter' ? 'Déverrouiller' : step === 'create1' ? 'Continuer' : 'Valider'}
+        </Btn>
+        <p className="text-xs text-center mt-3" style={{ color: INK_SOFT }}>Au moins 4 caractères.</p>
+
+        {step === 'enter' && (
+          <div className="text-center mt-6">
+            <button onClick={() => setReset(true)} className="text-xs underline" style={{ color: INK_SOFT }}>
+              Mot de passe oublié ?
+            </button>
+          </div>
+        )}
+        {reset && (
+          <div className="rounded-2xl border p-4 mt-4" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+            <p className="text-sm mb-3" style={{ color: INK_SOFT }}>
+              Les données consolidées sont chiffrées avec ce mot de passe : sans lui, elles ne sont pas
+              récupérables. Vous pouvez tout effacer et réimporter les sauvegardes depuis le dossier partagé.
+            </p>
+            <div className="flex gap-2">
+              <Btn onClick={() => { window.localStorage.clear(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
+                Effacer et recommencer
+              </Btn>
+              <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /* ==================== Composants d'interface ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style }) {
@@ -524,14 +877,91 @@ function construireLignes(donnees) {
   return lignes;
 }
 
-function BilanScreen({ lignes }) {
+function TableauDeBord({ donnees, lignes }) {
   const [filtreEtat, setFiltreEtat] = useState('tous');
 
+  const compteEtat = (e) => lignes.filter((l) => l.etat === e).length;
+  const total = lignes.length;
+
+  /* Crises et observations : volume récent et répartition, pour situer d'un
+     coup d'œil où en est le collectif. */
+  const crises = donnees.crises || [];
+  const depuis = (jours) => Date.now() - jours * 86400000;
+  const crisesRecentes = crises.filter((c) => new Date(c.date) >= depuis(30) && (c.kind || 'crise') === 'crise');
+  const crisesPrecedentes = crises.filter((c) => {
+    const t = new Date(c.date);
+    return t >= depuis(60) && t < depuis(30) && (c.kind || 'crise') === 'crise';
+  });
+  const tendance = crisesPrecedentes.length
+    ? Math.round(((crisesRecentes.length - crisesPrecedentes.length) / crisesPrecedentes.length) * 100)
+    : null;
+
+  const compter = (l) => {
+    const m = new Map();
+    l.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  };
+  const parComportement = compter(crisesRecentes.flatMap((c) => c.comportementTags || []));
+  const parAntecedent = compter(crisesRecentes.flatMap((c) => c.antecedentTags || []));
+
+  const Jauge = ({ etat }) => {
+    const n = compteEtat(etat);
+    const pct = total ? Math.round((n / total) * 100) : 0;
+    return (
+      <div className="flex-1 min-w-[110px]">
+        <div className="text-2xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[etat].color }}>{n}</div>
+        <div className="text-xs mb-1" style={{ color: INK_SOFT }}>{ETATS[etat].label}</div>
+        <div className="h-1.5 rounded-full" style={{ backgroundColor: PAPER }}>
+          <div style={{ width: `${pct}%`, height: '100%', borderRadius: 999, backgroundColor: ETATS[etat].color }} />
+        </div>
+      </div>
+    );
+  };
+
+
   const filtrees = filtreEtat === 'tous' ? lignes : lignes.filter((l) => l.etat === filtreEtat);
-  const compte = (e) => lignes.filter((l) => l.etat === e).length;
+  const compte = compteEtat;
 
   return (
     <div>
+      {/* Où en est-on, d'un coup d'œil */}
+      <Card className="mb-3">
+        <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Objectifs suivis</div>
+        <div className="flex flex-wrap gap-4">
+          <Jauge etat="acquis" />
+          <Jauge etat="en_cours" />
+          <Jauge etat="non_acquis" />
+        </div>
+      </Card>
+
+      <Card className="mb-4">
+        <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Crises — 30 derniers jours</div>
+        <div className="flex flex-wrap items-baseline gap-4 mb-3">
+          <span>
+            <span className="text-2xl font-semibold" style={{ fontFamily: F_MONO }}>{crisesRecentes.length}</span>
+            <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>crise{crisesRecentes.length !== 1 ? 's' : ''}</span>
+          </span>
+          {tendance != null && (
+            <span className="text-sm" style={{ color: tendance > 0 ? NON_ACQUIS : tendance < 0 ? ACQUIS : INK_SOFT }}>
+              {tendance > 0 ? '+' : ''}{tendance} % par rapport aux 30 jours précédents
+            </span>
+          )}
+        </div>
+        {parComportement.length > 0 && (
+          <div className="text-xs mb-1" style={{ color: INK_SOFT }}>
+            Comportement le plus fréquent : <strong style={{ color: INK }}>{parComportement[0][0]}</strong> ({parComportement[0][1]})
+          </div>
+        )}
+        {parAntecedent.length > 0 && (
+          <div className="text-xs" style={{ color: INK_SOFT }}>
+            Antécédent le plus fréquent : <strong style={{ color: INK }}>{parAntecedent[0][0]}</strong> ({parAntecedent[0][1]})
+          </div>
+        )}
+        {crisesRecentes.length === 0 && (
+          <p className="text-xs" style={{ color: INK_SOFT }}>Aucune crise consignée sur la période.</p>
+        )}
+      </Card>
+
       <div className="flex gap-1.5 mb-4 flex-wrap">
         {[
           { k: 'tous', l: 'Tous', n: lignes.length },
@@ -728,9 +1158,14 @@ function RapportScreen({ donnees, lignes, logo, association, onLogo, onAssociati
 }
 
 /* ==================== Application ==================== */
+const SECU_KEY = 'aba-cadre:securite';
+
 export default function App() {
-  const [donnees, setDonnees] = useState({ personnes: [], seances: [], crises: [], sources: [] });
+  const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
+  const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
+  const [secuLue, setSecuLue] = useState(false);
+  const [verrouille, setVerrouille] = useState(true);
   const [tab, setTab] = useState('import');
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
@@ -758,12 +1193,59 @@ export default function App() {
 
   const lignes = React.useMemo(() => construireLignes(donnees), [donnees]);
 
+  /* Les réglages de sécurité se lisent en clair, avant tout déverrouillage.
+     Les données, elles, attendent la clé dérivée du mot de passe. */
   useEffect(() => {
-    (async () => {
-      setDonnees(await chargerDonnees());
-      setLoaded(true);
-    })();
+    try {
+      const brut = window.localStorage.getItem(SECU_KEY);
+      if (brut) setSecurite(JSON.parse(brut));
+    } catch (e) { /* réglages illisibles : on repart d'une création */ }
+    setSecuLue(true);
   }, []);
+
+  async function deverrouiller(motDePasse) {
+    let sec = securite;
+    if (!sec.dataSalt) {
+      sec = { ...sec, dataSalt: newSalt() };
+      setSecurite(sec);
+      window.localStorage.setItem(SECU_KEY, JSON.stringify(sec));
+    }
+    if (sec.failedAttempts || sec.lockUntil) {
+      sec = { ...sec, failedAttempts: 0, lockUntil: 0 };
+      setSecurite(sec);
+      window.localStorage.setItem(SECU_KEY, JSON.stringify(sec));
+    }
+    dataKey = await deriveDataKey(motDePasse, sec.dataSalt);
+    setVerrouille(false);
+    setDonnees(await chargerDonnees());
+    setLoaded(true);
+  }
+
+  function echecSaisie(failedAttempts, lockUntil) {
+    const suite = { ...securite, failedAttempts, lockUntil };
+    setSecurite(suite);
+    window.localStorage.setItem(SECU_KEY, JSON.stringify(suite));
+  }
+
+  /* Verrouillage automatique à la mise en veille et après inactivité */
+  useEffect(() => {
+    if (!securite.pinHash || verrouille) return undefined;
+    let minuteur = null;
+    const INACTIF_MS = 15 * 60 * 1000;
+    const relancer = () => {
+      clearTimeout(minuteur);
+      minuteur = setTimeout(() => setVerrouille(true), INACTIF_MS);
+    };
+    const surVisibilite = () => { if (document.visibilityState === 'hidden') setVerrouille(true); };
+    document.addEventListener('visibilitychange', surVisibilite);
+    ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.addEventListener(e, relancer));
+    relancer();
+    return () => {
+      clearTimeout(minuteur);
+      document.removeEventListener('visibilitychange', surVisibilite);
+      ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.removeEventListener(e, relancer));
+    };
+  }, [securite.pinHash, verrouille]);
 
   useEffect(() => {
     if (loaded) sauverDonnees(donnees);
@@ -774,6 +1256,30 @@ export default function App() {
     setToast(`${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`);
     setTimeout(() => setToast(''), 4000);
     setTab('bilan');
+  }
+
+  if (!secuLue) {
+    return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
+  }
+
+  if (verrouille || !securite.pinHash) {
+    return (
+      <LockScreen
+        security={securite}
+        onUnlock={deverrouiller}
+        onFailedAttempt={echecSaisie}
+        onSetup={async (pinHash, pinSalt, motDePasse) => {
+          const dataSalt = newSalt();
+          const suite = { pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 };
+          setSecurite(suite);
+          window.localStorage.setItem(SECU_KEY, JSON.stringify(suite));
+          dataKey = await deriveDataKey(motDePasse, dataSalt);
+          setVerrouille(false);
+          setDonnees(await chargerDonnees());
+          setLoaded(true);
+        }}
+      />
+    );
   }
 
   if (!loaded) {
@@ -791,8 +1297,9 @@ export default function App() {
         <div className="flex flex-wrap gap-2 mb-6 no-print">
           {[
             { k: 'import', l: 'Importer' },
-            { k: 'bilan', l: 'Bilan' },
+            { k: 'bilan', l: 'Tableau de bord' },
             { k: 'personnes', l: 'Par personne' },
+            { k: 'accord', l: 'Accord observateurs' },
             { k: 'rapport', l: 'Document' },
           ].map((t) => (
             <button
@@ -812,8 +1319,9 @@ export default function App() {
         </div>
 
         {tab === 'import' && <ImportScreen donnees={donnees} onImported={onImported} />}
-        {tab === 'bilan' && <BilanScreen lignes={lignes} />}
+        {tab === 'bilan' && <TableauDeBord donnees={donnees} lignes={lignes} />}
         {tab === 'personnes' && <PersonneScreen donnees={donnees} lignes={lignes} />}
+        {tab === 'accord' && <AccordScreen donnees={donnees} />}
         {tab === 'rapport' && (
           <RapportScreen
             donnees={donnees} lignes={lignes}
