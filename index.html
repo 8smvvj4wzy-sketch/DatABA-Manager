@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Suivi ABA — cadres pédagogiques</title>
     <meta name="description" content="Consolidation et bilan des cotations ABA, pour les cadres pédagogiques" />
+
+    <!-- Manifeste : c'est lui, avec le service worker, qui rend l'app installable -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#20291F" />
+    <link rel="icon" type="image/png" href="./icon-192.png" />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,5 +24,14 @@
   <body>
     <div id="root"></div>
     <script type="module" src="./src/main.jsx"></script>
+    <script>
+      // Enregistrement du service worker : condition nécessaire, avec le
+      // manifeste, pour que le navigateur propose l'installation sur PC.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
