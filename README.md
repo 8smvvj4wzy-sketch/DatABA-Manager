@@ -20,10 +20,23 @@ ou se retire depuis l'onglet Gestion.
 Ouvrez l'adresse dans **Chrome** ou **Edge** : une icône d'installation apparaît
 dans la barre d'adresse (ou menu **⋮ → Installer l'application…**).
 
+## Choisir la période
+
+Trois façons de définir la fenêtre d'observation, disponibles partout :
+
+- **Raccourci** — 7 jours, 30 jours, 3 mois, 6 mois, 1 an, ou tout.
+- **Dates précises** — au jour près, avec date de début et de fin.
+- **Mois calendaires** — « de septembre à janvier ». Le mois de fin est inclus
+  en entier, y compris le 29 février d'une année bissextile.
+
+Sur les vues qui agrègent, un réglage supplémentaire permet de **regrouper par
+jour, par semaine ou par mois**.
+
+Les analyses s'affichent au choix **en nombre ou en pourcentage**.
+
 ## Les cinq onglets
 
-**Tableau de bord** — l'avancée récente sur la période choisie (1 mois par
-défaut, jusqu'à tout l'historique). Répartition des objectifs, volume de crises
+**Tableau de bord** — l'avancée récente sur la période choisie. Répartition des objectifs, volume de crises
 avec sa tendance, et la liste des objectifs prioritaires avec un mini-graphique
 et leur état : Bientôt, Plateau, En cours, Dormant. Un appui ouvre la fiche
 complète de la personne concernée.
@@ -48,7 +61,8 @@ personnalisé. Logo et nom d'association en en-tête. Le bouton ouvre la fenêtr
 d'impression : imprimante, ou « Enregistrer au format PDF » pour Airmes.
 
 **Gestion** — import des sauvegardes DatABA (chiffrées ou non), export d'une ou
-plusieurs personnes vers un autre poste Manager, et réglages de sécurité.
+plusieurs personnes vers un autre poste Manager, **lecture d'un rapport Excel**
+sans ouvrir Excel, et réglages de sécurité.
 
 ## Rapprochement des personnes
 

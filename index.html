@@ -25,14 +25,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="./src/main.jsx"></script>
-    <script>
-      // Enregistrement du service worker : condition nécessaire, avec le
-      // manifeste, pour que le navigateur propose l'installation sur PC.
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('./sw.js').catch(() => {});
-        });
-      }
-    </script>
   </body>
 </html>
