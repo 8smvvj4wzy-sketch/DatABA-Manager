@@ -52,6 +52,12 @@ niveau), Crises, Croisement autonomie/crises. La période est ajustable partout.
 Un bouton **Générer un rapport** reprend la personne, ses objectifs et la
 période en cours.
 
+**Crises** — les répartitions en graphiques : **occurrences par intensité**,
+puis par **jour de la semaine**, **atelier**, **antécédent**, **comportement** et
+**conséquence**. Filtrable par type (crises, observations, les deux), lisible en
+nombre ou en pourcentage. Accessible aussi d'un appui sur la carte Crises du
+tableau de bord.
+
 **Rapport** — le document à transmettre. Les objectifs y apparaissent en
 **Acquis / En cours d'acquisition / Non acquis** — les nuances de travail
 interne (plateau, dormant) n'ont pas leur place dans un document officiel.
@@ -61,8 +67,24 @@ personnalisé. Logo et nom d'association en en-tête. Le bouton ouvre la fenêtr
 d'impression : imprimante, ou « Enregistrer au format PDF » pour Airmes.
 
 **Gestion** — import des sauvegardes DatABA (chiffrées ou non), export d'une ou
-plusieurs personnes vers un autre poste Manager, **lecture d'un rapport Excel**
-sans ouvrir Excel, et réglages de sécurité.
+plusieurs personnes vers un autre poste Manager, **purge des données**,
+**lecture d'un rapport Excel** sans ouvrir Excel, et réglages de sécurité.
+
+## Purger les données
+
+Quatre niveaux, dans l'onglet Gestion :
+
+- **Séances antérieures à une date** — avec le décompte avant de valider.
+- **Une source entière** — tout ce qui vient d'une tablette. Une personne qui
+  n'apparaît plus sur aucune autre source disparaît aussi.
+- **Une personne** — ses crises, libellés et commentaires partent avec elle.
+  Dans une séance partagée, seules **ses** cotations sont retirées : la séance
+  et les autres participants sont conservés.
+- **Tout** — après deux confirmations.
+
+> Les suppressions sont définitives et ne concernent que ce poste. Les tablettes
+> gardent leurs propres données : une réimportation depuis le dossier partagé
+> reste toujours possible.
 
 ## Rapprochement des personnes
 
