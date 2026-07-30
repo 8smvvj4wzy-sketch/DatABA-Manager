@@ -52,11 +52,25 @@ niveau), Crises, Croisement autonomie/crises. La période est ajustable partout.
 Un bouton **Générer un rapport** reprend la personne, ses objectifs et la
 période en cours.
 
-**Crises** — les répartitions en graphiques : **occurrences par intensité**,
-puis par **jour de la semaine**, **atelier**, **antécédent**, **comportement** et
-**conséquence**. Filtrable par type (crises, observations, les deux), lisible en
-nombre ou en pourcentage. Accessible aussi d'un appui sur la carte Crises du
-tableau de bord.
+**Crises** — d'abord une **chronologie** : le nombre de crises au fil du temps,
+en barres empilées ou en courbes, regroupé par jour, semaine ou mois. Un
+sélecteur **« Découper par »** transforme chaque dimension en séries —
+intensité, personne, atelier, antécédent, comportement, conséquence, fonction
+supposée — comme les segments d'un tableau croisé dynamique.
+
+Viennent ensuite les répartitions d'ensemble : **occurrences par intensité**,
+puis par **jour de la semaine**, **atelier**, **antécédent**, **comportement**
+et **conséquence**.
+
+Le tout filtrable **par personne** et par type (crises, observations, les deux),
+lisible en nombre ou en pourcentage. Accessible aussi d'un appui sur la carte
+Crises du tableau de bord.
+
+> Les dimensions à valeurs multiples — antécédents, comportements, conséquences —
+> font qu'une même crise compte dans plusieurs séries : le total empilé dépasse
+> alors le nombre de crises. C'est signalé sous le graphique. Au-delà de six
+> séries, les moins fréquentes sont réunies sous « Autres », sans qu'aucune
+> crise ne soit perdue.
 
 **Rapport** — le document à transmettre. Les objectifs y apparaissent en
 **Acquis / En cours d'acquisition / Non acquis** — les nuances de travail
