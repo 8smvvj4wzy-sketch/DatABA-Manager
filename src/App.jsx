@@ -1075,12 +1075,109 @@ function SeancesScreen({ donnees }) {
    « non renseigné » masquerait le fait qu'il manque de la saisie. */
 const JOURS_SEMAINE = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
 
+/* Palette des séries : assez contrastée pour distinguer six segments empilés */
+const PALETTE_SERIES = ['#1A345C', '#A8402F', '#D69A2D', '#0F8B6C', '#7A6A9A', '#2E6E8E', '#8A8F84'];
+const SERIES_MAX = 6;   // au-delà, le graphique devient illisible
+
+/* Comment découper les crises en séries. Certaines dimensions admettent
+   plusieurs valeurs par crise : elle compte alors dans chaque série
+   concernée, et le total empilé dépasse volontairement le nombre de crises. */
+const SEGMENTATIONS = [
+  { k: 'aucune', label: 'Aucune', multi: false },
+  { k: 'intensite', label: 'Intensité', multi: false },
+  { k: 'personne', label: 'Personne', multi: false },
+  { k: 'atelier', label: 'Atelier', multi: false },
+  { k: 'antecedent', label: 'Antécédent', multi: true },
+  { k: 'comportement', label: 'Comportement', multi: true },
+  { k: 'consequence', label: 'Conséquence', multi: true },
+  { k: 'fonction', label: 'Fonction supposée', multi: true },
+];
+
+const FONCTIONS = {
+  attention: 'Attention', echappement: 'Échappement', tangible: 'Tangible',
+  sensoriel: 'Sensoriel', indetermine: 'Indéterminée',
+};
+
+/* Valeurs de segmentation d'une crise : toujours une liste, même pour les
+   dimensions à valeur unique, pour un traitement uniforme. */
+function valeursSegment(donnees, crise, segmentation) {
+  switch (segmentation) {
+    case 'intensite':
+      return crise.intensite ? [`${crise.intensite} · ${INTENSITES[crise.intensite].label}`] : [];
+    case 'personne': {
+      const ini = ((donnees._idVersInitiales || {})[crise.source] || {})[crise.studentId];
+      return ini ? [nomAffiche(donnees, ini)] : [];
+    }
+    case 'atelier':
+      return [nomAtelier(donnees, crise.source, crise.atelierId)];
+    case 'antecedent':
+      return crise.antecedentTags || [];
+    case 'comportement':
+      return crise.comportementTags || [];
+    case 'consequence':
+      return crise.consequenceTags || [];
+    case 'fonction':
+      return crise.fonction ? [FONCTIONS[crise.fonction] || crise.fonction] : [];
+    default:
+      return ['Total'];
+  }
+}
+
+/* Chronologie des crises, découpée en séries.
+   Les périodes sans aucune crise sont conservées : un trou dans la courbe est
+   une information, l'écraser laisserait croire à une continuité. */
+function chronologieCrises(donnees, crises, granularite, segmentation) {
+  const paquets = new Map();
+  const totaux = new Map();
+
+  crises.forEach((c) => {
+    const cle = cleAgregation(c.date, granularite);
+    if (!paquets.has(cle)) paquets.set(cle, {});
+    const bucket = paquets.get(cle);
+    valeursSegment(donnees, c, segmentation).forEach((v) => {
+      bucket[v] = (bucket[v] || 0) + 1;
+      totaux.set(v, (totaux.get(v) || 0) + 1);
+    });
+  });
+
+  /* On ne garde que les séries les plus représentées ; le reste est regroupé,
+     sinon la légende devient illisible. */
+  const classees = Array.from(totaux.entries()).sort((a, b) => b[1] - a[1]);
+  const gardees = classees.slice(0, SERIES_MAX).map(([v]) => v);
+  const regroupe = classees.length > SERIES_MAX;
+  const series = regroupe ? [...gardees, 'Autres'] : gardees;
+
+  const donneesGraphe = Array.from(paquets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([cle, bucket]) => {
+      const ligne = { label: etiquetteAgregation(cle, granularite) };
+      series.forEach((v) => { ligne[v] = 0; });
+      Object.entries(bucket).forEach(([v, n]) => {
+        const cible = gardees.includes(v) ? v : 'Autres';
+        ligne[cible] = (ligne[cible] || 0) + n;
+      });
+      return ligne;
+    });
+
+  return { donnees: donneesGraphe, series, regroupe };
+}
+
 function CrisesScreen({ donnees, periode, setPeriode }) {
   const [unite, setUnite] = useState('nombre');
   const [type, setType] = useState('crise');
+  const [personnes, setPersonnes] = useState([]);      // vide = toutes
+  const [segmentation, setSegmentation] = useState('intensite');
+  const [forme, setForme] = useState('barres');
 
-  const toutes = (donnees.crises || []).filter((c) => (type === 'tout' || (c.kind || 'crise') === type));
+  const iniDe = (c) => ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+
+  const toutes = (donnees.crises || [])
+    .filter((c) => (type === 'tout' || (c.kind || 'crise') === type))
+    .filter((c) => !personnes.length || personnes.includes(iniDe(c)));
   const retenues = toutes.filter((c) => dansPeriode(c.date, periode));
+
+  const gran = periode.granularite || 'semaine';
+  const chrono = chronologieCrises(donnees, retenues, gran, segmentation);
 
   const compter = (valeurs) => {
     const m = new Map();
@@ -1160,7 +1257,78 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
         <div className="ml-auto"><BasculeUnite unite={unite} setUnite={setUnite} /></div>
       </div>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+      {donnees.personnes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          <Chip label="Toutes les personnes" on={!personnes.length} onClick={() => setPersonnes([])} />
+          {donnees.personnes.map((p) => (
+            <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
+              on={personnes.includes(p.initials)}
+              onClick={() => setPersonnes((cur) => (cur.includes(p.initials) ? cur.filter((x) => x !== p.initials) : [...cur, p.initials]))} />
+          ))}
+        </div>
+      )}
+
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite />
+
+      {/* Chronologie : le nombre de crises au fil du temps, découpé en séries */}
+      <Card className="mb-3">
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Évolution dans le temps</span>
+          <div className="ml-auto flex gap-1.5">
+            <Chip label="Barres" on={forme === 'barres'} onClick={() => setForme('barres')} />
+            <Chip label="Courbes" on={forme === 'courbes'} onClick={() => setForme('courbes')} />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
+          {SEGMENTATIONS.map((sg) => (
+            <Chip key={sg.k} label={sg.label} on={segmentation === sg.k} onClick={() => setSegmentation(sg.k)} />
+          ))}
+        </div>
+
+        {chrono.donnees.length === 0 ? (
+          <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
+        ) : (
+          <>
+            <div style={{ height: 300 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                {forme === 'courbes' ? (
+                  <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                    <CartesianGrid stroke={BORDER} vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    {chrono.series.map((nom, i) => (
+                      <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+                        strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+                    ))}
+                  </LineChart>
+                ) : (
+                  <BarChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                    <CartesianGrid stroke={BORDER} vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    {chrono.series.map((nom, i) => (
+                      <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+                        radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
+                    ))}
+                  </BarChart>
+                )}
+              </ResponsiveContainer>
+            </div>
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} — réglable au-dessus.
+              {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
+              {SEGMENTATIONS.find((sg) => sg.k === segmentation).multi &&
+                " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
+            </p>
+          </>
+        )}
+      </Card>
 
       <Card className="mb-3">
         <div className="flex flex-wrap items-baseline gap-4">
