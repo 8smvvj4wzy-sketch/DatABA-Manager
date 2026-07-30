@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
-  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
-  Radar as RadarIcon, Activity, Table2, Printer, X, Check,
+  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
+  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -127,7 +127,7 @@ const SECU_KEY = `${PREFIXE}securite`;
 
 const VIDE = {
   personnes: [], seances: [], crises: [], sources: [],
-  _idVersInitiales: {}, _ateliers: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
+  _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
 };
 
 function normaliser(d) {
@@ -179,6 +179,7 @@ function fusionnerImport(actuel, backup, nomSource) {
 
   const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
   const ateliersSource = Object.fromEntries((backup.ateliers || []).map((a) => [a.id, a.name]));
+  const intervenantsSource = Object.fromEntries((backup.intervenants || []).map((i) => [i.id, i.name]));
 
   const dejaLa = new Set(actuel.seances.map((s) => s.id));
   const nouvelles = (backup.sessions || []).filter((s) => !dejaLa.has(s.id));
@@ -199,6 +200,7 @@ function fusionnerImport(actuel, backup, nomSource) {
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
   };
@@ -340,10 +342,164 @@ function construireLignes(donnees) {
   return lignes;
 }
 
+/* ==================== Table de faits ====================
+   Une ligne par cotation, par crise et par renforcement, avec toutes les
+   dimensions résolues. C'est ce qui permet de croiser librement deux axes
+   sans avoir prévu la combinaison à l'avance. */
+function construireFaits(donnees) {
+  const cotations = [];
+  const renforcements = [];
+  const nomIntervenant = (source, id) => {
+    const t = (donnees._intervenants || {})[source] || {};
+    return t[id] || 'Non renseigné';
+  };
+
+  donnees.seances.forEach((sess) => {
+    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    const intervenant = nomIntervenant(sess.source, sess.intervenantId);
+    const table = (donnees._idVersInitiales || {})[sess.source] || {};
+
+    (sess.studentIds || []).forEach((sid) => {
+      const initiales = table[sid];
+      if (!initiales) return;
+
+      ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
+        const obj = (sess.objectiveSnapshot || {})[oid];
+        const entry = (sess.data || {})[sid] && sess.data[sid][oid];
+        if (!obj) return;
+        const score = objectiveScoreValue(obj, entry);
+        cotations.push({
+          seanceId: sess.id,
+          date: sess.date,
+          personne: initiales,
+          atelier,
+          intervenant,
+          objectif: obj.name,
+          type: (TYPES_COTATION[obj.type] || obj.type),
+          phase: obj.activePhaseName || 'Non renseignée',
+          score,
+        });
+      });
+
+      const r = (sess.reinforcement || {})[sid];
+      if (r && r.totalMs) {
+        renforcements.push({
+          seanceId: sess.id,
+          date: sess.date,
+          personne: initiales,
+          atelier,
+          intervenant,
+          minutes: Math.round(r.totalMs / 60000),
+        });
+      }
+    });
+  });
+
+  const crises = (donnees.crises || []).map((c) => {
+    const table = (donnees._idVersInitiales || {})[c.source] || {};
+    return {
+      date: c.date,
+      personne: table[c.studentId] || 'Non renseignée',
+      atelier: nomAtelier(donnees, c.source, c.atelierId),
+      type: (c.kind || 'crise') === 'abc' ? 'Observation' : 'Crise',
+      intensite: c.intensite ? `${c.intensite} · ${INTENSITES[c.intensite].label}` : 'Non renseignée',
+      minutes: Math.round((c.durationMs || 0) / 60000),
+    };
+  });
+
+  return { cotations, crises, renforcements };
+}
+
+const TYPES_COTATION = {
+  trials: 'Essai par essai', probe: 'Probe', occurrence: 'Par occurrence',
+  timer: 'Timer', interval: 'Niveau par intervalle', chaining: 'Chaînage',
+  latency: 'Latence', balance: 'Balance Program',
+};
+
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
+/* --- Temps de renforcement ---
+   Relevé par personne et par séance. Le temps d'activité est déduit de la
+   durée réelle de la séance, pauses comprises. */
+function renforcementsDe(donnees, initiales) {
+  const releves = [];
+  donnees.seances.forEach((se) => {
+    const sid = idPourSource(donnees, se.source, initiales);
+    if (!sid || !(se.studentIds || []).includes(sid)) return;
+    const r = (se.reinforcement || {})[sid];
+    const renfoMs = (r && r.totalMs) || 0;
+    const dureeMs = se.endedAt && se.startedAt ? Math.max(0, se.endedAt - se.startedAt) : 0;
+    releves.push({
+      date: se.date,
+      renfoMin: Math.round(renfoMs / 60000),
+      dureeMin: Math.round(dureeMs / 60000),
+      activiteMin: Math.max(0, Math.round((dureeMs - renfoMs) / 60000)),
+      part: dureeMs ? Math.round((renfoMs / dureeMs) * 100) : 0,
+    });
+  });
+  return releves.sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
 const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
+
+/* ==================== Navigation par balayage ====================
+   Sur mobile, passer d'un onglet à l'autre au doigt. Les zones qui défilent
+   déjà horizontalement — tableaux, graphiques — gardent la priorité, sinon
+   le balayage volerait leur geste. */
+function gereDejaLeGeste(cible) {
+  let n = cible;
+  while (n && n !== document.body) {
+    if (n.dataset && n.dataset.noSwipe !== undefined) return true;
+    const t = n.tagName;
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return true;
+    if (n.scrollWidth > n.clientWidth + 4) {
+      const st = window.getComputedStyle(n);
+      if (/(auto|scroll)/.test(st.overflowX)) return true;
+    }
+    n = n.parentElement;
+  }
+  return false;
+}
+
+
+/* Balayage horizontal entre onglets, pour l'usage mobile.
+   Les zones marquées data-no-swipe (tableaux, graphiques) gardent la main :
+   sans cela, faire défiler un tableau large changerait de page. */
+function useBalayage(onGauche, onDroite) {
+  const ref = useRef(null);
+  const etat = useRef({ x: 0, y: 0, actif: false });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+
+    const debut = (e) => {
+      const t = e.touches[0];
+      etat.current = { x: t.clientX, y: t.clientY, actif: !gereDejaLeGeste(e.target) };
+    };
+    const fin = (e) => {
+      if (!etat.current.actif) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - etat.current.x;
+      const dy = t.clientY - etat.current.y;
+      etat.current.actif = false;
+      // Geste franc et nettement horizontal, sinon on laisse défiler
+      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+      if (dx < 0) onGauche();
+      else onDroite();
+    };
+
+    el.addEventListener('touchstart', debut, { passive: true });
+    el.addEventListener('touchend', fin, { passive: true });
+    return () => {
+      el.removeEventListener('touchstart', debut);
+      el.removeEventListener('touchend', fin);
+    };
+  }, [onGauche, onDroite]);
+
+  return ref;
+}
 
 /* ==================== Composants de base ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
@@ -710,6 +866,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 /* ==================== Tableau de bord ==================== */
 function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne, onOuvrirCrises }) {
   const [unite, setUnite] = useState('nombre');
+  const [etatOuvert, setEtatOuvert] = useState(null);
 
   const recentes = lignes
     .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }))
@@ -766,20 +923,46 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
             <Target size={14} style={{ color: INK_SOFT }} />
             <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Objectifs suivis</span>
           </div>
-          <div className="flex flex-wrap gap-4">
-            {['acquis', 'bientot', 'plateau', 'en_cours'].map((e) => {
+          <div className="flex flex-wrap gap-2">
+            {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => {
               const n = compte(e);
               const tot = lignes.length || 1;
+              const on = etatOuvert === e;
               return (
-                <div key={e} className="min-w-[68px]">
+                <button key={e} onClick={() => setEtatOuvert(on ? null : e)} disabled={!n}
+                  className="min-w-[74px] rounded-xl px-2.5 py-2 border text-left disabled:opacity-40"
+                  style={{ borderColor: on ? ETATS[e].color : BORDER, backgroundColor: on ? `${ETATS[e].color}14` : 'transparent' }}>
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>
                     {unite === 'pct' ? `${Math.round((n / tot) * 100)} %` : n}
                   </div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
-                </div>
+                </button>
               );
             })}
           </div>
+
+          {etatOuvert && (
+            <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+                {ETATS[etatOuvert].label} — appuyez sur une ligne pour ouvrir la fiche
+              </div>
+              <div className="space-y-1.5">
+                {lignes.filter((l) => l.etat === etatOuvert).map((l, i) => (
+                  <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
+                    className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
+                    style={{ backgroundColor: PAPER }}>
+                    <span className="text-sm min-w-0 break-words">
+                      <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
+                      {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
+                    </span>
+                    <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: ETATS[etatOuvert].color }}>
+                      {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
 
         <button onClick={onOuvrirCrises} className="rounded-2xl border p-4 text-left"
@@ -1417,6 +1600,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'bilan', l: 'Bilan', icone: Target },
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
+    { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
+          { k: 'renfo', l: 'Renforcement', icone: Gift },
+          { k: 'renfo', l: 'Renforcement', icone: Gift },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
           const Icone = v.icone;
@@ -1532,6 +1718,155 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         )
       )}
 
+      {vue === 'renfo' && (() => {
+        const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
+        if (!releves.length) return <Empty>Aucune séance sur cette période.</Empty>;
+        const avecRenfo = releves.filter((r) => r.renfoMin > 0);
+        const moyenneRenfo = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.renfoMin, 0) / avecRenfo.length) : 0;
+        const moyennePart = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.part, 0) / avecRenfo.length) : 0;
+        const totalRenfo = releves.reduce((a, r) => a + r.renfoMin, 0);
+        const graphe = releves.map((r) => ({
+          label: new Date(r.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+          Renforcement: r.renfoMin,
+          Activité: r.activiteMin,
+        }));
+        return (
+          <>
+            <Card className="mb-3">
+              <div className="flex flex-wrap gap-5">
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenneRenfo} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance avec renforcement</div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyennePart} %</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>du temps de séance</div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>au total sur la période</div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{avecRenfo.length}/{releves.length}</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>séances avec renforcement</div>
+                </div>
+              </div>
+              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                La moyenne ne porte que sur les séances où un renforcement a été relevé : y inclure
+                les autres la tirerait vers zéro et masquerait la réalité des séances concernées.
+              </p>
+            </Card>
+
+            <Card>
+              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+                Répartition du temps de séance, séance par séance
+              </div>
+              <div style={{ height: 260 }} data-no-swipe>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
+                    <CartesianGrid stroke={BORDER} vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                    <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="Activité" stackId="t" fill={INK} isAnimationActive={false} />
+                    <Bar dataKey="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+          </>
+        );
+      })()}
+
+      {vue === 'renfo' && (() => {
+        const table = {};
+        donnees.sources.forEach((src) => {
+          const sid = idPourSource(donnees, src, personne);
+          if (sid) table[src] = sid;
+        });
+        const points = donnees.seances
+          .filter((se) => dansPeriode(se.date, periode))
+          .map((se) => {
+            const sid = table[se.source];
+            const r = sid && (se.reinforcement || {})[sid];
+            if (!sid || !(se.studentIds || []).includes(sid)) return null;
+            return {
+              date: se.date,
+              minutes: r && r.totalMs ? Math.round(r.totalMs / 60000) : 0,
+              seance: Math.round(Math.max(0, (se.endedAt || 0) - (se.startedAt || 0)) / 60000),
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        const avecRenfo = points.filter((p) => p.minutes > 0);
+        const moyenne = points.length ? Math.round(points.reduce((a, p) => a + p.minutes, 0) / points.length) : 0;
+        const moyenneQuandPresent = avecRenfo.length
+          ? Math.round(avecRenfo.reduce((a, p) => a + p.minutes, 0) / avecRenfo.length) : 0;
+        const totalRenfo = points.reduce((a, p) => a + p.minutes, 0);
+        const totalSeance = points.reduce((a, p) => a + p.seance, 0);
+        const part = totalSeance ? Math.round((totalRenfo / totalSeance) * 100) : 0;
+
+        if (!points.length) return <Empty>Aucune séance pour cette personne sur la période.</Empty>;
+
+        const donneesGraphe = points.map((p) => ({
+          label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+          renforcement: p.minutes,
+          activite: Math.max(0, p.seance - p.minutes),
+        }));
+
+        return (
+          <div>
+            <Card className="mb-3">
+              <div className="flex flex-wrap gap-5">
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenne} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance</div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{moyenneQuandPresent} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>
+                    quand il y en a ({avecRenfo.length}/{points.length} séances)
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{part} %</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>du temps de séance</div>
+                </div>
+                <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>au total</div>
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+                Par séance : temps de renforcement et temps d'activité
+              </div>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={donneesGraphe} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                    <CartesianGrid stroke={BORDER} vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                    <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="activite" name="Activité" stackId="t" fill={INK} isAnimationActive={false} />
+                    <Bar dataKey="renforcement" name="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                Une séance sans renforcement compte comme zéro dans la moyenne générale : c'est ce qui
+                la distingue de la moyenne « quand il y en a », calculée sur les seules séances concernées.
+              </p>
+            </Card>
+          </div>
+        );
+      })()}
+
       {vue === 'croisement' && (
         croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
           <Card>
@@ -1559,6 +1894,450 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           </Card>
         )
       )}
+    </div>
+  );
+}
+
+/* ==================== Explorateur croisé ====================
+   L'équivalent d'un tableau croisé dynamique : le cadre choisit lui-même les
+   deux axes et la mesure, sans que ces croisements aient été prévus à
+   l'avance. C'est ce qui manquait pour se passer d'Excel. */
+const BASES = [
+  { k: 'cotations', label: 'Cotations', mesures: [
+    { k: 'nombre', label: 'Nombre de cotations' },
+    { k: 'moyenne', label: 'Résultat moyen (%)' },
+    { k: 'min', label: 'Résultat le plus bas (%)' },
+    { k: 'max', label: 'Résultat le plus haut (%)' },
+  ], dims: ['personne', 'atelier', 'objectif', 'type', 'phase', 'source'] },
+  { k: 'crises', label: 'Crises et observations', mesures: [
+    { k: 'nombre', label: "Nombre d'enregistrements" },
+    { k: 'moyenne', label: 'Durée moyenne (min)' },
+    { k: 'somme', label: 'Durée totale (min)' },
+  ], dims: ['personne', 'atelier', 'nature', 'intensite', 'fonction', 'antecedent', 'comportement', 'consequence', 'source'] },
+  { k: 'renforcement', label: 'Renforcement', mesures: [
+    { k: 'somme', label: 'Temps total (min)' },
+    { k: 'moyenne', label: 'Temps moyen par séance (min)' },
+    { k: 'nombre', label: 'Nombre de séances' },
+  ], dims: ['personne', 'atelier', 'source'] },
+];
+
+const LIBELLES_DIM = {
+  personne: 'Personne', atelier: 'Atelier', objectif: 'Objectif', type: 'Type de cotation',
+  phase: 'Phase', source: 'Tablette', nature: 'Nature', intensite: 'Intensité',
+  fonction: 'Fonction', antecedent: 'Antécédent', comportement: 'Comportement',
+  consequence: 'Conséquence', jour: 'Jour', semaine: 'Semaine', mois: 'Mois', aucune: 'Aucune',
+};
+const DIMS_TEMPS = ['jour', 'semaine', 'mois'];
+
+const valeurDim = (fait, dim) => {
+  if (DIMS_TEMPS.includes(dim)) return etiquetteAgregation(cleAgregation(fait.date, dim), dim);
+  if (dim === 'aucune') return 'Total';
+  return fait[dim] == null ? '—' : String(fait[dim]);
+};
+
+function ExplorateurScreen({ donnees, periode, setPeriode }) {
+  const [base, setBase] = useState('cotations');
+  const [dimLigne, setDimLigne] = useState('personne');
+  const [dimColonne, setDimColonne] = useState('mois');
+  const [mesure, setMesure] = useState('moyenne');
+
+  const config = BASES.find((b) => b.k === base);
+  const dimsDispo = [...config.dims, ...DIMS_TEMPS, 'aucune'];
+  const faits = useMemo(() => construireFaits(donnees, base, periode), [donnees, base, periode]);
+
+  /* Croisement : lignes × colonnes, avec totaux sur les deux axes */
+  const lignesCles = [];
+  const colonnesCles = [];
+  const cellules = new Map();
+  faits.forEach((f) => {
+    const l = valeurDim(f, dimLigne);
+    const c = valeurDim(f, dimColonne);
+    if (!lignesCles.includes(l)) lignesCles.push(l);
+    if (!colonnesCles.includes(c)) colonnesCles.push(c);
+    const cle = `${l}|||${c}`;
+    if (!cellules.has(cle)) cellules.set(cle, []);
+    cellules.get(cle).push(f.valeur);
+  });
+
+  const trierCles = (cles, dim) =>
+    DIMS_TEMPS.includes(dim)
+      ? cles.slice().sort((a, b) => {
+          const f = (e) => faits.find((x) => valeurDim(x, dim) === e);
+          return cleAgregation(f(a).date, dim) - cleAgregation(f(b).date, dim);
+        })
+      : cles.slice().sort((a, b) => a.localeCompare(b, 'fr'));
+
+  const L = trierCles(lignesCles, dimLigne);
+  const C = trierCles(colonnesCles, dimColonne);
+
+  const cellule = (l, c) => agreger(cellules.get(`${l}|||${c}`) || [], mesure);
+  const totalLigne = (l) => agreger(faits.filter((f) => valeurDim(f, dimLigne) === l).map((f) => f.valeur), mesure);
+  const totalColonne = (c) => agreger(faits.filter((f) => valeurDim(f, dimColonne) === c).map((f) => f.valeur), mesure);
+  const totalGeneral = agreger(faits.map((f) => f.valeur), mesure);
+
+  /* Intensité de fond proportionnelle : les valeurs fortes sautent aux yeux */
+  const toutes = L.flatMap((l) => C.map((c) => cellule(l, c))).filter((v) => v != null);
+  const maxi = toutes.length ? Math.max(...toutes) : 1;
+  const fond = (v) => (v == null || maxi <= 0 ? 'transparent' : `rgba(26, 52, 92, ${0.05 + (v / maxi) * 0.3})`);
+
+  function exporterCsv() {
+    const sep = ';';
+    const lignesCsv = [[LIBELLES_DIM[dimLigne], ...C, 'Total'].join(sep)];
+    L.forEach((l) => lignesCsv.push([l, ...C.map((c) => cellule(l, c) ?? ''), totalLigne(l) ?? ''].join(sep)));
+    lignesCsv.push(['Total', ...C.map((c) => totalColonne(c) ?? ''), totalGeneral ?? ''].join(sep));
+    /* Le BOM permet à Excel d'ouvrir le fichier avec les accents corrects */
+    const blob = new Blob(['\uFEFF' + lignesCsv.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `croisement-${base}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  return (
+    <div>
+      <Card className="mb-3">
+        <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Sur quoi porter l'analyse</div>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {BASES.map((b) => (
+            <Chip key={b.k} label={b.label} on={base === b.k}
+              onClick={() => {
+                setBase(b.k);
+                setMesure(b.mesures[0].k);
+                if (!b.dims.includes(dimLigne) && !DIMS_TEMPS.includes(dimLigne)) setDimLigne(b.dims[0]);
+                if (!b.dims.includes(dimColonne) && !DIMS_TEMPS.includes(dimColonne)) setDimColonne('mois');
+              }} />
+          ))}
+        </div>
+
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
+            <select value={dimLigne} onChange={(e) => setDimLigne(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {dimsDispo.map((d) => <option key={d} value={d}>{LIBELLES_DIM[d]}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
+            <select value={dimColonne} onChange={(e) => setDimColonne(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {dimsDispo.map((d) => <option key={d} value={d}>{LIBELLES_DIM[d]}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mesure</div>
+            <select value={mesure} onChange={(e) => setMesure(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {config.mesures.map((m) => <option key={m.k} value={m.k}>{m.label}</option>)}
+            </select>
+          </div>
+        </div>
+      </Card>
+
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+
+      {faits.length === 0 ? (
+        <Empty>Aucune donnée sur cette période.</Empty>
+      ) : (
+        <Card>
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span className="text-xs" style={{ color: INK_SOFT }}>
+              {faits.length} élément{faits.length !== 1 ? 's' : ''} · {config.mesures.find((m) => m.k === mesure).label}
+            </span>
+            <Btn variant="outline" onClick={exporterCsv} className="ml-auto text-xs py-1.5">
+              <Download size={14} /> Exporter en CSV
+            </Btn>
+          </div>
+
+          <div style={{ overflowX: 'auto' }} data-no-swipe>
+            <table className="text-sm" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  <th className="text-left px-2 py-2 whitespace-nowrap"
+                    style={{ borderBottom: `2px solid ${INK}`, color: INK_SOFT, position: 'sticky', left: 0, backgroundColor: CARD }}>
+                    {LIBELLES_DIM[dimLigne]}
+                  </th>
+                  {C.map((c) => (
+                    <th key={c} className="text-right px-2 py-2 whitespace-nowrap"
+                      style={{ borderBottom: `2px solid ${INK}`, color: INK_SOFT }}>{c}</th>
+                  ))}
+                  <th className="text-right px-2 py-2 whitespace-nowrap"
+                    style={{ borderBottom: `2px solid ${INK}`, color: INK, fontWeight: 600 }}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {L.map((l) => (
+                  <tr key={l}>
+                    <td className="px-2 py-1.5 whitespace-nowrap"
+                      style={{ borderBottom: `1px solid ${BORDER}`, position: 'sticky', left: 0, backgroundColor: CARD }}>{l}</td>
+                    {C.map((c) => {
+                      const v = cellule(l, c);
+                      return (
+                        <td key={c} className="px-2 py-1.5 text-right"
+                          style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO, backgroundColor: fond(v) }}>
+                          {v == null ? '' : v}
+                        </td>
+                      );
+                    })}
+                    <td className="px-2 py-1.5 text-right"
+                      style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO, fontWeight: 600 }}>
+                      {totalLigne(l) ?? ''}
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="px-2 py-2 whitespace-nowrap"
+                    style={{ borderTop: `2px solid ${INK}`, fontWeight: 600, position: 'sticky', left: 0, backgroundColor: CARD }}>Total</td>
+                  {C.map((c) => (
+                    <td key={c} className="px-2 py-2 text-right"
+                      style={{ borderTop: `2px solid ${INK}`, fontFamily: F_MONO, fontWeight: 600 }}>{totalColonne(c) ?? ''}</td>
+                  ))}
+                  <td className="px-2 py-2 text-right"
+                    style={{ borderTop: `2px solid ${INK}`, fontFamily: F_MONO, fontWeight: 700 }}>{totalGeneral ?? ''}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p className="text-xs mt-3" style={{ color: INK_SOFT }}>
+            Les totaux sont recalculés sur l'ensemble des éléments, pas additionnés depuis les
+            cellules : une moyenne de moyennes serait fausse dès que les effectifs diffèrent.
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ==================== Explorateur croisé ====================
+   Deux axes au choix et une mesure : c'est l'équivalent d'un tableau croisé
+   dynamique, sans quitter l'application ni prévoir la combinaison à l'avance. */
+const MESURES = [
+  { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte' },
+  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %' },
+  { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId' },
+  { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte' },
+  { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min' },
+  { k: 'renfo', label: 'Temps de renforcement', source: 'renforcements', agg: 'somme', champ: 'minutes', suffixe: ' min' },
+  { k: 'renfoMoyen', label: 'Renforcement moyen par séance', source: 'renforcements', agg: 'moyenne', champ: 'minutes', suffixe: ' min' },
+];
+
+const DIMENSIONS = [
+  { k: 'aucune', label: 'Aucune', get: () => 'Total' },
+  { k: 'personne', label: 'Personne', get: (f) => f.personne },
+  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné' },
+  { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—' },
+  { k: 'type', label: 'Type', get: (f) => f.type || '—' },
+  { k: 'phase', label: 'Phase', get: (f) => f.phase || '—' },
+  { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—' },
+  { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
+  { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
+  { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
+];
+
+function agreger(faits, mesure) {
+  if (!faits.length) return null;
+  if (mesure.agg === 'compte') return faits.length;
+  if (mesure.agg === 'distinct') return new Set(faits.map((f) => f[mesure.champ])).size;
+  const valeurs = faits.map((f) => f[mesure.champ]).filter((v) => v != null);
+  if (!valeurs.length) return null;
+  const somme = valeurs.reduce((a, b) => a + b, 0);
+  return mesure.agg === 'somme' ? Math.round(somme) : Math.round(somme / valeurs.length);
+}
+
+function ExplorerScreen({ donnees, periode, setPeriode }) {
+  const [ligneDim, setLigneDim] = useState('personne');
+  const [colonneDim, setColonneDim] = useState('semaine');
+  const [mesureK, setMesureK] = useState('autonomie');
+
+  const faits = useMemo(() => construireFaits(donnees), [donnees.seances, donnees.crises, donnees.sources, donnees._idVersInitiales]);
+  const mesure = MESURES.find((m) => m.k === mesureK);
+  const dimL = DIMENSIONS.find((d) => d.k === ligneDim);
+  const dimC = DIMENSIONS.find((d) => d.k === colonneDim);
+
+  const base = (faits[mesure.source] || []).filter((f) => dansPeriode(f.date, periode));
+
+  /* Construction du croisement */
+  const lignesCles = [];
+  const colonnesCles = [];
+  const cellules = new Map();
+  base.forEach((f) => {
+    const l = dimL.get(f);
+    const c = dimC.get(f);
+    if (!lignesCles.includes(l)) lignesCles.push(l);
+    if (!colonnesCles.includes(c)) colonnesCles.push(c);
+    const cle = `${l}||${c}`;
+    if (!cellules.has(cle)) cellules.set(cle, []);
+    cellules.get(cle).push(f);
+  });
+
+  /* Les dimensions temporelles se lisent dans l'ordre du calendrier, pas par
+     fréquence d'apparition. */
+  const trierTemps = (k, liste) => {
+    if (k === 'jour') return JOURS_SEMAINE.filter((j) => liste.includes(j));
+    if (k === 'semaine' || k === 'mois') {
+      const ordre = new Map();
+      base.forEach((f) => {
+        const e = DIMENSIONS.find((d) => d.k === k).get(f);
+        if (!ordre.has(e)) ordre.set(e, cleAgregation(f.date, k === 'mois' ? 'mois' : 'semaine'));
+      });
+      return liste.slice().sort((a, b) => ordre.get(a) - ordre.get(b));
+    }
+    return liste.slice().sort((a, b) => String(a).localeCompare(String(b), 'fr'));
+  };
+  const L = trierTemps(ligneDim, lignesCles);
+  const C = trierTemps(colonneDim, colonnesCles);
+
+  const valeurCellule = (l, c) => agreger(cellules.get(`${l}||${c}`) || [], mesure);
+  const totalLigne = (l) => agreger(base.filter((f) => dimL.get(f) === l), mesure);
+  const totalColonne = (c) => agreger(base.filter((f) => dimC.get(f) === c), mesure);
+  const totalGeneral = agreger(base, mesure);
+
+  /* Échelle de couleur : repérer d'un coup d'œil les cases fortes */
+  const toutes = L.flatMap((l) => C.map((c) => valeurCellule(l, c))).filter((v) => v != null);
+  const maxi = toutes.length ? Math.max(...toutes) : 0;
+
+  function exporterCsv() {
+    const sep = ';';
+    const echapper = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const lignes = [[dimL.label, ...C, 'Total'].map(echapper).join(sep)];
+    L.forEach((l) => {
+      lignes.push([l, ...C.map((c) => valeurCellule(l, c)), totalLigne(l)].map(echapper).join(sep));
+    });
+    lignes.push(['Total', ...C.map((c) => totalColonne(c)), totalGeneral].map(echapper).join(sep));
+    const blob = new Blob(['\uFEFF' + lignes.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `croisement-${mesure.k}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  if (!donnees.seances.length) return <Empty>Importez une sauvegarde pour explorer les données.</Empty>;
+
+  return (
+    <div>
+      <Card className="mb-3">
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mesure</div>
+            <select value={mesureK} onChange={(e) => setMesureK(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {MESURES.map((m) => <option key={m.k} value={m.k}>{m.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
+            <select value={ligneDim} onChange={(e) => setLigneDim(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
+            <select value={colonneDim} onChange={(e) => setColonneDim(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+            </select>
+          </div>
+        </div>
+        <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+          Toutes les dimensions ne s'appliquent pas à toutes les mesures : croiser un objectif
+          avec un nombre de crises n'a pas de sens, la colonne restera vide.
+        </p>
+      </Card>
+
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+
+      <Card className="mb-3">
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+            {mesure.label} · {libellePeriode(periode)}
+          </span>
+          <Btn variant="outline" onClick={exporterCsv} disabled={!L.length} className="text-xs py-1.5">
+            <Download size={14} /> CSV
+          </Btn>
+        </div>
+
+        {L.length === 0 ? (
+          <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucune donnée pour cette combinaison.</p>
+        ) : (
+          <div data-no-swipe style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto' }}>
+            <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  <th className="text-left px-2 py-2 whitespace-nowrap"
+                    style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0, left: 0, zIndex: 2, color: INK_SOFT }}>
+                    {dimL.label}
+                  </th>
+                  {C.map((c) => (
+                    <th key={c} className="text-right px-2 py-2 whitespace-nowrap"
+                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0, color: INK_SOFT }}>
+                      {c}
+                    </th>
+                  ))}
+                  <th className="text-right px-2 py-2 whitespace-nowrap"
+                    style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0, color: INK }}>
+                    Total
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {L.map((l) => (
+                  <tr key={l}>
+                    <td className="px-2 py-1.5 whitespace-nowrap font-medium"
+                      style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0 }}>
+                      {l}
+                    </td>
+                    {C.map((c) => {
+                      const v = valeurCellule(l, c);
+                      const intensite = v != null && maxi ? v / maxi : 0;
+                      return (
+                        <td key={c} className="px-2 py-1.5 text-right whitespace-nowrap"
+                          style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO,
+                            backgroundColor: v == null ? 'transparent' : `rgba(26, 52, 92, ${0.05 + intensite * 0.25})` }}>
+                          {v == null ? '' : `${v}${mesure.suffixe || ''}`}
+                        </td>
+                      );
+                    })}
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap font-semibold"
+                      style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO }}>
+                      {totalLigne(l) == null ? '' : `${totalLigne(l)}${mesure.suffixe || ''}`}
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="px-2 py-2 whitespace-nowrap font-semibold"
+                    style={{ borderTop: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0 }}>
+                    Total
+                  </td>
+                  {C.map((c) => (
+                    <td key={c} className="px-2 py-2 text-right whitespace-nowrap font-semibold"
+                      style={{ borderTop: `2px solid ${BORDER}`, fontFamily: F_MONO }}>
+                      {totalColonne(c) == null ? '' : `${totalColonne(c)}${mesure.suffixe || ''}`}
+                    </td>
+                  ))}
+                  <td className="px-2 py-2 text-right whitespace-nowrap font-semibold"
+                    style={{ borderTop: `2px solid ${BORDER}`, fontFamily: F_MONO, color: INK }}>
+                    {totalGeneral == null ? '' : `${totalGeneral}${mesure.suffixe || ''}`}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <p className="text-xs" style={{ color: INK_SOFT }}>
+        Une moyenne de moyennes n'est pas une moyenne générale : le total d'une ligne est recalculé
+        sur l'ensemble de ses cotations, il ne correspond donc pas à la moyenne des cases affichées.
+      </p>
     </div>
   );
 }
@@ -1742,17 +2521,24 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 /* ==================== Lecture d'un rapport Excel ====================
    Le cadre reçoit deux types de fichiers : la sauvegarde qui alimente
    l'analyse, et le rapport tableur destiné à la lecture. Plutôt que de le
-   refuser, on l'affiche ici — sans l'intégrer aux données, puisqu'il ne
-   contient pas les critères d'acquisition. */
+   renvoyer vers Excel, on l'ouvre ici avec le tri et les filtres qu'il en
+   attendrait. */
 function LecteurExcel() {
   const [classeur, setClasseur] = useState(null);
   const [feuille, setFeuille] = useState(null);
   const [erreur, setErreur] = useState('');
-  const champ = useRef(null);
+  const [tri, setTri] = useState({ colonne: null, sens: 1 });
+  const [filtres, setFiltres] = useState({});
+  const [recherche, setRecherche] = useState('');
 
   async function ouvrir(f) {
     if (!f) return;
     setErreur('');
+    setRecherche('');
+    setTri({ colonne: null, sens: 'asc' });
+    setTri({ colonne: null, sens: 1 });
+    setFiltres({});
+    setRecherche('');
     try {
       const buf = await f.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array' });
@@ -1760,15 +2546,59 @@ function LecteurExcel() {
       setClasseur({ nom: f.name, wb });
       setFeuille(wb.SheetNames[0]);
     } catch (e) {
-      setErreur("Fichier illisible. Attendu : un rapport Excel produit par DatABA.");
+      setErreur('Fichier illisible. Attendu : un rapport Excel produit par DatABA.');
     }
   }
 
-  const lignes = classeur && feuille
+  const brut = classeur && feuille
     ? XLSX.utils.sheet_to_json(classeur.wb.Sheets[feuille], { header: 1, defval: '' })
     : [];
-  const entetes = lignes[0] || [];
-  const corps = lignes.slice(1);
+  const entetes = brut[0] || [];
+  const corps = brut.slice(1);
+
+  /* Valeurs distinctes par colonne, pour proposer un filtre lorsqu'elles sont
+     peu nombreuses — au-delà, une liste déroulante devient inutilisable. */
+  const valeursDistinctes = entetes.map((_, j) => {
+    const set = new Set(corps.map((r) => String(r[j] == null ? '' : r[j])));
+    return set.size <= 30 ? Array.from(set).sort((a, b) => a.localeCompare(b, 'fr')) : null;
+  });
+
+  let lignes = corps.filter((r) => {
+    if (recherche && !r.some((v) => String(v).toLowerCase().includes(recherche.toLowerCase()))) return false;
+    return Object.entries(filtres).every(([j, val]) => !val || String(r[j] == null ? '' : r[j]) === val);
+  });
+
+  if (tri.colonne != null) {
+    const j = tri.colonne;
+    lignes = lignes.slice().sort((a, b) => {
+      const x = a[j];
+      const y = b[j];
+      /* Un tri alphabétique sur des nombres placerait 10 avant 9 */
+      const nx = typeof x === 'number' ? x : parseFloat(String(x).replace(',', '.'));
+      const ny = typeof y === 'number' ? y : parseFloat(String(y).replace(',', '.'));
+      if (!Number.isNaN(nx) && !Number.isNaN(ny)) return (nx - ny) * tri.sens;
+      return String(x).localeCompare(String(y), 'fr') * tri.sens;
+    });
+  }
+
+  const basculerTri = (j) =>
+    setTri((t) => (t.colonne === j ? { colonne: j, sens: -t.sens } : { colonne: j, sens: 1 }));
+
+  function exporterFiltre() {
+    const sep = ';';
+    const contenu = [entetes.join(sep), ...lignes.map((r) => entetes.map((_, j) => String(r[j] == null ? '' : r[j])).join(sep))].join('\n');
+    const blob = new Blob(['\uFEFF' + contenu], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `extrait-${feuille}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const filtresActifs = Object.values(filtres).filter(Boolean).length + (recherche ? 1 : 0);
 
   return (
     <Card>
@@ -1777,10 +2607,10 @@ function LecteurExcel() {
         <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Lire un rapport Excel</span>
       </div>
       <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-        Pour consulter un rapport sans ouvrir Excel. Ce fichier n'est pas intégré à l'analyse :
+        Avec tri et filtres, sans ouvrir Excel. Ce fichier n'est pas intégré à l'analyse :
         il ne contient pas les critères d'acquisition.
       </p>
-      <input ref={champ} type="file" accept=".xlsx,.xls" onChange={(e) => ouvrir(e.target.files && e.target.files[0])}
+      <input type="file" accept=".xlsx,.xls" onChange={(e) => ouvrir(e.target.files && e.target.files[0])}
         className="w-full text-sm mb-2" />
       {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
 
@@ -1788,27 +2618,59 @@ function LecteurExcel() {
         <>
           <div className="flex flex-wrap gap-1.5 my-3">
             {classeur.wb.SheetNames.map((n) => (
-              <Chip key={n} label={n} on={feuille === n} onClick={() => setFeuille(n)} />
+              <Chip key={n} label={n} on={feuille === n}
+                onClick={() => { setFeuille(n); setTri({ colonne: null, sens: 1 }); setFiltres({}); }} />
             ))}
           </div>
-          <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-            {corps.length} ligne{corps.length !== 1 ? 's' : ''}
-            {corps.length > 200 && ' — les 200 premières sont affichées'}
+
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
+              placeholder="Rechercher dans toutes les colonnes"
+              className="flex-1 min-w-[200px] rounded-xl border px-3 py-2 text-sm bg-transparent"
+              style={{ borderColor: BORDER, color: INK }} />
+            {filtresActifs > 0 && (
+              <Btn variant="ghost" onClick={() => { setFiltres({}); setRecherche(''); }} className="text-xs py-1.5">
+                <X size={13} /> Effacer les filtres ({filtresActifs})
+              </Btn>
+            )}
+            <Btn variant="outline" onClick={exporterFiltre} className="text-xs py-1.5">
+              <Download size={13} /> Exporter l'extrait
+            </Btn>
           </div>
-          <div style={{ overflowX: 'auto', maxHeight: 420, overflowY: 'auto' }}>
+
+          <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+            {lignes.length} ligne{lignes.length !== 1 ? 's' : ''}
+            {lignes.length !== corps.length && ` sur ${corps.length}`}
+            {lignes.length > 300 && ' — les 300 premières sont affichées'}
+          </div>
+
+          {/* Filtres par colonne, là où les valeurs sont assez peu nombreuses */}
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {entetes.map((h, j) => (valeursDistinctes[j] && valeursDistinctes[j].length > 1 ? (
+              <select key={j} value={filtres[j] || ''} onChange={(e) => setFiltres((f) => ({ ...f, [j]: e.target.value }))}
+                className="rounded-lg border px-2 py-1.5 text-xs bg-transparent"
+                style={{ borderColor: filtres[j] ? INK : BORDER, color: filtres[j] ? INK : INK_SOFT }}>
+                <option value="">{String(h)} : tout</option>
+                {valeursDistinctes[j].map((v) => <option key={v} value={v}>{v || '(vide)'}</option>)}
+              </select>
+            ) : null))}
+          </div>
+
+          <div style={{ overflowX: 'auto', maxHeight: 460, overflowY: 'auto' }} data-no-swipe>
             <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
               <thead>
                 <tr>
-                  {entetes.map((h, i) => (
-                    <th key={i} className="text-left px-2 py-1.5 whitespace-nowrap"
-                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: PAPER, position: 'sticky', top: 0, color: INK_SOFT }}>
-                      {String(h)}
+                  {entetes.map((h, j) => (
+                    <th key={j} onClick={() => basculerTri(j)}
+                      className="text-left px-2 py-1.5 whitespace-nowrap cursor-pointer select-none"
+                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: PAPER, position: 'sticky', top: 0, color: tri.colonne === j ? INK : INK_SOFT }}>
+                      {String(h)}{tri.colonne === j ? (tri.sens > 0 ? ' ▲' : ' ▼') : ''}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {corps.slice(0, 200).map((r, i) => (
+                {lignes.slice(0, 300).map((r, i) => (
                   <tr key={i}>
                     {entetes.map((_, j) => (
                       <td key={j} className="px-2 py-1 whitespace-nowrap" style={{ borderBottom: `1px solid ${BORDER}` }}>
@@ -1857,6 +2719,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       const backup = {
         students: Object.entries(table).map(([id, initials]) => ({ id, initials })),
         ateliers: Object.entries((paquet._ateliers || {})[src] || {}).map(([id, name]) => ({ id, name })),
+        intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
       };
@@ -1936,6 +2799,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       sources: donnees.sources,
       _idVersInitiales: donnees._idVersInitiales,
       _ateliers: donnees._ateliers,
+      _intervenants: donnees._intervenants,
       alias, commentaires,
     };
   }
@@ -2085,6 +2949,8 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         delete reste[src];
                         const ate = { ...(d._ateliers || {}) };
                         delete ate[src];
+                        const inter = { ...(d._intervenants || {}) };
+                        delete inter[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
@@ -2092,7 +2958,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
                         return {
                           ...d, seances, crises, sources: d.sources.filter((x) => x !== src),
-                          _idVersInitiales: reste, _ateliers: ate,
+                          _idVersInitiales: reste, _ateliers: ate, _intervenants: inter,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -2254,7 +3120,26 @@ export default function App() {
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide() });
 
-  const lignes = useMemo(() => construireLignes(donnees), [donnees]);
+  /* Le calcul ne dépend que des données analytiques. Sans cette séparation,
+     taper une lettre dans un commentaire de rapport relançait l'analyse de
+     tous les objectifs de tout le monde. */
+  const lignes = useMemo(
+    () => construireLignes(donnees),
+    [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales]
+  );
+
+  /* Balayage entre onglets, pour l'usage sur mobile */
+  const ORDRE_ONGLETS = ['bord', 'seances', 'personnes', 'crises', 'explorer', 'rapport', 'gestion'];
+  const allerA = (pas) => {
+    const i = ORDRE_ONGLETS.indexOf(tab);
+    const j = Math.min(ORDRE_ONGLETS.length - 1, Math.max(0, i + pas));
+    if (j !== i) setTab(ORDRE_ONGLETS[j]);
+  };
+  const balayage = useBalayage({
+    onGauche: () => allerA(1),
+    onDroite: () => allerA(-1),
+    actif: !verrouille && loaded,
+  });
 
   function notify(m) {
     setToast(m);
@@ -2402,13 +3287,20 @@ export default function App() {
     { k: 'seances', l: 'Séances', icone: CalendarDays },
     { k: 'personnes', l: 'Personnes', icone: Users },
     { k: 'crises', l: 'Crises', icone: AlertTriangle },
+    { k: 'explorer', l: 'Explorer', icone: Table2 },
     { k: 'rapport', l: 'Rapport', icone: FileText },
     { k: 'gestion', l: 'Gestion', icone: Settings },
   ];
 
   return (
     <div className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
-      <div className="max-w-5xl mx-auto px-6 py-6">
+      <div
+        className="max-w-5xl mx-auto px-6 py-6"
+        style={{
+          transform: balayage.decalage ? `translateX(${balayage.decalage}px)` : 'none',
+          transition: balayage.enCours ? 'none' : 'transform .2s ease-out',
+        }}
+      >
         <div className="flex items-baseline justify-between gap-4 mb-4 no-print">
           <h1 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
           <span className="text-xs" style={{ color: INK_SOFT }}>
@@ -2456,6 +3348,18 @@ export default function App() {
             <>
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+            </>
+          )}
+          {tab === 'explorer' && (
+            <>
+              <SectionTitle icone={Table2} sub="Croisez ce que vous voulez : les axes et la mesure sont libres.">Explorer</SectionTitle>
+              <ExplorateurScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+            </>
+          )}
+          {tab === 'explorer' && (
+            <>
+              <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
+              <ExplorerScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
             </>
           )}
           {tab === 'gestion' && (
