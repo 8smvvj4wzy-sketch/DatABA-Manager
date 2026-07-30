@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
-  Lock, Download, Upload, TrendingUp, AlertTriangle, Target,
+  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -127,7 +127,7 @@ const SECU_KEY = `${PREFIXE}securite`;
 
 const VIDE = {
   personnes: [], seances: [], crises: [], sources: [],
-  _idVersInitiales: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
+  _idVersInitiales: {}, _ateliers: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
 };
 
 function normaliser(d) {
@@ -178,6 +178,7 @@ function fusionnerImport(actuel, backup, nomSource) {
   });
 
   const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
+  const ateliersSource = Object.fromEntries((backup.ateliers || []).map((a) => [a.id, a.name]));
 
   const dejaLa = new Set(actuel.seances.map((s) => s.id));
   const nouvelles = (backup.sessions || []).filter((s) => !dejaLa.has(s.id));
@@ -197,6 +198,7 @@ function fusionnerImport(actuel, backup, nomSource) {
     crises,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
+    _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
   };
@@ -338,6 +340,7 @@ function construireLignes(donnees) {
   return lignes;
 }
 
+const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
 const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
@@ -705,7 +708,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 }
 
 /* ==================== Tableau de bord ==================== */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne }) {
+function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne, onOuvrirCrises }) {
   const [unite, setUnite] = useState('nombre');
 
   const recentes = lignes
@@ -779,10 +782,12 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne 
           </div>
         </Card>
 
-        <Card>
+        <button onClick={onOuvrirCrises} className="rounded-2xl border p-4 text-left"
+          style={{ borderColor: BORDER, backgroundColor: CARD }}>
           <div className="flex items-center gap-1.5 mb-3">
             <AlertTriangle size={14} style={{ color: INK_SOFT }} />
             <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Crises · {libellePeriode(periode)}</span>
+            <span className="text-xs ml-auto" style={{ color: INK }}>voir les graphiques →</span>
           </div>
           <div className="flex items-baseline gap-3 mb-2">
             <span className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{recentesCrises.length}</span>
@@ -811,7 +816,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne 
             </div>
           )}
           {!recentesCrises.length && <p className="text-xs" style={{ color: INK_SOFT }}>Aucune crise sur la période.</p>}
-        </Card>
+        </button>
       </div>
 
       <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
@@ -1060,6 +1065,131 @@ function SeancesScreen({ donnees }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* ==================== Crises ====================
+   Chaque répartition se lit en effectifs ou en pourcentage. Les crises sans
+   catégorie cochée n'apparaissent dans aucune barre : c'est voulu, une barre
+   « non renseigné » masquerait le fait qu'il manque de la saisie. */
+const JOURS_SEMAINE = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+
+function CrisesScreen({ donnees, periode, setPeriode }) {
+  const [unite, setUnite] = useState('nombre');
+  const [type, setType] = useState('crise');
+
+  const toutes = (donnees.crises || []).filter((c) => (type === 'tout' || (c.kind || 'crise') === type));
+  const retenues = toutes.filter((c) => dansPeriode(c.date, periode));
+
+  const compter = (valeurs) => {
+    const m = new Map();
+    valeurs.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  };
+  const total = retenues.length || 1;
+  const valeur = (n) => (unite === 'pct' ? Math.round((n / total) * 100) : n);
+  const suffixe = unite === 'pct' ? ' %' : '';
+
+  /* Occurrences par intensité : effectif brut, l'intensité étant une échelle */
+  const parIntensite = [1, 2, 3].map((n) => ({
+    label: `${n} · ${INTENSITES[n].label}`,
+    n: retenues.filter((c) => c.intensite === n).length,
+    couleur: INTENSITES[n].color,
+  }));
+  const notees = retenues.filter((c) => c.intensite).length;
+
+  /* Jour de la semaine : dans l'ordre du calendrier, pas par fréquence */
+  const parJour = JOURS_SEMAINE.map((j) => ({
+    label: j,
+    n: retenues.filter((c) => new Date(c.date).toLocaleDateString('fr-FR', { weekday: 'long' }) === j).length,
+  }));
+
+  const parAtelier = compter(retenues.map((c) => nomAtelier(donnees, c.source, c.atelierId)));
+  const parAntecedent = compter(retenues.flatMap((c) => c.antecedentTags || []));
+  const parComportement = compter(retenues.flatMap((c) => c.comportementTags || []));
+  const parConsequence = compter(retenues.flatMap((c) => c.consequenceTags || []));
+
+  /* Barres horizontales : les intitulés sont longs, un axe vertical les
+     tronquerait. */
+  const Barres = ({ titre, donnees: d, couleur, note }) => {
+    if (!d.length || d.every((x) => !x.n)) return null;
+    const max = Math.max(...d.map((x) => x.n)) || 1;
+    return (
+      <Card className="mb-3">
+        <div className="text-xs uppercase tracking-wide mb-1" style={{ color: INK_SOFT }}>{titre}</div>
+        {note && <p className="text-xs mb-2" style={{ color: INK_SOFT }}>{note}</p>}
+        <div className="space-y-2 mt-2">
+          {d.map((x, i) => (
+            <div key={i}>
+              <div className="flex items-center justify-between text-xs mb-0.5">
+                <span className="min-w-0 break-words pr-2">{x.label}</span>
+                <span className="shrink-0" style={{ fontFamily: F_MONO, color: INK_SOFT }}>
+                  {valeur(x.n)}{suffixe}
+                </span>
+              </div>
+              <div className="h-2 rounded-full" style={{ backgroundColor: PAPER }}>
+                <div style={{ width: `${(x.n / max) * 100}%`, height: '100%', borderRadius: 999, backgroundColor: x.couleur || couleur }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    );
+  };
+
+  const enListe = (paires) => paires.map(([label, n]) => ({ label, n }));
+
+  if (!(donnees.crises || []).length) {
+    return <Empty>Aucune crise ni observation importée.</Empty>;
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="flex gap-1.5">
+          {[
+            { k: 'crise', l: 'Crises' },
+            { k: 'abc', l: 'Observations' },
+            { k: 'tout', l: 'Les deux' },
+          ].map((o) => (
+            <Chip key={o.k} label={`${o.l} (${(donnees.crises || []).filter((c) => o.k === 'tout' || (c.kind || 'crise') === o.k).length})`}
+              on={type === o.k} onClick={() => setType(o.k)} />
+          ))}
+        </div>
+        <div className="ml-auto"><BasculeUnite unite={unite} setUnite={setUnite} /></div>
+      </div>
+
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+
+      <Card className="mb-3">
+        <div className="flex flex-wrap items-baseline gap-4">
+          <span>
+            <span className="text-2xl font-semibold" style={{ fontFamily: F_MONO }}>{retenues.length}</span>
+            <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>
+              enregistrement{retenues.length !== 1 ? 's' : ''} sur {libellePeriode(periode)}
+            </span>
+          </span>
+          {notees > 0 && (
+            <span className="text-xs" style={{ color: INK_SOFT }}>
+              dont <span style={{ fontFamily: F_MONO }}>{notees}</span> avec une intensité renseignée
+            </span>
+          )}
+        </div>
+      </Card>
+
+      <Barres titre="Occurrences par intensité" donnees={parIntensite}
+        note={notees < retenues.length ? `${retenues.length - notees} enregistrement(s) sans intensité renseignée, non comptés ici.` : null} />
+      <Barres titre="Répartition par jour de la semaine" donnees={parJour} couleur={INK} />
+      <Barres titre="Répartition par atelier" donnees={enListe(parAtelier)} couleur={INK} />
+      <Barres titre="Antécédents" donnees={enListe(parAntecedent)} couleur={CRISE} />
+      <Barres titre="Comportements" donnees={enListe(parComportement)} couleur={CRISE} />
+      <Barres titre="Conséquences" donnees={enListe(parConsequence)} couleur={CRISE} />
+
+      <p className="text-xs" style={{ color: INK_SOFT }}>
+        Ces répartitions décrivent ce qui a été observé et coché. Elles orientent une hypothèse,
+        elles ne l'établissent pas : une analyse fonctionnelle reste du ressort du professionnel.
+      </p>
     </div>
   );
 }
@@ -1529,7 +1659,7 @@ function LecteurExcel() {
 }
 
 /* ==================== Gestion ==================== */
-function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onRetirerProtection, notify }) {
+function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify }) {
   const [fichier, setFichier] = useState(null);
   const [enveloppe, setEnveloppe] = useState(null);
   const [passphrase, setPassphrase] = useState('');
@@ -1539,6 +1669,11 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
   const [demandeCle, setDemandeCle] = useState(null);
   const [cleExport, setCleExport] = useState('');
   const [changement, setChangement] = useState(null);
+  const [avant, setAvant] = useState('');
+
+  const limiteAvant = avant ? new Date(`${avant}T00:00:00`) : null;
+  const nbAvant = limiteAvant ? donnees.seances.filter((x) => new Date(x.date) < limiteAvant).length : 0;
+  const nbCrisesAvant = limiteAvant ? donnees.crises.filter((x) => new Date(x.date) < limiteAvant).length : 0;
 
   function integrer(backup, nom) {
     onImported(fusionnerImport(donnees, backup, nom.replace(/\.json$/i, '')));
@@ -1553,6 +1688,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       const table = (paquet._idVersInitiales || {})[src] || {};
       const backup = {
         students: Object.entries(table).map(([id, initials]) => ({ id, initials })),
+        ateliers: Object.entries((paquet._ateliers || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
       };
@@ -1631,6 +1767,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       personnes, seances, crises,
       sources: donnees.sources,
       _idVersInitiales: donnees._idVersInitiales,
+      _ateliers: donnees._ateliers,
       alias, commentaires,
     };
   }
@@ -1732,6 +1869,137 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
             </div>
           </div>
         )}
+      </Card>
+
+      <Card className="mb-4">
+        <div className="flex items-center gap-1.5 mb-2">
+          <Trash2 size={16} style={{ color: INK_SOFT }} />
+          <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Purger les données</span>
+        </div>
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          Les suppressions sont définitives et ne touchent que ce poste : les tablettes conservent
+          leurs propres données, et une réimportation reste possible depuis le dossier partagé.
+          Exportez avant si vous voulez pouvoir revenir en arrière.
+        </p>
+
+        <div className="mb-3">
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Séances antérieures à une date</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input type="date" value={avant} onChange={(e) => setAvant(e.target.value)}
+              className="rounded-lg border px-2 py-1.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+            <Btn variant="outline" disabled={!avant || !nbAvant} className="text-sm"
+              onClick={() => {
+                if (window.confirm(`Supprimer ${nbAvant} séance(s) et ${nbCrisesAvant} crise(s) antérieures au ${new Date(`${avant}T00:00:00`).toLocaleDateString('fr-FR')} ?\n\nSuppression définitive.`)) {
+                  onPurger((d) => ({
+                    ...d,
+                    seances: d.seances.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
+                    crises: d.crises.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
+                  }));
+                }
+              }}>
+              Supprimer {avant ? `(${nbAvant} séances, ${nbCrisesAvant} crises)` : ''}
+            </Btn>
+          </div>
+        </div>
+
+        {donnees.sources.length > 0 && (
+          <div className="mb-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Tout ce qui vient d'une source</div>
+            <div className="flex flex-wrap gap-1.5">
+              {donnees.sources.map((src) => {
+                const n = donnees.seances.filter((x) => x.source === src).length;
+                return (
+                  <button key={src}
+                    onClick={() => {
+                      if (!window.confirm(`Supprimer la source « ${src} » ?\n\n${n} séance(s) et les crises associées seront retirées.\n\nSuppression définitive.`)) return;
+                      onPurger((d) => {
+                        const reste = { ...(d._idVersInitiales || {}) };
+                        delete reste[src];
+                        const ate = { ...(d._ateliers || {}) };
+                        delete ate[src];
+                        const seances = d.seances.filter((x) => x.source !== src);
+                        const crises = d.crises.filter((x) => x.source !== src);
+                        /* Une personne qui n'apparaît plus nulle part disparaît aussi */
+                        const encore = new Set();
+                        Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
+                        return {
+                          ...d, seances, crises, sources: d.sources.filter((x) => x !== src),
+                          _idVersInitiales: reste, _ateliers: ate,
+                          personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
+                        };
+                      });
+                    }}
+                    className="rounded-lg px-3 py-1.5 text-xs border"
+                    style={{ borderColor: BORDER, color: INK_SOFT }}>
+                    {src} ({n})
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {donnees.personnes.length > 0 && (
+          <div className="mb-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Tout ce qui concerne une personne</div>
+            <div className="flex flex-wrap gap-1.5">
+              {donnees.personnes.map((pp) => (
+                <button key={pp.initials}
+                  onClick={() => {
+                    if (!window.confirm(`Supprimer toutes les données de ${nomAffiche(donnees, pp.initials)} ?\n\nSes cotations dans les séances partagées seront retirées, ainsi que ses crises, libellés et commentaires.\n\nSuppression définitive.`)) return;
+                    onPurger((d) => {
+                      const idDe = (src) => idPourSource(d, src, pp.initials);
+                      const seances = d.seances
+                        .map((se) => {
+                          const sid = idDe(se.source);
+                          if (!sid || !(se.studentIds || []).includes(sid)) return se;
+                          const studentIds = se.studentIds.filter((x) => x !== sid);
+                          const selectedObjectives = { ...(se.selectedObjectives || {}) };
+                          delete selectedObjectives[sid];
+                          const data = { ...(se.data || {}) };
+                          delete data[sid];
+                          return { ...se, studentIds, selectedObjectives, data };
+                        })
+                        .filter((se) => (se.studentIds || []).length > 0);
+                      const crises = d.crises.filter((c) => ((d._idVersInitiales || {})[c.source] || {})[c.studentId] !== pp.initials);
+                      const alias = {
+                        personnes: { ...(d.alias.personnes || {}) },
+                        objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => k.split('|')[0] !== pp.initials)),
+                      };
+                      delete alias.personnes[pp.initials];
+                      const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
+                      const idVers = {};
+                      Object.entries(d._idVersInitiales || {}).forEach(([src, t]) => {
+                        idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
+                      });
+                      return {
+                        ...d, seances, crises, alias, commentaires,
+                        _idVersInitiales: idVers,
+                        personnes: d.personnes.filter((x) => x.initials !== pp.initials),
+                      };
+                    });
+                  }}
+                  className="rounded-lg px-3 py-1.5 text-xs border"
+                  style={{ borderColor: BORDER, color: INK_SOFT }}>
+                  {nomAffiche(donnees, pp.initials)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <button
+            onClick={() => {
+              if (window.confirm(`Effacer TOUTES les données consolidées ?\n\n${donnees.personnes.length} personne(s), ${donnees.seances.length} séance(s), ${donnees.crises.length} crise(s).\n\nSuppression définitive.`)
+                && window.confirm('Dernière confirmation : tout sera effacé sur ce poste.')) {
+                onPurger(() => ({ ...VIDE }));
+              }
+            }}
+            className="w-full text-xs py-2" style={{ color: NON_ACQUIS }}>
+            Effacer toutes les données consolidées
+          </button>
+        </div>
       </Card>
 
       <div className="mb-4"><LecteurExcel /></div>
@@ -1914,6 +2182,15 @@ export default function App() {
     setDonnees((d) => ({ ...d, commentaires: { ...(d.commentaires || {}), [cle]: valeur } }));
   }
 
+  /* Toute purge passe par ici : un seul point d'écriture, un seul message. */
+  function purger(transformer) {
+    setDonnees((d) => {
+      const suite = transformer(d);
+      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined };
+    });
+    notify('Données purgées');
+  }
+
   function onImported(fusion) {
     setDonnees(fusion);
     if (fusion.nbNouvellesSeances != null) {
@@ -1956,6 +2233,7 @@ export default function App() {
     { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
     { k: 'seances', l: 'Séances', icone: CalendarDays },
     { k: 'personnes', l: 'Personnes', icone: Users },
+    { k: 'crises', l: 'Crises', icone: AlertTriangle },
     { k: 'rapport', l: 'Rapport', icone: FileText },
     { k: 'gestion', l: 'Gestion', icone: Settings },
   ];
@@ -1989,7 +2267,8 @@ export default function App() {
           {tab === 'bord' && (
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
-              <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} onOuvrirPersonne={ouvrirPersonne} />
+              <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
+                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => setTab('crises')} />
             </>
           )}
           {tab === 'seances' && (
@@ -2005,11 +2284,18 @@ export default function App() {
                 periode={periode} setPeriode={setPeriode} onRapport={lancerRapport} />
             </>
           )}
+          {tab === 'crises' && (
+            <>
+              <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
+              <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+            </>
+          )}
           {tab === 'gestion' && (
             <>
               <SectionTitle sub="Import, export et sécurité." icone={Settings}>Gestion</SectionTitle>
               <GestionScreen donnees={donnees} securite={securite} onImported={onImported}
-                onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection} notify={notify} />
+                onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection}
+                onPurger={purger} notify={notify} />
             </>
           )}
         </div>
