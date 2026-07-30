@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  LayoutDashboard, CalendarDays, Users, FileText, Settings,
+  Lock, Download, Upload, TrendingUp, AlertTriangle, Target,
+  Radar as RadarIcon, Activity, Table2, Printer, X, Check,
+} from 'lucide-react';
+import * as XLSX from 'xlsx';
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area, ScatterChart, Scatter,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
@@ -364,11 +370,84 @@ function Chip({ label, on, onClick }) {
 function Empty({ children }) {
   return <div className="rounded-2xl border border-dashed px-4 py-8 text-center text-sm" style={{ borderColor: BORDER, color: INK_SOFT }}>{children}</div>;
 }
-function SectionTitle({ children, sub }) {
+function SectionTitle({ children, sub, icone: Icone }) {
   return (
     <div className="mb-4">
-      <h2 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>{children}</h2>
+      <h2 className="text-xl font-semibold flex items-center gap-2" style={{ fontFamily: F_DISPLAY }}>
+        {Icone && <Icone size={20} style={{ color: INK_SOFT }} />}{children}
+      </h2>
       {sub && <p className="text-sm mt-0.5" style={{ color: INK_SOFT }}>{sub}</p>}
+    </div>
+  );
+}
+
+/* Sélecteur de période, partagé par tous les écrans */
+function SelecteurPeriode({ periode, setPeriode, avecGranularite }) {
+  const p = periode;
+  const maj = (champs) => setPeriode({ ...p, ...champs });
+
+  return (
+    <Card className="mb-4">
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {[
+          { k: 'raccourci', l: 'Raccourci' },
+          { k: 'dates', l: 'Dates précises' },
+          { k: 'mois', l: 'Mois calendaires' },
+        ].map((m) => (
+          <Chip key={m.k} label={m.l} on={p.mode === m.k} onClick={() => maj({ mode: m.k })} />
+        ))}
+        <span className="text-xs ml-auto self-center" style={{ color: INK_SOFT }}>{libellePeriode(p)}</span>
+      </div>
+
+      {p.mode === 'raccourci' && (
+        <div className="flex flex-wrap gap-1.5">
+          {RACCOURCIS.map((r) => <Chip key={r.k} label={r.label} on={p.jours === r.k} onClick={() => maj({ jours: r.k })} />)}
+        </div>
+      )}
+
+      {p.mode === 'dates' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs" style={{ color: INK_SOFT }}>du</span>
+          <input type="date" value={p.debut} onChange={(e) => maj({ debut: e.target.value })}
+            className="rounded-lg border px-2 py-1.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+          <span className="text-xs" style={{ color: INK_SOFT }}>au</span>
+          <input type="date" value={p.fin} onChange={(e) => maj({ fin: e.target.value })}
+            className="rounded-lg border px-2 py-1.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+          {(p.debut || p.fin) && <Btn variant="ghost" onClick={() => maj({ debut: '', fin: '' })} className="text-xs py-1.5">Effacer</Btn>}
+        </div>
+      )}
+
+      {p.mode === 'mois' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs" style={{ color: INK_SOFT }}>de</span>
+          <input type="month" value={p.moisDebut} onChange={(e) => maj({ moisDebut: e.target.value })}
+            className="rounded-lg border px-2 py-1.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+          <span className="text-xs" style={{ color: INK_SOFT }}>à</span>
+          <input type="month" value={p.moisFin} onChange={(e) => maj({ moisFin: e.target.value })}
+            className="rounded-lg border px-2 py-1.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+          {(p.moisDebut || p.moisFin) && <Btn variant="ghost" onClick={() => maj({ moisDebut: '', moisFin: '' })} className="text-xs py-1.5">Effacer</Btn>}
+          <span className="text-xs w-full" style={{ color: INK_SOFT }}>
+            Le mois de fin est inclus en entier — « septembre à janvier » couvre bien tout le mois de janvier.
+          </span>
+        </div>
+      )}
+
+      {avecGranularite && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Regrouper par</span>
+          {GRANULARITES.map((g) => <Chip key={g.k} label={g.label} on={p.granularite === g.k} onClick={() => maj({ granularite: g.k })} />)}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* Bascule entre effectifs et pourcentages */
+function BasculeUnite({ unite, setUnite }) {
+  return (
+    <div className="flex gap-1.5">
+      <Chip label="Nombre" on={unite === 'nombre'} onClick={() => setUnite('nombre')} />
+      <Chip label="Pourcentage" on={unite === 'pct'} onClick={() => setUnite('pct')} />
     </div>
   );
 }
@@ -380,13 +459,83 @@ const STYLES_GRAPHIQUE = [
   { k: 'aire', label: 'Aire' },
   { k: 'points', label: 'Points' },
 ];
-const PERIODES = [
-  { k: 30, label: '1 mois' },
+/* --- Période d'observation ---
+   Trois façons de la définir : un raccourci glissant, une plage de dates au
+   jour près, ou une plage de mois calendaires — « de septembre à janvier »
+   ne se laisse pas exprimer en nombre de jours. */
+const RACCOURCIS = [
+  { k: 7, label: '7 jours' },
+  { k: 30, label: '30 jours' },
   { k: 90, label: '3 mois' },
   { k: 180, label: '6 mois' },
   { k: 365, label: '1 an' },
   { k: 0, label: 'Tout' },
 ];
+const GRANULARITES = [
+  { k: 'jour', label: 'Jour' },
+  { k: 'semaine', label: 'Semaine' },
+  { k: 'mois', label: 'Mois' },
+];
+
+const periodeVide = () => ({ mode: 'raccourci', jours: 30, debut: '', fin: '', moisDebut: '', moisFin: '', granularite: 'jour' });
+
+/* Bornes effectives, en millisecondes. null = pas de borne. */
+function bornesDe(p) {
+  if (!p) return { min: null, max: null };
+  if (p.mode === 'dates') {
+    return {
+      min: p.debut ? new Date(`${p.debut}T00:00:00`).getTime() : null,
+      max: p.fin ? new Date(`${p.fin}T23:59:59`).getTime() : null,
+    };
+  }
+  if (p.mode === 'mois') {
+    let min = null, max = null;
+    if (p.moisDebut) min = new Date(`${p.moisDebut}-01T00:00:00`).getTime();
+    if (p.moisFin) {
+      const [a, m] = p.moisFin.split('-').map(Number);
+      max = new Date(a, m, 0, 23, 59, 59).getTime(); // dernier jour du mois
+    }
+    return { min, max };
+  }
+  return { min: p.jours ? Date.now() - p.jours * 86400000 : null, max: null };
+}
+const dansPeriode = (date, p) => {
+  const { min, max } = bornesDe(p);
+  const t = new Date(date).getTime();
+  return (min == null || t >= min) && (max == null || t <= max);
+};
+function libellePeriode(p) {
+  if (!p) return 'Tout';
+  if (p.mode === 'dates') {
+    if (!p.debut && !p.fin) return 'Tout';
+    const f = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString('fr-FR') : '…');
+    return `du ${f(p.debut)} au ${f(p.fin)}`;
+  }
+  if (p.mode === 'mois') {
+    if (!p.moisDebut && !p.moisFin) return 'Tout';
+    const f = (m) => (m ? new Date(`${m}-01T00:00:00`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }) : '…');
+    return `de ${f(p.moisDebut)} à ${f(p.moisFin)}`;
+  }
+  return (RACCOURCIS.find((r) => r.k === p.jours) || { label: 'Tout' }).label;
+}
+
+/* Clé d'agrégation selon la granularité choisie */
+function cleAgregation(date, granularite) {
+  const d = new Date(date);
+  if (granularite === 'mois') return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  if (granularite === 'semaine') {
+    const x = new Date(d);
+    x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+    x.setHours(0, 0, 0, 0);
+    return x.getTime();
+  }
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+function etiquetteAgregation(cle, granularite) {
+  const d = new Date(cle);
+  if (granularite === 'mois') return d.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' });
+  return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+}
 
 function Graphique({ points, style, seuil, hauteur = 220 }) {
   const donnees = points.map((p) => ({
@@ -557,22 +706,26 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 
 /* ==================== Tableau de bord ==================== */
 function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne }) {
-  const limite = periode ? Date.now() - periode * 86400000 : 0;
+  const [unite, setUnite] = useState('nombre');
 
   const recentes = lignes
-    .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }))
+    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }))
     .filter((l) => l.points.length > 0);
   const prioritaires = recentes.filter((l) => l.prioritaire);
   const rang = { bientot: 0, plateau: 1, en_cours: 2, dormant: 3, acquis: 4, non_acquis: 5 };
   const affichees = (prioritaires.length ? prioritaires : recentes).slice().sort((a, b) => rang[a.etat] - rang[b.etat]);
 
   const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
-  const fenetre = periode || 30;
-  const depuis = (j) => Date.now() - j * 86400000;
-  const recentesCrises = crises.filter((c) => new Date(c.date) >= depuis(fenetre));
+  const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
+
+  /* Période précédente de même durée, pour situer la tendance */
+  const { min, max } = bornesDe(periode);
+  const finRef = max || Date.now();
+  const debutRef = min || (finRef - 30 * 86400000);
+  const duree = finRef - debutRef;
   const precedentes = crises.filter((c) => {
-    const t = new Date(c.date);
-    return t >= depuis(fenetre * 2) && t < depuis(fenetre);
+    const t = new Date(c.date).getTime();
+    return t >= debutRef - duree && t < debutRef;
   });
   const tendance = precedentes.length
     ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
@@ -597,26 +750,39 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne 
 
   return (
     <div>
-      <div className="flex flex-wrap gap-1.5 mb-4">
-        {PERIODES.map((p) => <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setPeriode(p.k)} />)}
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
+        <BasculeUnite unite={unite} setUnite={setUnite} />
       </div>
 
       <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
         <Card>
-          <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Objectifs suivis</div>
+          <div className="flex items-center gap-1.5 mb-3">
+            <Target size={14} style={{ color: INK_SOFT }} />
+            <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Objectifs suivis</span>
+          </div>
           <div className="flex flex-wrap gap-4">
-            {['acquis', 'bientot', 'plateau', 'en_cours'].map((e) => (
-              <div key={e} className="min-w-[68px]">
-                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
-                <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
-              </div>
-            ))}
+            {['acquis', 'bientot', 'plateau', 'en_cours'].map((e) => {
+              const n = compte(e);
+              const tot = lignes.length || 1;
+              return (
+                <div key={e} className="min-w-[68px]">
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>
+                    {unite === 'pct' ? `${Math.round((n / tot) * 100)} %` : n}
+                  </div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+                </div>
+              );
+            })}
           </div>
         </Card>
 
         <Card>
-          <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>
-            Crises — {(PERIODES.find((p) => p.k === periode) || { label: '30 jours' }).label.toLowerCase()}
+          <div className="flex items-center gap-1.5 mb-3">
+            <AlertTriangle size={14} style={{ color: INK_SOFT }} />
+            <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Crises · {libellePeriode(periode)}</span>
           </div>
           <div className="flex items-baseline gap-3 mb-2">
             <span className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{recentesCrises.length}</span>
@@ -632,8 +798,18 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne 
               {' '}sur {notees.length} crise{notees.length !== 1 ? 's' : ''} notée{notees.length !== 1 ? 's' : ''}
             </div>
           )}
-          {topComportement && <div className="text-xs" style={{ color: INK_SOFT }}>Comportement : <strong style={{ color: INK }}>{topComportement[0]}</strong> ({topComportement[1]})</div>}
-          {topAntecedent && <div className="text-xs" style={{ color: INK_SOFT }}>Antécédent : <strong style={{ color: INK }}>{topAntecedent[0]}</strong> ({topAntecedent[1]})</div>}
+          {topComportement && (
+            <div className="text-xs" style={{ color: INK_SOFT }}>
+              Comportement : <strong style={{ color: INK }}>{topComportement[0]}</strong>{' '}
+              ({unite === 'pct' ? `${Math.round((topComportement[1] / (recentesCrises.length || 1)) * 100)} %` : topComportement[1]})
+            </div>
+          )}
+          {topAntecedent && (
+            <div className="text-xs" style={{ color: INK_SOFT }}>
+              Antécédent : <strong style={{ color: INK }}>{topAntecedent[0]}</strong>{' '}
+              ({unite === 'pct' ? `${Math.round((topAntecedent[1] / (recentesCrises.length || 1)) * 100)} %` : topAntecedent[1]})
+            </div>
+          )}
           {!recentesCrises.length && <p className="text-xs" style={{ color: INK_SOFT }}>Aucune crise sur la période.</p>}
         </Card>
       </div>
@@ -897,33 +1073,27 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
 
   const personne = (focus && focus.initiales) || donnees.personnes[0].initials;
   const objectifOuvert = focus && focus.objectif;
-  const limite = periode ? Date.now() - periode * 86400000 : 0;
 
   const siennes = lignes
     .filter((l) => l.initials === personne)
-    .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }));
+    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
 
   const crisesPersonne = (donnees.crises || []).filter((c) => {
     if (!c.studentId) return false;
     const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
-    return ini === personne && (!limite || new Date(c.date) >= limite);
+    return ini === personne && dansPeriode(c.date, periode);
   });
 
-  const lundiDe = (d) => {
-    const x = new Date(d);
-    x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
-    x.setHours(0, 0, 0, 0);
-    return x.getTime();
-  };
-  const semaines = new Map();
+  const gran = periode.granularite || 'semaine';
+  const paquets = new Map();
   const touche = (k) => {
-    if (!semaines.has(k)) semaines.set(k, { somme: 0, n: 0, crises: 0 });
-    return semaines.get(k);
+    if (!paquets.has(k)) paquets.set(k, { somme: 0, n: 0, crises: 0 });
+    return paquets.get(k);
   };
-  siennes.forEach((l) => l.points.forEach((p) => { const e = touche(lundiDe(p.date)); e.somme += p.value; e.n += 1; }));
-  crisesPersonne.forEach((c) => { touche(lundiDe(c.date)).crises += 1; });
-  const croisement = Array.from(semaines.entries()).sort((a, b) => a[0] - b[0]).map(([k, e]) => ({
-    label: new Date(k).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+  siennes.forEach((l) => l.points.forEach((pt) => { const e = touche(cleAgregation(pt.date, gran)); e.somme += pt.value; e.n += 1; }));
+  crisesPersonne.forEach((c) => { touche(cleAgregation(c.date, gran)).crises += 1; });
+  const croisement = Array.from(paquets.entries()).sort((a, b) => a[0] - b[0]).map(([k, e]) => ({
+    label: etiquetteAgregation(k, gran),
     autonomie: e.n ? Math.round(e.somme / e.n) : null,
     crises: e.crises,
   }));
@@ -945,15 +1115,24 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
 
       <div className="flex flex-wrap gap-1.5 mb-3">
         {[
-          { k: 'objectifs', l: 'Objectifs' },
-          { k: 'bilan', l: 'Bilan' },
-          { k: 'radar', l: 'Radar' },
-          { k: 'crises', l: 'Crises' },
-          { k: 'croisement', l: 'Croisement' },
-        ].map((v) => <Chip key={v.k} label={v.l} on={vue === v.k} onClick={() => setVue(v.k)} />)}
-        <span className="w-px mx-1" style={{ backgroundColor: BORDER }} />
-        {PERIODES.map((p) => <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setPeriode(p.k)} />)}
+          { k: 'objectifs', l: 'Objectifs', icone: TrendingUp },
+          { k: 'bilan', l: 'Bilan', icone: Target },
+          { k: 'radar', l: 'Radar', icone: RadarIcon },
+          { k: 'crises', l: 'Crises', icone: AlertTriangle },
+          { k: 'croisement', l: 'Croisement', icone: Activity },
+        ].map((v) => {
+          const Icone = v.icone;
+          return (
+            <button key={v.k} onClick={() => setVue(v.k)}
+              className="rounded-lg px-3 py-1.5 text-xs border flex items-center gap-1.5"
+              style={{ borderColor: vue === v.k ? INK : BORDER, backgroundColor: vue === v.k ? INK : 'transparent', color: vue === v.k ? '#fff' : INK_SOFT }}>
+              <Icone size={13} /> {v.l}
+            </button>
+          );
+        })}
       </div>
+
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'} />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
@@ -1059,7 +1238,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
           <Card>
             <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-              Par semaine : autonomie moyenne (courbe) et nombre de crises (barres)
+              Par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} : autonomie moyenne (courbe) et nombre de crises (barres)
             </div>
             <div style={{ height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
@@ -1068,7 +1247,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                   <YAxis yAxisId="g" domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
                   <YAxis yAxisId="d" orientation="right" allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={30} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => `Semaine du ${l}`} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Bar yAxisId="d" dataKey="crises" name="Crises" fill={CRISE} radius={[4, 4, 0, 0]} isAnimationActive={false} />
                   <Line yAxisId="g" type="monotone" dataKey="autonomie" name="Autonomie (%)" stroke={ACQUIS} strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
@@ -1094,13 +1273,12 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
   if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour composer un rapport.</Empty>;
 
   const personne = selection.personne || donnees.personnes[0].initials;
-  const periode = selection.periode || 0;
-  const limite = periode ? Date.now() - periode * 86400000 : 0;
+  const periode = selection.periode || periodeVide();
 
   const disponibles = lignes.filter((l) => l.initials === personne);
   const retenus = disponibles
     .filter((l) => (selection.objectifs || []).includes(l.objectif))
-    .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }));
+    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
 
   const basculer = (objectif) => {
     const cur = selection.objectifs || [];
@@ -1115,7 +1293,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
   }
 
   const aujourdhui = new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
-  const libellePeriode = (PERIODES.find((p) => p.k === periode) || { label: 'Tout' }).label;
+
 
   return (
     <div>
@@ -1154,12 +1332,8 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         </div>
 
         <div className="mb-3">
-          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Période</div>
-          <div className="flex flex-wrap gap-1.5">
-            {PERIODES.map((p) => (
-              <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setSelection({ ...selection, periode: p.k })} />
-            ))}
-          </div>
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Période couverte par le document</div>
+          <SelecteurPeriode periode={periode} setPeriode={(p) => setSelection({ ...selection, periode: p })} />
         </div>
 
         <div className="mb-3">
@@ -1201,7 +1375,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         )}
 
         <Btn onClick={() => window.print()} disabled={!retenus.length} className="w-full">
-          Imprimer ou enregistrer en PDF
+          <Printer size={16} /> Imprimer ou enregistrer en PDF
         </Btn>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
           Dans la fenêtre d'impression, choisissez votre imprimante, ou « Enregistrer au format PDF »
@@ -1214,7 +1388,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           <div className="min-w-0">
             <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>{association || 'Bilan de suivi'}</div>
             <div className="text-sm" style={{ color: INK_SOFT }}>
-              {nomAffiche(donnees, personne)} · période : {libellePeriode} · établi le {aujourdhui}
+              {nomAffiche(donnees, personne)} · période : {libellePeriode(periode)} · établi le {aujourdhui}
             </div>
           </div>
           {logo && <img src={logo} alt="" style={{ height: 56, objectFit: 'contain' }} />}
@@ -1267,6 +1441,93 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
   );
 }
 
+/* ==================== Lecture d'un rapport Excel ====================
+   Le cadre reçoit deux types de fichiers : la sauvegarde qui alimente
+   l'analyse, et le rapport tableur destiné à la lecture. Plutôt que de le
+   refuser, on l'affiche ici — sans l'intégrer aux données, puisqu'il ne
+   contient pas les critères d'acquisition. */
+function LecteurExcel() {
+  const [classeur, setClasseur] = useState(null);
+  const [feuille, setFeuille] = useState(null);
+  const [erreur, setErreur] = useState('');
+  const champ = useRef(null);
+
+  async function ouvrir(f) {
+    if (!f) return;
+    setErreur('');
+    try {
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      if (!wb.SheetNames.length) { setErreur('Ce classeur ne contient aucune feuille.'); return; }
+      setClasseur({ nom: f.name, wb });
+      setFeuille(wb.SheetNames[0]);
+    } catch (e) {
+      setErreur("Fichier illisible. Attendu : un rapport Excel produit par DatABA.");
+    }
+  }
+
+  const lignes = classeur && feuille
+    ? XLSX.utils.sheet_to_json(classeur.wb.Sheets[feuille], { header: 1, defval: '' })
+    : [];
+  const entetes = lignes[0] || [];
+  const corps = lignes.slice(1);
+
+  return (
+    <Card>
+      <div className="flex items-center gap-1.5 mb-2">
+        <Table2 size={16} style={{ color: INK_SOFT }} />
+        <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Lire un rapport Excel</span>
+      </div>
+      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+        Pour consulter un rapport sans ouvrir Excel. Ce fichier n'est pas intégré à l'analyse :
+        il ne contient pas les critères d'acquisition.
+      </p>
+      <input ref={champ} type="file" accept=".xlsx,.xls" onChange={(e) => ouvrir(e.target.files && e.target.files[0])}
+        className="w-full text-sm mb-2" />
+      {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+
+      {classeur && (
+        <>
+          <div className="flex flex-wrap gap-1.5 my-3">
+            {classeur.wb.SheetNames.map((n) => (
+              <Chip key={n} label={n} on={feuille === n} onClick={() => setFeuille(n)} />
+            ))}
+          </div>
+          <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+            {corps.length} ligne{corps.length !== 1 ? 's' : ''}
+            {corps.length > 200 && ' — les 200 premières sont affichées'}
+          </div>
+          <div style={{ overflowX: 'auto', maxHeight: 420, overflowY: 'auto' }}>
+            <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  {entetes.map((h, i) => (
+                    <th key={i} className="text-left px-2 py-1.5 whitespace-nowrap"
+                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: PAPER, position: 'sticky', top: 0, color: INK_SOFT }}>
+                      {String(h)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {corps.slice(0, 200).map((r, i) => (
+                  <tr key={i}>
+                    {entetes.map((_, j) => (
+                      <td key={j} className="px-2 py-1 whitespace-nowrap" style={{ borderBottom: `1px solid ${BORDER}` }}>
+                        {String(r[j] == null ? '' : r[j])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 /* ==================== Gestion ==================== */
 function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onRetirerProtection, notify }) {
   const [fichier, setFichier] = useState(null);
@@ -1314,7 +1575,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     setErreur(''); setEnveloppe(null); setFichier(f);
     if (!f) return;
     if (/\.(xlsx|xls|csv)$/i.test(f.name)) {
-      setErreur("Ce fichier est un rapport tableur. Dans DatABA : Export → « Fichier pour DatABA Manager ».");
+      setErreur("Ce fichier est un rapport tableur : il se consulte plus bas, dans « Lire un rapport Excel ». Pour alimenter l'analyse, utilisez dans DatABA : Export → « Fichier pour DatABA Manager ».");
       setFichier(null);
       return;
     }
@@ -1409,7 +1670,10 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
   return (
     <div>
       <Card className="mb-4">
-        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Importer</div>
+        <div className="flex items-center gap-1.5 mb-2">
+          <Upload size={16} style={{ color: INK_SOFT }} />
+          <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Importer</span>
+        </div>
         <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
           Sauvegarde DatABA, ou export venu d'un autre Manager. Le format est reconnu au contenu ;
           les séances déjà connues ne sont pas dupliquées.
@@ -1434,7 +1698,10 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       </Card>
 
       <Card className="mb-4">
-        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Exporter</div>
+        <div className="flex items-center gap-1.5 mb-2">
+          <Download size={16} style={{ color: INK_SOFT }} />
+          <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Exporter</span>
+        </div>
         <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
           Pour transmettre à un autre poste équipé de Manager, ou pour archiver. Sans sélection,
           tout est exporté. Libellés personnalisés et commentaires suivent.
@@ -1467,8 +1734,13 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         )}
       </Card>
 
+      <div className="mb-4"><LecteurExcel /></div>
+
       <Card>
-        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Sécurité</div>
+        <div className="flex items-center gap-1.5 mb-2">
+          <Lock size={16} style={{ color: INK_SOFT }} />
+          <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Sécurité</span>
+        </div>
         {securite.disabled ? (
           <>
             <p className="text-xs mb-3" style={{ color: NON_ACQUIS }}>
@@ -1542,9 +1814,9 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
-  const [periode, setPeriode] = useState(30);
+  const [periode, setPeriode] = useState(periodeVide());
   const [focus, setFocus] = useState(null);
-  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: 0 });
+  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide() });
 
   const lignes = useMemo(() => construireLignes(donnees), [donnees]);
 
@@ -1681,11 +1953,11 @@ export default function App() {
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   const onglets = [
-    { k: 'bord', l: 'Tableau de bord' },
-    { k: 'seances', l: 'Séances' },
-    { k: 'personnes', l: 'Personnes' },
-    { k: 'rapport', l: 'Rapport' },
-    { k: 'gestion', l: 'Gestion' },
+    { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
+    { k: 'seances', l: 'Séances', icone: CalendarDays },
+    { k: 'personnes', l: 'Personnes', icone: Users },
+    { k: 'rapport', l: 'Rapport', icone: FileText },
+    { k: 'gestion', l: 'Gestion', icone: Settings },
   ];
 
   return (
@@ -1698,40 +1970,44 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex flex-wrap gap-2 mb-6 no-print">
-          {onglets.map((t) => (
-            <button key={t.k} onClick={() => setTab(t.k)}
-              className="rounded-xl px-4 py-2.5 text-sm font-medium border"
-              style={{ fontFamily: F_DISPLAY, borderColor: tab === t.k ? INK : BORDER,
-                backgroundColor: tab === t.k ? INK : 'transparent', color: tab === t.k ? '#fff' : INK_SOFT }}>
-              {t.l}
-            </button>
-          ))}
+        <div className="flex flex-wrap gap-1.5 mb-6 no-print">
+          {onglets.map((t) => {
+            const Icone = t.icone;
+            const on = tab === t.k;
+            return (
+              <button key={t.k} onClick={() => setTab(t.k)}
+                className="flex-1 min-w-[110px] rounded-xl px-3 py-2.5 text-sm font-medium border flex items-center justify-center gap-1.5"
+                style={{ fontFamily: F_DISPLAY, borderColor: on ? INK : BORDER,
+                  backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
+                <Icone size={15} /> <span className="hidden sm:inline">{t.l}</span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="no-print">
           {tab === 'bord' && (
             <>
-              <SectionTitle sub="L'avancée récente, d'un coup d'œil.">Tableau de bord</SectionTitle>
+              <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} onOuvrirPersonne={ouvrirPersonne} />
             </>
           )}
           {tab === 'seances' && (
             <>
-              <SectionTitle sub="Volume de cotation et accord entre observateurs.">Séances</SectionTitle>
+              <SectionTitle sub="Volume de cotation et accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
               <SeancesScreen donnees={donnees} />
             </>
           )}
           {tab === 'personnes' && (
             <>
-              <SectionTitle sub="Le suivi complet, personne par personne.">Personnes</SectionTitle>
+              <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes</SectionTitle>
               <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
                 periode={periode} setPeriode={setPeriode} onRapport={lancerRapport} />
             </>
           )}
           {tab === 'gestion' && (
             <>
-              <SectionTitle sub="Import, export et sécurité.">Gestion</SectionTitle>
+              <SectionTitle sub="Import, export et sécurité." icone={Settings}>Gestion</SectionTitle>
               <GestionScreen donnees={donnees} securite={securite} onImported={onImported}
                 onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection} notify={notify} />
             </>
@@ -1740,7 +2016,7 @@ export default function App() {
 
         {tab === 'rapport' && (
           <>
-            <div className="no-print"><SectionTitle sub="Le document à transmettre ou à déposer dans Airmes.">Rapport</SectionTitle></div>
+            <div className="no-print"><SectionTitle sub="Le document à transmettre ou à déposer dans Airmes." icone={FileText}>Rapport</SectionTitle></div>
             <RapportScreen donnees={donnees} lignes={lignes}
               selection={selectionRapport} setSelection={setSelectionRapport}
               logo={logo} association={association}
