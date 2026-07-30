@@ -1,27 +1,60 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area, ScatterChart, Scatter,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid, Legend,
+  RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
+  CartesianGrid, Legend,
 } from 'recharts';
 
-/* ==================== Palette et polices — reprises de l'app tablette,
-   pour une identité visuelle cohérente entre les deux applications. ==================== */
+/* ==================== Identité visuelle ====================
+   Reprise de DatABA, avec le bleu en couleur d'accent pour distinguer les
+   deux applications au premier coup d'œil. */
 const PAPER = '#FAF7F0';
 const CARD = '#FFFFFF';
-const INK = '#20291F';
-const INK_SOFT = '#6B7266';
+const INK = '#1A345C';
+const INK_SOFT = '#6B7280';
 const BORDER = '#E3DDD0';
 const ACQUIS = '#0F8B6C';
 const EN_COURS = '#D69A2D';
 const NON_ACQUIS = '#A8402F';
+const CRISE = '#A8402F';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
 
+const ETATS = {
+  acquis: { label: 'Acquis', court: 'Acquis', color: ACQUIS },
+  bientot: { label: 'Bientôt acquis', court: 'Bientôt', color: '#3F9E7C' },
+  plateau: { label: 'En plateau', court: 'Plateau', color: EN_COURS },
+  en_cours: { label: "En cours d'acquisition", court: 'En cours', color: '#5B8AC4' },
+  dormant: { label: 'Sans cotation récente', court: 'Dormant', color: INK_SOFT },
+  non_acquis: { label: 'Non acquis', court: 'Non acquis', color: NON_ACQUIS },
+};
+/* Le rapport transmis ne retient que trois états : les nuances de travail
+   interne n'ont pas leur place dans un document officiel. */
+const ETAT_RAPPORT = {
+  acquis: 'Acquis',
+  bientot: "En cours d'acquisition",
+  plateau: "En cours d'acquisition",
+  en_cours: "En cours d'acquisition",
+  dormant: "En cours d'acquisition",
+  non_acquis: 'Non acquis',
+};
+
+/* Intensité ressentie, telle que saisie dans DatABA */
+const INTENSITES = {
+  1: { label: 'Légère', color: '#7A9A3A' },
+  2: { label: 'Modérée', color: '#D69A2D' },
+  3: { label: 'Forte', color: '#A8402F' },
+};
+
+const PLATEAU_MIN_POINTS = 6;
+const PLATEAU_ECART_MAX = 20;
+const DORMANT_JOURS = 21;
+
 /* ==================== Chiffrement ====================
-   Fonctions identiques à celles de l'app tablette : même dérivation de clé,
-   même schéma de chiffrement, pour lire les fichiers qu'elle produit sans
-   rien avoir à adapter côté éducateur. */
+   Fonctions identiques à celles de DatABA : même dérivation de clé, même
+   schéma, pour lire ses fichiers sans rien adapter côté éducateur. */
 function toB64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = '';
@@ -32,31 +65,25 @@ function toB64(buf) {
 function fromB64(b64) {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
-async function deriveAesKey(passphrase, salt) {
-  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+async function deriveAesKey(passphrase, salt, usages) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, false, usages);
 }
 async function decryptEnvelope(envelope, passphrase) {
-  const key = await deriveAesKey(passphrase, fromB64(envelope.salt));
+  const key = await deriveAesKey(passphrase, fromB64(envelope.salt), ['decrypt']);
   const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(envelope.iv) }, key, fromB64(envelope.data));
   return JSON.parse(new TextDecoder().decode(plain));
 }
 async function encryptJSON(obj, passphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
-  const data = new TextEncoder().encode(JSON.stringify(obj));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  const key = await deriveAesKey(passphrase, salt, ['encrypt']);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
   return { format: 'aba-backup-encrypted', version: 1, salt: toB64(salt), iv: toB64(iv), data: toB64(ct) };
 }
-
-/* --- Verrouillage et chiffrement des données du poste ---
-   Mêmes principes que sur DatABA : le code sert à la fois de verrou et de clé
-   de chiffrement, et n'est jamais enregistré, seule son empreinte l'est. */
 async function hashPin(pin, saltB64) {
-  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromB64(saltB64), iterations: 150000, hash: 'SHA-256' }, keyMaterial, 256);
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromB64(saltB64), iterations: 150000, hash: 'SHA-256' }, km, 256);
   return toB64(bits);
 }
 function newSalt() {
@@ -64,8 +91,7 @@ function newSalt() {
 }
 let dataKey = null;
 async function deriveDataKey(pin, saltB64) {
-  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: fromB64(saltB64), iterations: 150000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  return deriveAesKey(pin, fromB64(saltB64), ['encrypt', 'decrypt']);
 }
 async function encryptValue(texte, key) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -86,20 +112,32 @@ function lockDelayMs(failed) {
   return 15 * 60 * 1000;
 }
 
-/* ==================== Stockage local du cadre ====================
-   Un seul jeu de données, accumulé au fil des imports. localStorage suffit
-   à ce stade ; si le volume devenait important sur plusieurs années et
-   plusieurs tablettes, IndexedDB prendrait le relais sans changer l'usage. */
-const STORE_KEY = 'aba-cadre:data';
+/* ==================== Stockage ====================
+   Les deux applications DatABA sont publiées sous la même adresse et
+   partagent le même espace : chaque effacement se limite à son préfixe. */
+const PREFIXE = 'aba-cadre:';
+const STORE_KEY = `${PREFIXE}data`;
+const SECU_KEY = `${PREFIXE}securite`;
 
-const VIDE = { personnes: [], seances: [], crises: [], sources: [] };
+const VIDE = {
+  personnes: [], seances: [], crises: [], sources: [],
+  _idVersInitiales: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
+};
 
+function normaliser(d) {
+  return {
+    ...VIDE,
+    ...d,
+    alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
+    commentaires: d.commentaires || {},
+  };
+}
 async function chargerDonnees() {
   try {
     const raw = window.localStorage.getItem(STORE_KEY);
     if (!raw) return VIDE;
     const texte = dataKey ? await decryptValue(raw, dataKey) : raw;
-    return JSON.parse(texte);
+    return normaliser(JSON.parse(texte));
   } catch (e) {
     return VIDE;
   }
@@ -108,94 +146,91 @@ async function sauverDonnees(d) {
   try {
     const texte = JSON.stringify(d);
     window.localStorage.setItem(STORE_KEY, dataKey ? await encryptValue(texte, dataKey) : texte);
-  } catch (e) {
-    /* silencieux : un échec d'écriture ne doit pas interrompre l'usage */
-  }
+  } catch (e) { /* écriture impossible : l'usage n'est pas interrompu */ }
+}
+function effacerDonneesManager() {
+  try {
+    const cles = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(PREFIXE)) cles.push(k);
+    }
+    cles.forEach((k) => window.localStorage.removeItem(k));
+  } catch (e) { /* stockage indisponible */ }
 }
 
-/* Rapproche les personnes de sources différentes par leurs initiales — même
-   principe que le rapprochement utilisé pour l'accord inter-observateurs sur
-   la tablette. Deux personnes partageant les mêmes initiales sur deux
-   tablettes différentes seraient à tort confondues : c'est la limite connue
-   de cette approche, à traiter en amont si le cas se présente. */
+/* ==================== Import et fusion ==================== */
 function fusionnerImport(actuel, backup, nomSource) {
   const personnes = actuel.personnes.slice();
   const parInitiales = new Map(personnes.map((p) => [p.initials, p]));
-
   (backup.students || []).forEach((s) => {
     if (!parInitiales.has(s.initials)) {
-      const p = { id: s.id, initials: s.initials, objectifsParTablette: {} };
+      const p = { id: s.id, initials: s.initials };
       personnes.push(p);
       parInitiales.set(s.initials, p);
     }
   });
 
-  // Table de correspondance id-tablette → initiales, pour cette source précise
-  const idVersInitiales = new Map((backup.students || []).map((s) => [s.id, s.initials]));
+  const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
 
-  const seancesExistantes = new Set(actuel.seances.map((s) => s.id));
-  const nouvellesSeances = (backup.sessions || []).filter((s) => !seancesExistantes.has(s.id));
-  const seancesMaj = actuel.seances.filter((s) => !nouvellesSeances.some((n) => n.id === s.id));
+  const dejaLa = new Set(actuel.seances.map((s) => s.id));
+  const nouvelles = (backup.sessions || []).filter((s) => !dejaLa.has(s.id));
+  const seances = [
+    ...actuel.seances.filter((s) => !nouvelles.some((n) => n.id === s.id)),
+    ...nouvelles,
+  ].map((s) => ({ ...s, source: s.source || nomSource }));
 
-  const seances = [...seancesMaj, ...nouvellesSeances].map((s) => ({ ...s, source: s.source || nomSource }));
-
-  const crisesExistantes = new Set(actuel.crises.map((c) => c.id));
-  const nouvellesCrises = (backup.crises || []).filter((c) => !crisesExistantes.has(c.id));
-  const crises = [...actuel.crises.filter((c) => !nouvellesCrises.some((n) => n.id === c.id)), ...nouvellesCrises];
-
-  const sources = actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource];
+  const crisesLa = new Set(actuel.crises.map((c) => c.id));
+  const nouvellesCrises = (backup.crises || []).filter((c) => !crisesLa.has(c.id));
+  const crises = [...actuel.crises, ...nouvellesCrises].map((c) => ({ ...c, source: c.source || nomSource }));
 
   return {
+    ...actuel,
     personnes,
     seances,
     crises,
-    sources,
-    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: Object.fromEntries(idVersInitiales) },
-    nbNouvellesSeances: nouvellesSeances.length,
+    sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
+    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
+    nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
   };
 }
 
-/* Initiales d'une personne pour une séance donnée : la séance référence un
-   identifiant propre à sa tablette d'origine, résolu via la table conservée
-   à l'import de cette source. */
-function initialesDe(donnees, seanceOuCrise, studentId) {
-  const src = seanceOuCrise.source;
-  const table = (donnees._idVersInitiales || {})[src] || {};
-  return table[studentId] || '?';
+function idPourSource(donnees, source, initiales) {
+  const t = (donnees._idVersInitiales || {})[source] || {};
+  return Object.keys(t).find((id) => t[id] === initiales) || null;
 }
 
-/* ==================== Bilan à trois états ====================
-   Reprend le calcul de critère déjà utilisé côté tablette (série de réussites
-   consécutives face au seuil défini pour l'objectif), mais le fait tourner
-   sur l'ensemble des personnes importées plutôt que sur une seule. */
-function objectiveScoreValue(obj, entry, guidances) {
+/* ==================== Calcul des scores ==================== */
+function objectiveScoreValue(obj, entry) {
   if (!obj || !entry) return null;
-  const gList = (obj.config && obj.config.guidanceSet) || guidances || [];
-  const isIndep = (code) => {
+  const gList = (obj.config && obj.config.guidanceSet) || [];
+  const indep = (code) => {
     const g = gList.find((x) => x.code === code);
     return g ? !!g.independent : code === 'I';
   };
-  if (obj.type === 'trials') {
-    const trials = (entry.trials || []).map((t) => (t && typeof t === 'object' ? t.code : t)).filter(Boolean);
-    if (!trials.length) return null;
-    return Math.round((trials.filter(isIndep).length / trials.length) * 100);
+  const t = obj.type;
+
+  if (t === 'trials') {
+    const codes = (entry.trials || []).map((x) => (x && typeof x === 'object' ? x.code : x)).filter(Boolean);
+    if (!codes.length) return null;
+    return Math.round((codes.filter(indep).length / codes.length) * 100);
   }
-  if (obj.type === 'probe') {
+  if (t === 'probe') {
     const v = entry.guidance != null ? entry.guidance : entry.value;
     if (v == null) return null;
-    return typeof v === 'number' ? v * 100 : (isIndep(v) ? 100 : 0);
+    return typeof v === 'number' ? v * 100 : (indep(v) ? 100 : 0);
   }
-  if (obj.type === 'chaining') {
+  if (t === 'chaining') {
     const steps = (obj.config && obj.config.steps) || [];
     const codes = steps.map((st) => (entry.steps || {})[st.id]).filter(Boolean);
     if (!codes.length) return null;
-    return Math.round((codes.filter(isIndep).length / codes.length) * 100);
+    return Math.round((codes.filter(indep).length / codes.length) * 100);
   }
-  if (obj.type === 'balance') {
+  if (t === 'balance') {
     const steps = (obj.config && obj.config.steps) || [];
-    const outcomes = (obj.config && obj.config.balanceOutcomes) || [];
-    const meta = (k) => outcomes.find((o) => o.k === k);
+    const issues = (obj.config && obj.config.balanceOutcomes) || [];
+    const meta = (k) => issues.find((o) => o.k === k);
     const essais = Array.isArray(entry.trials) ? entry.trials : [{ steps: entry.steps || {} }];
     let reussi = 0, notes = 0;
     essais.forEach((es) => {
@@ -204,8 +239,9 @@ function objectiveScoreValue(obj, entry, guidances) {
         if (!e || !e.outcome) return;
         const m = meta(e.outcome);
         if (m && m.exclu) return;
+        if (!m && e.outcome === 'manque') return;
         notes += 1;
-        if (!m || m.reussite || e.outcome === 'reussi') reussi += 1;
+        if (m ? m.reussite : e.outcome === 'reussi') reussi += 1;
       });
     });
     return notes ? Math.round((reussi / notes) * 100) : null;
@@ -213,63 +249,443 @@ function objectiveScoreValue(obj, entry, guidances) {
   return null;
 }
 
-function critereObjectif(obj) {
+function critereDe(obj) {
   const m = obj.config && obj.config.mastery;
-  if (!m) return null;
-  return { threshold: m.threshold || 80, needed: m.sessions || 3, unit: m.unit || 'sessions' };
+  return m ? { threshold: m.threshold || 80, needed: m.sessions || 3 } : null;
 }
 
-/* Construit, pour une personne et un objectif, la série chronologique de
-   scores puis en tire l'un des trois états : Acquis, En cours d'acquisition,
-   ou Non acquis (aucune donnée). */
-function statutObjectif(seances, studentIdParSource, obj, guidances) {
+function analyserObjectif(seances, tableParSource, obj) {
   const points = [];
-  seances.forEach((s) => {
-    const sid = studentIdParSource[s.source];
-    if (!sid || !(s.selectedObjectives || {})[sid]) return;
-    const oid = Object.keys(s.objectiveSnapshot || {}).find((k) => s.objectiveSnapshot[k].name === obj.name);
-    if (!oid) return;
-    const entry = (s.data || {})[sid] && s.data[sid][oid];
-    const score = objectiveScoreValue(s.objectiveSnapshot[oid], entry, guidances);
-    if (score != null) points.push({ date: s.date, value: score });
+  seances.forEach((sess) => {
+    const sid = tableParSource[sess.source];
+    if (!sid) return;
+    const oid = Object.keys(sess.objectiveSnapshot || {}).find((k) => sess.objectiveSnapshot[k].name === obj.name);
+    if (!oid || !((sess.selectedObjectives || {})[sid] || []).includes(oid)) return;
+    const entry = (sess.data || {})[sid] && sess.data[sid][oid];
+    const v = objectiveScoreValue(sess.objectiveSnapshot[oid], entry);
+    if (v != null) points.push({ date: sess.date, value: v, favorite: !!sess.objectiveSnapshot[oid].favorite });
   });
   points.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  if (!points.length) return { etat: 'non_acquis', points };
-
-  const crit = critereObjectif(obj);
-  if (!crit) return { etat: 'en_cours', points };
+  const crit = critereDe(obj);
+  const base = {
+    points,
+    threshold: crit ? crit.threshold : null,
+    needed: crit ? crit.needed : null,
+    prioritaire: points.some((p) => p.favorite),
+  };
+  if (!points.length) return { ...base, etat: 'non_acquis', streak: 0 };
 
   let streak = 0;
-  for (let i = points.length - 1; i >= 0; i--) {
-    if (points[i].value >= crit.threshold) streak += 1;
-    else break;
+  if (crit) {
+    for (let i = points.length - 1; i >= 0; i--) {
+      if (points[i].value >= crit.threshold) streak += 1;
+      else break;
+    }
   }
-  const acquis = streak >= crit.needed;
-  return { etat: acquis ? 'acquis' : 'en_cours', points, streak, needed: crit.needed, threshold: crit.threshold };
+  const jours = Math.floor((Date.now() - new Date(points[points.length - 1].date)) / 86400000);
+
+  if (crit && streak >= crit.needed) return { ...base, etat: 'acquis', streak };
+  if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak, jours };
+  if (crit && crit.needed > 1 && streak >= crit.needed - 1) return { ...base, etat: 'bientot', streak };
+  if (crit && points.length >= PLATEAU_MIN_POINTS) {
+    const cinq = points.slice(-5);
+    const moyenne = Math.round(cinq.reduce((a, p) => a + p.value, 0) / cinq.length);
+    const ecart = crit.threshold - moyenne;
+    if (ecart > 0 && ecart <= PLATEAU_ECART_MAX) return { ...base, etat: 'plateau', streak, moyenne };
+  }
+  return { ...base, etat: 'en_cours', streak };
 }
 
-const ETATS = {
-  acquis: { label: 'Acquis', color: ACQUIS },
-  en_cours: { label: "En cours d'acquisition", color: EN_COURS },
-  non_acquis: { label: 'Non acquis', color: NON_ACQUIS },
-};
+function construireLignes(donnees) {
+  const lignes = [];
+  donnees.personnes.forEach((p) => {
+    const tableParSource = {};
+    donnees.sources.forEach((src) => {
+      const sid = idPourSource(donnees, src, p.initials);
+      if (sid) tableParSource[src] = sid;
+    });
 
-/* ==================== Accord inter-observateurs ====================
-   Les paires sont repérées seules : deux séances du même jour, marquées
-   « deux observateurs en parallèle », venues de sources différentes. Le cadre
-   n'a rien à apparier à la main. */
+    const siennes = donnees.seances.filter((sess) => {
+      const sid = tableParSource[sess.source];
+      return sid && (sess.selectedObjectives || {})[sid];
+    });
+
+    const objectifs = new Map();
+    siennes.forEach((sess) => {
+      const sid = tableParSource[sess.source];
+      (sess.selectedObjectives[sid] || []).forEach((oid) => {
+        const snap = (sess.objectiveSnapshot || {})[oid];
+        if (snap && !objectifs.has(snap.name)) objectifs.set(snap.name, snap);
+      });
+    });
+
+    objectifs.forEach((obj) => {
+      lignes.push({
+        initials: p.initials,
+        objectif: obj.name,
+        type: obj.type,
+        ...analyserObjectif(siennes, tableParSource, obj),
+      });
+    });
+  });
+  return lignes;
+}
+
+const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
+const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
+const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
+
+/* ==================== Composants de base ==================== */
+function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
+  const base = 'rounded-xl px-4 py-2.5 font-medium text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 disabled:opacity-40';
+  const styles = variant === 'solid'
+    ? { backgroundColor: INK, color: '#fff' }
+    : variant === 'outline'
+    ? { backgroundColor: 'transparent', color: INK, border: `1px solid ${BORDER}` }
+    : { backgroundColor: 'transparent', color: INK_SOFT };
+  return (
+    <button onClick={onClick} disabled={disabled} title={title} className={`${base} ${className}`} style={{ fontFamily: F_DISPLAY, ...styles, ...style }}>
+      {children}
+    </button>
+  );
+}
+function Card({ children, className = '', style }) {
+  return <div className={`rounded-2xl border p-4 ${className}`} style={{ borderColor: BORDER, backgroundColor: CARD, ...style }}>{children}</div>;
+}
+function Chip({ label, on, onClick }) {
+  return (
+    <button onClick={onClick} className="rounded-lg px-3 py-1.5 text-xs border"
+      style={{ borderColor: on ? INK : BORDER, backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
+      {label}
+    </button>
+  );
+}
+function Empty({ children }) {
+  return <div className="rounded-2xl border border-dashed px-4 py-8 text-center text-sm" style={{ borderColor: BORDER, color: INK_SOFT }}>{children}</div>;
+}
+function SectionTitle({ children, sub }) {
+  return (
+    <div className="mb-4">
+      <h2 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>{children}</h2>
+      {sub && <p className="text-sm mt-0.5" style={{ color: INK_SOFT }}>{sub}</p>}
+    </div>
+  );
+}
+
+/* ==================== Graphiques ==================== */
+const STYLES_GRAPHIQUE = [
+  { k: 'ligne', label: 'Courbe' },
+  { k: 'barres', label: 'Barres' },
+  { k: 'aire', label: 'Aire' },
+  { k: 'points', label: 'Points' },
+];
+const PERIODES = [
+  { k: 30, label: '1 mois' },
+  { k: 90, label: '3 mois' },
+  { k: 180, label: '6 mois' },
+  { k: 365, label: '1 an' },
+  { k: 0, label: 'Tout' },
+];
+
+function Graphique({ points, style, seuil, hauteur = 220 }) {
+  const donnees = points.map((p) => ({
+    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+    valeur: p.value,
+  }));
+  const axes = (
+    <>
+      <CartesianGrid stroke={BORDER} vertical={false} />
+      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+      <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} %`, 'Résultat']} />
+      {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
+    </>
+  );
+  const marge = { top: 8, right: 8, bottom: 4, left: -14 };
+  return (
+    <div style={{ height: hauteur }}>
+      <ResponsiveContainer width="100%" height="100%">
+        {style === 'barres' ? (
+          <BarChart data={donnees} margin={marge}>{axes}<Bar dataKey="valeur" fill={INK} radius={[4, 4, 0, 0]} isAnimationActive={false} /></BarChart>
+        ) : style === 'aire' ? (
+          <AreaChart data={donnees} margin={marge}>{axes}<Area type="monotone" dataKey="valeur" stroke={INK} fill={INK} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} /></AreaChart>
+        ) : style === 'points' ? (
+          <ScatterChart data={donnees} margin={marge}>{axes}<Scatter dataKey="valeur" fill={INK} isAnimationActive={false} /></ScatterChart>
+        ) : (
+          <LineChart data={donnees} margin={marge}>{axes}<Line type="monotone" dataKey="valeur" stroke={INK} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} /></LineChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* Aperçu minuscule, sans axes : lisible d'un coup d'œil dans une liste */
+function MiniGraphe({ points, couleur }) {
+  const donnees = points.map((p, i) => ({ i, v: p.value }));
+  return (
+    <div style={{ height: 40, width: 110 }} className="shrink-0">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={donnees} margin={{ top: 4, right: 2, bottom: 4, left: 2 }}>
+          <YAxis domain={[0, 100]} hide />
+          <Line type="monotone" dataKey="v" stroke={couleur} strokeWidth={2} dot={false} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* Radar : quels objectifs sont travaillés, et à quel niveau */
+function RadarObjectifs({ lignes, hauteur = 320 }) {
+  const donnees = lignes
+    .filter((l) => l.points.length)
+    .map((l) => ({
+      objectif: l.objectif.length > 22 ? `${l.objectif.slice(0, 20)}…` : l.objectif,
+      niveau: l.points[l.points.length - 1].value,
+      seances: l.points.length,
+    }));
+  if (donnees.length < 3) {
+    return <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Le radar demande au moins trois objectifs cotés sur la période.</p>;
+  }
+  return (
+    <div style={{ height: hauteur }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <RadarChart data={donnees} outerRadius="70%">
+          <PolarGrid stroke={BORDER} />
+          <PolarAngleAxis dataKey="objectif" tick={{ fontSize: 10, fill: INK_SOFT }} />
+          <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: INK_SOFT }} />
+          <Radar name="Dernier résultat" dataKey="niveau" stroke={INK} fill={INK} fillOpacity={0.25} isAnimationActive={false} />
+          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+            formatter={(v, n, p) => [`${v} % · ${p.payload.seances} séances`, 'Dernier résultat']} />
+        </RadarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* ==================== Écran de verrouillage ==================== */
+function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
+  const [step, setStep] = useState(security.pinHash ? 'enter' : 'create1');
+  const [premier, setPremier] = useState('');
+  const [valeur, setValeur] = useState('');
+  const [erreur, setErreur] = useState('');
+  const [now, setNow] = useState(Date.now());
+  const [reset, setReset] = useState(false);
+
+  const bloqueJusqua = security.lockUntil || 0;
+  const attente = bloqueJusqua > now;
+
+  useEffect(() => {
+    if (!attente) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [attente]);
+
+  async function valider() {
+    if (attente || valeur.length < 4) return;
+    if (step === 'enter') {
+      const hash = await hashPin(valeur, security.pinSalt);
+      if (hash === security.pinHash) { onUnlock(valeur); return; }
+      const failed = (security.failedAttempts || 0) + 1;
+      const delai = lockDelayMs(failed);
+      onFailedAttempt(failed, delai ? Date.now() + delai : 0);
+      setErreur(delai ? 'Mot de passe incorrect — saisie suspendue' : 'Mot de passe incorrect');
+      setValeur('');
+      setTimeout(() => setErreur(''), 1500);
+      return;
+    }
+    if (step === 'create1') { setPremier(valeur); setValeur(''); setStep('create2'); return; }
+    if (valeur !== premier) {
+      setErreur('Les deux saisies ne correspondent pas');
+      setPremier(''); setValeur(''); setStep('create1');
+      setTimeout(() => setErreur(''), 1800);
+      return;
+    }
+    const salt = newSalt();
+    const hash = await hashPin(valeur, salt);
+    await onSetup(hash, salt, valeur);
+  }
+
+  const titres = { enter: attente ? 'Saisie suspendue' : 'DatABA Manager', create1: 'Protéger ce poste', create2: 'Confirmez' };
+  const sous = {
+    enter: attente ? `Nouvel essai possible dans ${Math.ceil((bloqueJusqua - now) / 1000)} s.` : 'Saisissez votre mot de passe',
+    create1: "Ce mot de passe verrouille l'accès et chiffre les données consolidées sur cet ordinateur.",
+    create2: 'Ressaisissez le même mot de passe',
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER, fontFamily: F_BODY }}>
+      <div className="w-full max-w-sm">
+        <h1 className="text-xl font-semibold text-center mb-1" style={{ fontFamily: F_DISPLAY, color: INK }}>{titres[step]}</h1>
+        <p className="text-sm text-center mb-5" style={{ color: INK_SOFT }}>{sous[step]}</p>
+        {erreur && <p className="text-sm text-center mb-3" style={{ color: NON_ACQUIS }}>{erreur}</p>}
+        <input type="password" value={valeur} autoFocus disabled={attente}
+          onChange={(e) => setValeur(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') valider(); }}
+          placeholder="Mot de passe"
+          className="w-full rounded-xl border px-3 py-3 text-base bg-transparent mb-3"
+          style={{ borderColor: BORDER, color: INK }} />
+        <Btn onClick={valider} disabled={attente || valeur.length < 4} className="w-full">
+          {step === 'enter' ? 'Déverrouiller' : step === 'create1' ? 'Continuer' : 'Valider'}
+        </Btn>
+        <p className="text-xs text-center mt-3" style={{ color: INK_SOFT }}>Au moins 4 caractères.</p>
+
+        {step === 'enter' && (
+          <div className="text-center mt-6">
+            <button onClick={() => setReset(true)} className="text-xs underline" style={{ color: INK_SOFT }}>Mot de passe oublié ?</button>
+          </div>
+        )}
+        {reset && (
+          <Card className="mt-4">
+            <p className="text-sm mb-3" style={{ color: INK_SOFT }}>
+              Les données consolidées sont chiffrées avec ce mot de passe : sans lui, elles ne sont pas
+              récupérables. Vous pouvez effacer celles de Manager et réimporter les sauvegardes depuis
+              le dossier partagé. <strong>DatABA n'est pas touchée.</strong>
+            </p>
+            <div className="flex gap-2">
+              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
+                Effacer et recommencer
+              </Btn>
+              <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ==================== Tableau de bord ==================== */
+function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne }) {
+  const limite = periode ? Date.now() - periode * 86400000 : 0;
+
+  const recentes = lignes
+    .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }))
+    .filter((l) => l.points.length > 0);
+  const prioritaires = recentes.filter((l) => l.prioritaire);
+  const rang = { bientot: 0, plateau: 1, en_cours: 2, dormant: 3, acquis: 4, non_acquis: 5 };
+  const affichees = (prioritaires.length ? prioritaires : recentes).slice().sort((a, b) => rang[a.etat] - rang[b.etat]);
+
+  const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
+  const fenetre = periode || 30;
+  const depuis = (j) => Date.now() - j * 86400000;
+  const recentesCrises = crises.filter((c) => new Date(c.date) >= depuis(fenetre));
+  const precedentes = crises.filter((c) => {
+    const t = new Date(c.date);
+    return t >= depuis(fenetre * 2) && t < depuis(fenetre);
+  });
+  const tendance = precedentes.length
+    ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
+    : null;
+
+  const compter = (l) => {
+    const m = new Map();
+    l.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  };
+  const topComportement = compter(recentesCrises.flatMap((c) => c.comportementTags || []))[0];
+  const topAntecedent = compter(recentesCrises.flatMap((c) => c.antecedentTags || []))[0];
+  const notees = recentesCrises.filter((c) => c.intensite);
+  const intensiteMoy = notees.length
+    ? Math.round((notees.reduce((a, c) => a + c.intensite, 0) / notees.length) * 10) / 10
+    : null;
+  const compte = (e) => lignes.filter((l) => l.etat === e).length;
+
+  if (!donnees.seances.length) {
+    return <Empty>Importez une sauvegarde DatABA depuis l'onglet Gestion pour commencer.</Empty>;
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {PERIODES.map((p) => <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setPeriode(p.k)} />)}
+      </div>
+
+      <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
+        <Card>
+          <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Objectifs suivis</div>
+          <div className="flex flex-wrap gap-4">
+            {['acquis', 'bientot', 'plateau', 'en_cours'].map((e) => (
+              <div key={e} className="min-w-[68px]">
+                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>
+            Crises — {(PERIODES.find((p) => p.k === periode) || { label: '30 jours' }).label.toLowerCase()}
+          </div>
+          <div className="flex items-baseline gap-3 mb-2">
+            <span className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{recentesCrises.length}</span>
+            {tendance != null && (
+              <span className="text-xs" style={{ color: tendance > 0 ? NON_ACQUIS : tendance < 0 ? ACQUIS : INK_SOFT }}>
+                {tendance > 0 ? '+' : ''}{tendance} % vs période précédente
+              </span>
+            )}
+          </div>
+          {intensiteMoy != null && (
+            <div className="text-xs" style={{ color: INK_SOFT }}>
+              Intensité moyenne : <strong style={{ color: INTENSITES[Math.round(intensiteMoy)].color }}>{intensiteMoy} / 3</strong>
+              {' '}sur {notees.length} crise{notees.length !== 1 ? 's' : ''} notée{notees.length !== 1 ? 's' : ''}
+            </div>
+          )}
+          {topComportement && <div className="text-xs" style={{ color: INK_SOFT }}>Comportement : <strong style={{ color: INK }}>{topComportement[0]}</strong> ({topComportement[1]})</div>}
+          {topAntecedent && <div className="text-xs" style={{ color: INK_SOFT }}>Antécédent : <strong style={{ color: INK }}>{topAntecedent[0]}</strong> ({topAntecedent[1]})</div>}
+          {!recentesCrises.length && <p className="text-xs" style={{ color: INK_SOFT }}>Aucune crise sur la période.</p>}
+        </Card>
+      </div>
+
+      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
+        {prioritaires.length ? 'Objectifs prioritaires' : 'Objectifs travaillés'} — appuyez pour ouvrir la fiche
+      </div>
+      {affichees.length === 0 ? (
+        <Empty>Aucun objectif coté sur cette période.</Empty>
+      ) : (
+        <div className="space-y-1.5">
+          {affichees.map((l, i) => (
+            <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
+              className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
+              style={{ borderColor: BORDER, backgroundColor: CARD }}>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm break-words">
+                  <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
+                  {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
+                </div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>
+                  {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
+                  {l.threshold != null && ` · seuil ${l.threshold} %`}
+                  {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
+                  {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
+                </div>
+              </div>
+              <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
+              <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
+                style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+                {ETATS[l.etat].court}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==================== Accord inter-observateurs ==================== */
 function ioaPourEntree(obj, ea, eb) {
   if (!ea || !eb) return null;
   const t = obj.type;
-  const codeEssai = (x) => (x && typeof x === 'object' ? x.code : x);
+  const code = (x) => (x && typeof x === 'object' ? x.code : x);
 
   if (t === 'trials') {
     const n = Math.max((ea.trials || []).length, (eb.trials || []).length);
     let pts = 0, acc = 0;
     for (let i = 0; i < n; i++) {
-      const a = codeEssai((ea.trials || [])[i]);
-      const b = codeEssai((eb.trials || [])[i]);
+      const a = code((ea.trials || [])[i]);
+      const b = code((eb.trials || [])[i]);
       if (!a && !b) continue;
       pts += 1;
       if (a === b) acc += 1;
@@ -304,11 +720,9 @@ function ioaPourEntree(obj, ea, eb) {
       steps.forEach((st) => {
         const a = ((ta[i] || {}).steps || {})[st.id];
         const b = ((tb[i] || {}).steps || {})[st.id];
-        const oa = a && a.outcome;
-        const ob = b && b.outcome;
-        if (!oa && !ob) return;
+        if (!(a && a.outcome) && !(b && b.outcome)) return;
         pts += 1;
-        if (oa === ob) acc += 1;
+        if ((a && a.outcome) === (b && b.outcome)) acc += 1;
       });
     }
     return pts ? { points: pts, accords: acc } : null;
@@ -319,35 +733,30 @@ function ioaPourEntree(obj, ea, eb) {
     cles.forEach((k) => { pts += 1; if ((ea.marks || {})[k] === (eb.marks || {})[k]) acc += 1; });
     return pts ? { points: pts, accords: acc } : null;
   }
-  /* Mesures continues : l'accord exact n'aurait pas de sens, on retient le
-     rapport entre la plus petite et la plus grande valeur. */
-  const proportionnel = (a, b) => (!a && !b ? null : { points: 1, accords: Math.min(a, b) / Math.max(a, b), proportionnel: true });
-  if (t === 'occurrence') return proportionnel(ea.count || 0, eb.count || 0);
-  if (t === 'timer') return proportionnel(ea.elapsedMs || 0, eb.elapsedMs || 0);
+  const prop = (a, b) => (!a && !b ? null : { points: 1, accords: Math.min(a, b) / Math.max(a, b), proportionnel: true });
+  if (t === 'occurrence') return prop(ea.count || 0, eb.count || 0);
+  if (t === 'timer') return prop(ea.elapsedMs || 0, eb.elapsedMs || 0);
   if (t === 'latency') {
     const moy = (l) => (l && l.length ? l.reduce((x, y) => x + y, 0) / l.length : 0);
-    return proportionnel(moy(ea.latencies), moy(eb.latencies));
+    return prop(moy(ea.latencies), moy(eb.latencies));
   }
   return null;
 }
 
-function trouverPaires(donnees) {
-  const candidates = donnees.seances.filter((s) => s.doubleCotation);
+function trouverPaires(seances) {
+  const cand = seances.filter((s) => s.doubleCotation);
   const parJour = new Map();
-  candidates.forEach((s) => {
-    const jour = new Date(s.date).toLocaleDateString('fr-FR');
-    const cle = `${jour}|${s.atelierId || 'libre'}`;
+  cand.forEach((s) => {
+    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${s.atelierId || 'libre'}`;
     if (!parJour.has(cle)) parJour.set(cle, []);
     parJour.get(cle).push(s);
   });
-
   const paires = [];
-  parJour.forEach((liste, cle) => {
-    for (let i = 0; i < liste.length; i++) {
-      for (let j = i + 1; j < liste.length; j++) {
-        // Deux relevés de la même séance viennent forcément d'appareils différents
-        if (liste[i].source === liste[j].source) continue;
-        paires.push({ cle, jour: cle.split('|')[0], a: liste[i], b: liste[j] });
+  parJour.forEach((l, cle) => {
+    for (let i = 0; i < l.length; i++) {
+      for (let j = i + 1; j < l.length; j++) {
+        if (l[i].source === l[j].source) continue;
+        paires.push({ cle, jour: cle.split('|')[0], a: l[i], b: l[j] });
       }
     }
   });
@@ -356,682 +765,347 @@ function trouverPaires(donnees) {
 
 function comparerPaire(paire, donnees) {
   const lignes = [];
-  const initialesDe = (sess, sid) => ((donnees._idVersInitiales || {})[sess.source] || {})[sid] || '?';
-
+  const ini = (sess, sid) => ((donnees._idVersInitiales || {})[sess.source] || {})[sid] || '?';
   (paire.a.studentIds || []).forEach((sidA) => {
-    const ini = initialesDe(paire.a, sidA);
-    const sidB = (paire.b.studentIds || []).find((id) => initialesDe(paire.b, id) === ini);
+    const initiales = ini(paire.a, sidA);
+    const sidB = (paire.b.studentIds || []).find((id) => ini(paire.b, id) === initiales);
     if (!sidB) return;
-
     (paire.a.selectedObjectives[sidA] || []).forEach((oidA) => {
       const objA = (paire.a.objectiveSnapshot || {})[oidA];
       if (!objA) return;
-      const oidB = (paire.b.selectedObjectives[sidB] || []).find(
-        (o) => ((paire.b.objectiveSnapshot || {})[o] || {}).name === objA.name
-      );
+      const oidB = (paire.b.selectedObjectives[sidB] || []).find((o) => ((paire.b.objectiveSnapshot || {})[o] || {}).name === objA.name);
       if (!oidB) return;
       const r = ioaPourEntree(objA, (paire.a.data[sidA] || {})[oidA], (paire.b.data[sidB] || {})[oidB]);
       if (!r) return;
-      lignes.push({ initials: ini, objectif: objA.name, type: objA.type, ...r, pct: Math.round((r.accords / r.points) * 100) });
+      lignes.push({ initials: initiales, objectif: objA.name, ...r, pct: Math.round((r.accords / r.points) * 100) });
     });
   });
-
   const points = lignes.reduce((a, l) => a + l.points, 0);
   const accords = lignes.reduce((a, l) => a + l.accords, 0);
-  return { lignes, points, accords, pct: points ? Math.round((accords / points) * 100) : null };
+  return { lignes, points, pct: points ? Math.round((accords / points) * 100) : null };
 }
 
-function AccordScreen({ donnees }) {
-  const paires = trouverPaires(donnees);
+/* ==================== Séances ==================== */
+function SeancesScreen({ donnees }) {
   const [choisie, setChoisie] = useState(null);
 
-  if (paires.length === 0) {
-    return (
-      <Card>
-        <p className="text-sm" style={{ color: INK_SOFT }}>
-          Aucune séance en double cotation détectée. Pour qu'une paire apparaisse ici, les deux
-          intervenants doivent avoir coché <strong>« Deux observateurs en parallèle »</strong> dans
-          DatABA, sur la même séance et le même jour, chacun sur son appareil.
-        </p>
-      </Card>
-    );
-  }
+  const seances = donnees.seances.map((s) => {
+    let cotations = 0;
+    (s.studentIds || []).forEach((sid) => {
+      ((s.selectedObjectives || {})[sid] || []).forEach((oid) => {
+        const obj = (s.objectiveSnapshot || {})[oid];
+        const entry = (s.data || {})[sid] && s.data[sid][oid];
+        if (obj && entry && objectiveScoreValue(obj, entry) != null) cotations += 1;
+      });
+    });
+    return { ...s, cotations };
+  }).sort((a, b) => b.cotations - a.cotations);
 
+  const paires = trouverPaires(donnees.seances);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
   const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
 
+  if (!donnees.seances.length) return <Empty>Aucune séance importée.</Empty>;
+
   return (
     <div>
-      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-        {paires.length} paire{paires.length !== 1 ? 's' : ''} de relevés détectée{paires.length !== 1 ? 's' : ''}.
-        Sélectionnez-en une pour mesurer l'accord entre les deux observateurs.
-      </p>
-
-      <div className="space-y-1.5 mb-4">
-        {paires.map((p, i) => (
-          <button key={i} onClick={() => setChoisie(p)}
-            className="w-full text-left rounded-xl border px-3.5 py-3"
-            style={{ borderColor: choisie === p ? INK : BORDER, backgroundColor: CARD }}>
-            <div className="text-sm font-medium">{p.jour}</div>
-            <div className="text-xs" style={{ color: INK_SOFT }}>{p.a.source} · {p.b.source}</div>
-          </button>
+      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Séances les plus cotées</div>
+      <div className="space-y-1.5 mb-6">
+        {seances.slice(0, 12).map((s) => (
+          <div key={s.id} className="rounded-xl border px-3.5 py-3 flex items-center justify-between gap-3" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+            <div className="min-w-0">
+              <div className="text-sm font-medium">
+                {new Date(s.date).toLocaleDateString('fr-FR')}
+                {s.doubleCotation && <span className="text-xs ml-2 px-1.5 py-0.5 rounded" style={{ backgroundColor: INK, color: '#fff' }}>double cotation</span>}
+              </div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>
+                {s.source} · {(s.studentIds || []).length} personne{(s.studentIds || []).length !== 1 ? 's' : ''}
+              </div>
+            </div>
+            <span className="text-sm shrink-0" style={{ fontFamily: F_MONO, color: INK }}>{s.cotations}</span>
+          </div>
         ))}
       </div>
 
-      {res && (
+      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Accord inter-observateurs</div>
+      {paires.length === 0 ? (
+        <Card>
+          <p className="text-sm" style={{ color: INK_SOFT }}>
+            Aucune paire détectée. Pour qu'une paire apparaisse, les deux intervenants doivent avoir
+            coché <strong>« Deux observateurs en parallèle »</strong> dans DatABA, sur la même séance
+            et le même jour, chacun sur son appareil.
+          </p>
+        </Card>
+      ) : (
         <>
-          <Card className="mb-3">
-            <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
-              {res.pct != null ? `${res.pct} %` : '—'}
-            </div>
-            <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
-              d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
-            </div>
-            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-              Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
-              En dessous, il vaut mieux reprendre ensemble les définitions avant de poursuivre.
-            </p>
-          </Card>
-
-          <div className="space-y-1.5">
-            {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
-              <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-                <div className="min-w-0">
-                  <div className="text-sm break-words">
-                    <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
-                  </div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>
-                    {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
-                  </div>
-                </div>
-                <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
-                  {l.pct} %
-                </span>
-              </div>
+          <div className="space-y-1.5 mb-3">
+            {paires.map((p, i) => (
+              <button key={i} onClick={() => setChoisie(p)}
+                className="w-full text-left rounded-xl border px-3.5 py-3"
+                style={{ borderColor: choisie === p ? INK : BORDER, backgroundColor: CARD }}>
+                <div className="text-sm font-medium">{p.jour}</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>{p.a.source} · {p.b.source}</div>
+              </button>
             ))}
           </div>
+
+          {res && (
+            <>
+              <Card className="mb-3">
+                <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
+                  {res.pct != null ? `${res.pct} %` : '—'}
+                </div>
+                <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
+                  d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
+                </div>
+                <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                  Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
+                  En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
+                </p>
+              </Card>
+              <div className="space-y-1.5">
+                {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
+                  <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+                    <div className="min-w-0">
+                      <div className="text-sm break-words">
+                        <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
+                      </div>
+                      <div className="text-xs" style={{ color: INK_SOFT }}>
+                        {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
+                      </div>
+                    </div>
+                    <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
+                      {l.pct} %
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
   );
 }
 
-/* ==================== Écran de verrouillage ==================== */
-function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
-  const [step, setStep] = useState(security.pinHash ? 'enter' : 'create1');
-  const [premier, setPremier] = useState('');
-  const [valeur, setValeur] = useState('');
-  const [erreur, setErreur] = useState('');
-  const [now, setNow] = useState(Date.now());
-  const [reset, setReset] = useState(false);
-
-  const bloqueJusqua = security.lockUntil || 0;
-  const attente = bloqueJusqua > now;
-
-  useEffect(() => {
-    if (!attente) return undefined;
-    const id = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(id);
-  }, [attente]);
-
-  async function valider() {
-    if (attente || valeur.length < 4) return;
-    if (step === 'enter') {
-      const hash = await hashPin(valeur, security.pinSalt);
-      if (hash === security.pinHash) { onUnlock(valeur); return; }
-      const failed = (security.failedAttempts || 0) + 1;
-      const delai = lockDelayMs(failed);
-      onFailedAttempt(failed, delai ? Date.now() + delai : 0);
-      setErreur(delai ? 'Code incorrect — saisie suspendue' : 'Code incorrect');
-      setValeur('');
-      setTimeout(() => setErreur(''), 1500);
-      return;
-    }
-    if (step === 'create1') { setPremier(valeur); setValeur(''); setStep('create2'); return; }
-    if (valeur !== premier) {
-      setErreur('Les deux saisies ne correspondent pas');
-      setPremier(''); setValeur(''); setStep('create1');
-      setTimeout(() => setErreur(''), 1800);
-      return;
-    }
-    const salt = newSalt();
-    const hash = await hashPin(valeur, salt);
-    await onSetup(hash, salt, valeur);
-  }
-
-  const titres = {
-    enter: attente ? 'Saisie suspendue' : 'DatABA Manager',
-    create1: 'Protéger ce poste',
-    create2: 'Confirmez',
-  };
-  const soustitres = {
-    enter: attente
-      ? `Trop d'essais. Nouvel essai possible dans ${Math.ceil((bloqueJusqua - now) / 1000)} s.`
-      : 'Saisissez votre mot de passe',
-    create1: "Ce mot de passe verrouille l'accès et chiffre les données consolidées sur cet ordinateur.",
-    create2: 'Ressaisissez le même mot de passe',
-  };
-
-  return (
-    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER, fontFamily: F_BODY }}>
-      <div className="w-full max-w-sm">
-        <h1 className="text-xl font-semibold text-center mb-1" style={{ fontFamily: F_DISPLAY, color: INK }}>{titres[step]}</h1>
-        <p className="text-sm text-center mb-5" style={{ color: INK_SOFT }}>{soustitres[step]}</p>
-        {erreur && <p className="text-sm text-center mb-3" style={{ color: NON_ACQUIS }}>{erreur}</p>}
-        <input
-          type="password"
-          value={valeur}
-          autoFocus
-          disabled={attente}
-          onChange={(e) => setValeur(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') valider(); }}
-          placeholder="Mot de passe"
-          className="w-full rounded-xl border px-3 py-3 text-base bg-transparent mb-3"
-          style={{ borderColor: BORDER, color: INK }}
-        />
-        <Btn onClick={valider} disabled={attente || valeur.length < 4} className="w-full">
-          {step === 'enter' ? 'Déverrouiller' : step === 'create1' ? 'Continuer' : 'Valider'}
-        </Btn>
-        <p className="text-xs text-center mt-3" style={{ color: INK_SOFT }}>Au moins 4 caractères.</p>
-
-        {step === 'enter' && (
-          <div className="text-center mt-6">
-            <button onClick={() => setReset(true)} className="text-xs underline" style={{ color: INK_SOFT }}>
-              Mot de passe oublié ?
-            </button>
-          </div>
-        )}
-        {reset && (
-          <div className="rounded-2xl border p-4 mt-4" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-            <p className="text-sm mb-3" style={{ color: INK_SOFT }}>
-              Les données consolidées sont chiffrées avec ce mot de passe : sans lui, elles ne sont pas
-              récupérables. Vous pouvez tout effacer et réimporter les sauvegardes depuis le dossier partagé.
-            </p>
-            <div className="flex gap-2">
-              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
-                Effacer et recommencer
-              </Btn>
-              <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ==================== Composants d'interface ==================== */
-function Btn({ children, onClick, variant = 'solid', className = '', disabled, style }) {
-  const base = 'rounded-xl px-4 py-2.5 font-medium text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 disabled:opacity-40';
-  const styles =
-    variant === 'solid'
-      ? { backgroundColor: INK, color: '#fff' }
-      : variant === 'outline'
-      ? { backgroundColor: 'transparent', color: INK, border: `1px solid ${BORDER}` }
-      : { backgroundColor: 'transparent', color: INK_SOFT };
-  return (
-    <button onClick={onClick} disabled={disabled} className={`${base} ${className}`} style={{ fontFamily: F_DISPLAY, ...styles, ...style }}>
-      {children}
-    </button>
-  );
-}
-function Card({ children, className = '' }) {
-  return (
-    <div className={`rounded-2xl border p-4 ${className}`} style={{ borderColor: BORDER, backgroundColor: CARD }}>
-      {children}
-    </div>
-  );
-}
-
-/* ==================== Écran d'import ==================== */
-function ImportScreen({ donnees, onImported }) {
-  const [passphrase, setPassphrase] = useState('');
-  const [fichier, setFichier] = useState(null);
-  const [enveloppe, setEnveloppe] = useState(null);   // sauvegarde chiffrée en attente de clé
-  const [erreur, setErreur] = useState('');
-  const [enCours, setEnCours] = useState(false);
-
-  /* Le format est reconnu au contenu, pas à l'extension : selon les systèmes,
-     un filtre trop strict masque des fichiers pourtant valides. */
-  async function analyser(f) {
-    setErreur('');
-    setEnveloppe(null);
-    setFichier(f);
-    if (!f) return;
-
-    if (/\.(xlsx|xls|csv)$/i.test(f.name)) {
-      setErreur(
-        "Ce fichier est un rapport tableur, pas une sauvegarde. Dans DatABA, allez dans " +
-        "Export → « Générer le fichier pour Manager », ou Gestion → Sauvegarde → Exporter."
-      );
-      setFichier(null);
-      return;
-    }
-
-    let contenu;
-    try {
-      contenu = JSON.parse(await f.text());
-    } catch (e) {
-      setErreur("Ce fichier n'est pas lisible. Attendu : une sauvegarde DatABA au format .json.");
-      setFichier(null);
-      return;
-    }
-
-    if (contenu.format === 'aba-backup-encrypted') {
-      setEnveloppe(contenu);            // clé requise
-      return;
-    }
-    if (contenu.format === 'aba-backup') {
-      await integrer(contenu, f.name);  // sauvegarde en clair, rien à déchiffrer
-      return;
-    }
-    if (contenu.format === 'aba-config') {
-      setErreur("Ce fichier ne contient que la configuration, sans aucune séance. Exportez une sauvegarde complète.");
-      setFichier(null);
-      return;
-    }
-    setErreur("Format non reconnu. Attendu : une sauvegarde DatABA, chiffrée ou non.");
-    setFichier(null);
-  }
-
-  async function integrer(backup, nomFichier) {
-    const nomSource = nomFichier.replace(/\.json$/i, '');
-    onImported(fusionnerImport(donnees, backup, nomSource));
-    setFichier(null);
-    setEnveloppe(null);
-    setPassphrase('');
-  }
-
-  async function dechiffrer() {
-    if (!enveloppe || passphrase.length < 1) return;
-    setEnCours(true);
-    setErreur('');
-    try {
-      const backup = await decryptEnvelope(enveloppe, passphrase);
-      await integrer(backup, fichier.name);
-    } catch (e) {
-      setErreur('Mot de passe incorrect ou fichier corrompu.');
-    }
-    setEnCours(false);
-  }
-
-  return (
-    <Card className="mb-4">
-      <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Importer une sauvegarde DatABA</div>
-      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-        Récupérez le fichier déposé par l'éducateur, sélectionnez-le ici. S'il est chiffré, la clé
-        vous sera demandée. Les séances déjà connues sont mises à jour, les nouvelles s'ajoutent —
-        rien n'est dupliqué.
-      </p>
-
-      <input
-        type="file"
-        onChange={(e) => analyser(e.target.files && e.target.files[0])}
-        className="w-full text-sm mb-2"
-      />
-
-      {enveloppe && (
-        <>
-          <p className="text-xs mb-2" style={{ color: INK_SOFT }}>
-            Sauvegarde chiffrée détectée — saisissez la clé transmise par l'éducateur.
-          </p>
-          <input
-            type="password"
-            value={passphrase}
-            autoFocus
-            onChange={(e) => setPassphrase(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') dechiffrer(); }}
-            placeholder="Mot de passe de la sauvegarde"
-            className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2"
-            style={{ borderColor: BORDER, color: INK }}
-          />
-          <Btn onClick={dechiffrer} disabled={!passphrase || enCours} className="w-full">
-            {enCours ? 'Déchiffrement…' : 'Déchiffrer et importer'}
-          </Btn>
-        </>
-      )}
-
-      {erreur && (
-        <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>
-          {erreur}
-        </p>
-      )}
-
-      {donnees.sources.length > 0 && (
-        <p className="text-xs mt-3" style={{ color: INK_SOFT }}>
-          Sources déjà importées : {donnees.sources.join(', ')}
-        </p>
-      )}
-    </Card>
-  );
-}
-
-/* ==================== Vue par personne ====================
-   Courbes par objectif, style de graphique au choix, et fenêtre temporelle
-   ajustable — ce que la tablette ne peut pas offrir, faute de recul. */
-const STYLES_GRAPHIQUE = [
-  { k: 'ligne', label: 'Courbe' },
-  { k: 'barres', label: 'Barres' },
-  { k: 'aire', label: 'Aire' },
-  { k: 'points', label: 'Points' },
-];
-const PERIODES = [
-  { k: 30, label: '30 jours' },
-  { k: 90, label: '3 mois' },
-  { k: 180, label: '6 mois' },
-  { k: 365, label: '1 an' },
-  { k: 0, label: 'Tout' },
-];
-
-function Graphique({ points, style, seuil }) {
-  const donnees = points.map((p) => ({
-    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
-    valeur: p.value,
-  }));
-  const commun = (
-    <>
-      <CartesianGrid stroke={BORDER} vertical={false} />
-      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-      <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} %`, 'Résultat']} />
-      {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
-    </>
-  );
-  const marge = { top: 8, right: 8, bottom: 4, left: -14 };
-
-  return (
-    <div style={{ height: 220 }}>
-      <ResponsiveContainer width="100%" height="100%">
-        {style === 'barres' ? (
-          <BarChart data={donnees} margin={marge}>{commun}
-            <Bar dataKey="valeur" fill={INK} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-          </BarChart>
-        ) : style === 'aire' ? (
-          <AreaChart data={donnees} margin={marge}>{commun}
-            <Area type="monotone" dataKey="valeur" stroke={INK} fill={INK} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
-          </AreaChart>
-        ) : style === 'points' ? (
-          <ScatterChart data={donnees} margin={marge}>{commun}
-            <Scatter dataKey="valeur" fill={INK} isAnimationActive={false} />
-          </ScatterChart>
-        ) : (
-          <LineChart data={donnees} margin={marge}>{commun}
-            <Line type="monotone" dataKey="valeur" stroke={INK} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
-          </LineChart>
-        )}
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function PersonneScreen({ donnees, lignes }) {
-  const [personne, setPersonne] = useState(donnees.personnes[0] ? donnees.personnes[0].initials : null);
+/* ==================== Personnes ==================== */
+function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, onRapport }) {
+  const [vue, setVue] = useState('objectifs');
   const [style, setStyle] = useState('ligne');
-  const [periode, setPeriode] = useState(0);
 
-  if (!donnees.personnes.length) {
-    return <Card><p className="text-sm text-center" style={{ color: INK_SOFT }}>Importez une sauvegarde pour commencer.</p></Card>;
-  }
+  if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour commencer.</Empty>;
 
+  const personne = (focus && focus.initiales) || donnees.personnes[0].initials;
+  const objectifOuvert = focus && focus.objectif;
   const limite = periode ? Date.now() - periode * 86400000 : 0;
+
   const siennes = lignes
     .filter((l) => l.initials === personne)
     .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }));
 
+  const crisesPersonne = (donnees.crises || []).filter((c) => {
+    if (!c.studentId) return false;
+    const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+    return ini === personne && (!limite || new Date(c.date) >= limite);
+  });
+
+  const lundiDe = (d) => {
+    const x = new Date(d);
+    x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+    x.setHours(0, 0, 0, 0);
+    return x.getTime();
+  };
+  const semaines = new Map();
+  const touche = (k) => {
+    if (!semaines.has(k)) semaines.set(k, { somme: 0, n: 0, crises: 0 });
+    return semaines.get(k);
+  };
+  siennes.forEach((l) => l.points.forEach((p) => { const e = touche(lundiDe(p.date)); e.somme += p.value; e.n += 1; }));
+  crisesPersonne.forEach((c) => { touche(lundiDe(c.date)).crises += 1; });
+  const croisement = Array.from(semaines.entries()).sort((a, b) => a[0] - b[0]).map(([k, e]) => ({
+    label: new Date(k).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+    autonomie: e.n ? Math.round(e.somme / e.n) : null,
+    crises: e.crises,
+  }));
+
+  const compte = (e) => siennes.filter((l) => l.etat === e).length;
+
   return (
     <div>
-      <div className="flex flex-wrap gap-2 mb-3 no-print">
+      <div className="flex flex-wrap gap-2 mb-3">
         {donnees.personnes.map((p) => (
-          <button key={p.initials} onClick={() => setPersonne(p.initials)}
+          <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
             className="rounded-xl px-4 py-2.5 border font-semibold text-sm"
             style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? INK : BORDER,
               backgroundColor: personne === p.initials ? INK : 'transparent', color: personne === p.initials ? '#fff' : INK_SOFT }}>
-            {p.initials}
+            {nomAffiche(donnees, p.initials)}
           </button>
         ))}
       </div>
 
-      <div className="flex flex-wrap gap-1.5 mb-4 no-print">
-        {STYLES_GRAPHIQUE.map((g) => (
-          <button key={g.k} onClick={() => setStyle(g.k)} className="rounded-lg px-3 py-1.5 text-xs border"
-            style={{ borderColor: style === g.k ? INK : BORDER, backgroundColor: style === g.k ? INK : 'transparent', color: style === g.k ? '#fff' : INK_SOFT }}>
-            {g.label}
-          </button>
-        ))}
-        <span className="w-px mx-1" style={{ backgroundColor: BORDER }} />
-        {PERIODES.map((pe) => (
-          <button key={pe.k} onClick={() => setPeriode(pe.k)} className="rounded-lg px-3 py-1.5 text-xs border"
-            style={{ borderColor: periode === pe.k ? INK : BORDER, backgroundColor: periode === pe.k ? INK : 'transparent', color: periode === pe.k ? '#fff' : INK_SOFT }}>
-            {pe.label}
-          </button>
-        ))}
-      </div>
-
-      {siennes.length === 0 ? (
-        <Card><p className="text-sm text-center" style={{ color: INK_SOFT }}>Aucun objectif pour cette personne.</p></Card>
-      ) : (
-        <div className="space-y-3">
-          {siennes.map((l, i) => {
-            const et = ETATS[l.etat];
-            return (
-              <Card key={i}>
-                <div className="flex items-start justify-between gap-3 mb-2">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium break-words">{l.objectif}</div>
-                    <div className="text-xs" style={{ color: INK_SOFT }}>
-                      {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
-                      {l.threshold != null && ` · seuil ${l.threshold} %`}
-                    </div>
-                  </div>
-                  <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
-                    style={{ backgroundColor: et.color, color: '#fff', fontFamily: F_DISPLAY }}>
-                    {et.label}
-                  </span>
-                </div>
-                {l.points.length > 0
-                  ? <Graphique points={l.points} style={style} seuil={l.threshold} />
-                  : <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>}
-              </Card>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ==================== Écran Bilan ==================== */
-/* Reconstruit, pour chaque personne et chaque objectif, la série de scores et
-   son état. Les objectifs sont retrouvés dans les instantanés conservés au
-   sein de chaque séance : c'est la source la plus fiable, elle ne dépend
-   d'aucune configuration vivante à synchroniser entre appareils. */
-function construireLignes(donnees) {
-  const lignes = [];
-  donnees.personnes.forEach((p) => {
-    const tableParSource = {};
-    donnees.sources.forEach((src) => {
-      const t = (donnees._idVersInitiales || {})[src] || {};
-      const sid = Object.keys(t).find((id) => t[id] === p.initials);
-      if (sid) tableParSource[src] = sid;
-    });
-
-    const seancesDeLaPersonne = donnees.seances.filter((sess) => {
-      const sid = tableParSource[sess.source];
-      return sid && (sess.selectedObjectives || {})[sid];
-    });
-
-    const objectifsParNom = new Map();
-    seancesDeLaPersonne.forEach((sess) => {
-      const sid = tableParSource[sess.source];
-      (sess.selectedObjectives[sid] || []).forEach((oid) => {
-        const snap = (sess.objectiveSnapshot || {})[oid];
-        if (snap && !objectifsParNom.has(snap.name)) objectifsParNom.set(snap.name, snap);
-      });
-    });
-
-    objectifsParNom.forEach((obj) => {
-      const statut = statutObjectif(seancesDeLaPersonne, tableParSource, obj, []);
-      lignes.push({ initials: p.initials, objectif: obj.name, type: obj.type, ...statut });
-    });
-  });
-  return lignes;
-}
-
-function TableauDeBord({ donnees, lignes }) {
-  const [filtreEtat, setFiltreEtat] = useState('tous');
-
-  const compteEtat = (e) => lignes.filter((l) => l.etat === e).length;
-  const total = lignes.length;
-
-  /* Crises et observations : volume récent et répartition, pour situer d'un
-     coup d'œil où en est le collectif. */
-  const crises = donnees.crises || [];
-  const depuis = (jours) => Date.now() - jours * 86400000;
-  const crisesRecentes = crises.filter((c) => new Date(c.date) >= depuis(30) && (c.kind || 'crise') === 'crise');
-  const crisesPrecedentes = crises.filter((c) => {
-    const t = new Date(c.date);
-    return t >= depuis(60) && t < depuis(30) && (c.kind || 'crise') === 'crise';
-  });
-  const tendance = crisesPrecedentes.length
-    ? Math.round(((crisesRecentes.length - crisesPrecedentes.length) / crisesPrecedentes.length) * 100)
-    : null;
-
-  const compter = (l) => {
-    const m = new Map();
-    l.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
-    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
-  };
-  const parComportement = compter(crisesRecentes.flatMap((c) => c.comportementTags || []));
-  const parAntecedent = compter(crisesRecentes.flatMap((c) => c.antecedentTags || []));
-
-  const Jauge = ({ etat }) => {
-    const n = compteEtat(etat);
-    const pct = total ? Math.round((n / total) * 100) : 0;
-    return (
-      <div className="flex-1 min-w-[110px]">
-        <div className="text-2xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[etat].color }}>{n}</div>
-        <div className="text-xs mb-1" style={{ color: INK_SOFT }}>{ETATS[etat].label}</div>
-        <div className="h-1.5 rounded-full" style={{ backgroundColor: PAPER }}>
-          <div style={{ width: `${pct}%`, height: '100%', borderRadius: 999, backgroundColor: ETATS[etat].color }} />
-        </div>
-      </div>
-    );
-  };
-
-
-  const filtrees = filtreEtat === 'tous' ? lignes : lignes.filter((l) => l.etat === filtreEtat);
-  const compte = compteEtat;
-
-  return (
-    <div>
-      {/* Où en est-on, d'un coup d'œil */}
-      <Card className="mb-3">
-        <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Objectifs suivis</div>
-        <div className="flex flex-wrap gap-4">
-          <Jauge etat="acquis" />
-          <Jauge etat="en_cours" />
-          <Jauge etat="non_acquis" />
-        </div>
-      </Card>
-
-      <Card className="mb-4">
-        <div className="text-xs uppercase tracking-wide mb-3" style={{ color: INK_SOFT }}>Crises — 30 derniers jours</div>
-        <div className="flex flex-wrap items-baseline gap-4 mb-3">
-          <span>
-            <span className="text-2xl font-semibold" style={{ fontFamily: F_MONO }}>{crisesRecentes.length}</span>
-            <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>crise{crisesRecentes.length !== 1 ? 's' : ''}</span>
-          </span>
-          {tendance != null && (
-            <span className="text-sm" style={{ color: tendance > 0 ? NON_ACQUIS : tendance < 0 ? ACQUIS : INK_SOFT }}>
-              {tendance > 0 ? '+' : ''}{tendance} % par rapport aux 30 jours précédents
-            </span>
-          )}
-        </div>
-        {parComportement.length > 0 && (
-          <div className="text-xs mb-1" style={{ color: INK_SOFT }}>
-            Comportement le plus fréquent : <strong style={{ color: INK }}>{parComportement[0][0]}</strong> ({parComportement[0][1]})
-          </div>
-        )}
-        {parAntecedent.length > 0 && (
-          <div className="text-xs" style={{ color: INK_SOFT }}>
-            Antécédent le plus fréquent : <strong style={{ color: INK }}>{parAntecedent[0][0]}</strong> ({parAntecedent[0][1]})
-          </div>
-        )}
-        {crisesRecentes.length === 0 && (
-          <p className="text-xs" style={{ color: INK_SOFT }}>Aucune crise consignée sur la période.</p>
-        )}
-      </Card>
-
-      <div className="flex gap-1.5 mb-4 flex-wrap">
+      <div className="flex flex-wrap gap-1.5 mb-3">
         {[
-          { k: 'tous', l: 'Tous', n: lignes.length },
-          { k: 'acquis', l: 'Acquis', n: compte('acquis') },
-          { k: 'en_cours', l: "En cours", n: compte('en_cours') },
-          { k: 'non_acquis', l: 'Non acquis', n: compte('non_acquis') },
-        ].map((f) => (
-          <button
-            key={f.k}
-            onClick={() => setFiltreEtat(f.k)}
-            className="rounded-lg px-3 py-2 text-xs border"
-            style={{
-              borderColor: filtreEtat === f.k ? INK : BORDER,
-              backgroundColor: filtreEtat === f.k ? INK : 'transparent',
-              color: filtreEtat === f.k ? '#fff' : INK_SOFT,
-            }}
-          >
-            {f.l} ({f.n})
-          </button>
-        ))}
+          { k: 'objectifs', l: 'Objectifs' },
+          { k: 'bilan', l: 'Bilan' },
+          { k: 'radar', l: 'Radar' },
+          { k: 'crises', l: 'Crises' },
+          { k: 'croisement', l: 'Croisement' },
+        ].map((v) => <Chip key={v.k} label={v.l} on={vue === v.k} onClick={() => setVue(v.k)} />)}
+        <span className="w-px mx-1" style={{ backgroundColor: BORDER }} />
+        {PERIODES.map((p) => <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setPeriode(p.k)} />)}
       </div>
 
-      {filtrees.length === 0 ? (
-        <Card><p className="text-sm text-center" style={{ color: INK_SOFT }}>Aucun objectif dans cette catégorie.</p></Card>
-      ) : (
-        <div className="space-y-1.5">
-          {filtrees.map((l, i) => {
-            const et = ETATS[l.etat];
-            return (
-              <div key={i} className="rounded-xl border px-3.5 py-3 flex items-center justify-between gap-3" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-                <div className="min-w-0">
-                  <div className="text-sm">
-                    <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
+          Générer un rapport
+        </Btn>
+        <span className="text-xs" style={{ color: INK_SOFT }}>Reprend cette personne, ces objectifs et cette période.</span>
+      </div>
+
+      {vue === 'objectifs' && (
+        <>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+          </div>
+          {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
+            <div className="space-y-3">
+              {siennes.map((l, i) => (
+                <Card key={i} style={objectifOuvert === l.objectif ? { borderColor: INK, borderWidth: 2 } : undefined}>
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</div>
+                      <div className="text-xs" style={{ color: INK_SOFT }}>
+                        {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
+                        {l.threshold != null && ` · seuil ${l.threshold} %`}
+                      </div>
+                    </div>
+                    <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
+                      style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+                      {ETATS[l.etat].label}
+                    </span>
                   </div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>
-                    {l.points.length} séance{l.points.length !== 1 ? 's' : ''} cotée{l.points.length !== 1 ? 's' : ''}
-                    {l.streak != null && ` · ${l.streak}/${l.needed} au seuil de ${l.threshold} %`}
-                  </div>
-                </div>
-                <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0" style={{ backgroundColor: et.color, color: '#fff', fontFamily: F_DISPLAY }}>
-                  {et.label}
+                  {l.points.length
+                    ? <Graphique points={l.points} style={style} seuil={l.threshold} hauteur={objectifOuvert === l.objectif ? 300 : 220} />
+                    : <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>}
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {vue === 'bilan' && (
+        <Card>
+          <div className="flex flex-wrap gap-4 mb-4">
+            {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => (
+              <div key={e} className="min-w-[80px]">
+                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-1.5">
+            {siennes.map((l, i) => (
+              <div key={i} className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2" style={{ backgroundColor: PAPER }}>
+                <span className="text-sm min-w-0 break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</span>
+                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: '#fff' }}>
+                  {ETATS[l.etat].court}
                 </span>
               </div>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {vue === 'radar' && (
+        <Card>
+          <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+            Dernier résultat de chaque objectif travaillé sur la période — la forme montre d'un coup
+            d'œil ce qui est solide et ce qui reste à consolider.
+          </div>
+          <RadarObjectifs lignes={siennes} />
+        </Card>
+      )}
+
+      {vue === 'crises' && (
+        crisesPersonne.length === 0 ? <Empty>Aucune crise consignée sur la période.</Empty> : (
+          <Card>
+            <div className="text-sm mb-3">
+              <span style={{ fontFamily: F_MONO, fontSize: '1.25rem' }}>{crisesPersonne.length}</span> crise{crisesPersonne.length !== 1 ? 's' : ''} sur la période
+            </div>
+            <div className="space-y-1.5">
+              {crisesPersonne.slice(0, 20).map((c, i) => (
+                <div key={i} className="rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
+                  <div className="text-xs flex items-center gap-2" style={{ color: INK_SOFT }}>
+                    <span>{new Date(c.date).toLocaleDateString('fr-FR')} · {Math.round((c.durationMs || 0) / 60000)} min</span>
+                    {c.intensite && (
+                      <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: INTENSITES[c.intensite].color, color: '#fff' }}>
+                        {c.intensite} · {INTENSITES[c.intensite].label}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-sm">{(c.comportementTags || []).join(' → ') || c.comportement || '—'}</div>
+                  {(c.antecedentTags || []).length > 0 && (
+                    <div className="text-xs" style={{ color: INK_SOFT }}>Antécédent : {(c.antecedentTags || []).join(', ')}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Card>
+        )
+      )}
+
+      {vue === 'croisement' && (
+        croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
+          <Card>
+            <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+              Par semaine : autonomie moyenne (courbe) et nombre de crises (barres)
+            </div>
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={croisement} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
+                  <CartesianGrid stroke={BORDER} vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                  <YAxis yAxisId="g" domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+                  <YAxis yAxisId="d" orientation="right" allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={30} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => `Semaine du ${l}`} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar yAxisId="d" dataKey="crises" name="Crises" fill={CRISE} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                  <Line yAxisId="g" type="monotone" dataKey="autonomie" name="Autonomie (%)" stroke={ACQUIS} strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Une évolution parallèle n'établit aucun lien de cause à effet : le graphique sert à
+              repérer un moment à examiner, pas à conclure.
+            </p>
+          </Card>
+        )
       )}
     </div>
   );
 }
 
-/* ==================== Document imprimable ====================
-   L'impression du navigateur sert de génération PDF : « Enregistrer au format
-   PDF » figure dans la boîte d'impression de tous les navigateurs. Ce choix
-   évite une bibliothèque supplémentaire, gère les accents sans réglage, et
-   couvre d'un seul geste l'impression papier comme le fichier à déposer
-   dans Airmes. */
-function RapportScreen({ donnees, lignes, logo, association, onLogo, onAssociation }) {
-  const [personne, setPersonne] = useState('toutes');
-  const [inclureNonAcquis, setInclureNonAcquis] = useState(true);
+/* ==================== Rapport ==================== */
+function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire }) {
+  const [avecGraphiques, setAvecGraphiques] = useState(true);
+  const [style, setStyle] = useState('ligne');
 
-  const retenues = lignes
-    .filter((l) => personne === 'toutes' || l.initials === personne)
-    .filter((l) => inclureNonAcquis || l.etat !== 'non_acquis');
+  if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour composer un rapport.</Empty>;
 
-  const parPersonne = new Map();
-  retenues.forEach((l) => {
-    if (!parPersonne.has(l.initials)) parPersonne.set(l.initials, []);
-    parPersonne.get(l.initials).push(l);
-  });
+  const personne = selection.personne || donnees.personnes[0].initials;
+  const periode = selection.periode || 0;
+  const limite = periode ? Date.now() - periode * 86400000 : 0;
+
+  const disponibles = lignes.filter((l) => l.initials === personne);
+  const retenus = disponibles
+    .filter((l) => (selection.objectifs || []).includes(l.objectif))
+    .map((l) => ({ ...l, points: l.points.filter((p) => !limite || new Date(p.date) >= limite) }));
+
+  const basculer = (objectif) => {
+    const cur = selection.objectifs || [];
+    setSelection({ ...selection, objectifs: cur.includes(objectif) ? cur.filter((o) => o !== objectif) : [...cur, objectif] });
+  };
 
   function chargerLogo(f) {
     if (!f) return;
@@ -1041,56 +1115,92 @@ function RapportScreen({ donnees, lignes, logo, association, onLogo, onAssociati
   }
 
   const aujourdhui = new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+  const libellePeriode = (PERIODES.find((p) => p.k === periode) || { label: 'Tout' }).label;
 
   return (
     <div>
       <Card className="mb-4 no-print">
-        <div className="text-sm font-semibold mb-3" style={{ fontFamily: F_DISPLAY }}>Composer le document</div>
+        <div className="text-sm font-semibold mb-3" style={{ fontFamily: F_DISPLAY }}>Composer le rapport</div>
 
         <div className="mb-3">
-          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Nom de l'association, en en-tête</div>
-          <input
-            value={association}
-            onChange={(e) => onAssociation(e.target.value)}
-            placeholder="Nom de votre association"
-            className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent"
-            style={{ borderColor: BORDER, color: INK }}
-          />
-        </div>
-
-        <div className="mb-3">
-          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Logo, repris sur chaque document</div>
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Association et logo, repris en en-tête</div>
+          <input value={association} onChange={(e) => onAssociation(e.target.value)} placeholder="Nom de votre association"
+            className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2" style={{ borderColor: BORDER, color: INK }} />
           <div className="flex items-center gap-3">
-            {logo && <img src={logo} alt="Logo" style={{ height: 48, objectFit: 'contain' }} />}
+            {logo && <img src={logo} alt="" style={{ height: 44, objectFit: 'contain' }} />}
             <input type="file" accept="image/*" onChange={(e) => chargerLogo(e.target.files && e.target.files[0])} className="text-sm" />
             {logo && <Btn variant="ghost" onClick={() => onLogo(null)} className="text-xs py-1.5">Retirer</Btn>}
           </div>
         </div>
 
         <div className="mb-3">
-          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Personne concernée</div>
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Personne</div>
           <div className="flex flex-wrap gap-1.5">
-            <button onClick={() => setPersonne('toutes')} className="rounded-lg px-3 py-1.5 text-xs border"
-              style={{ borderColor: personne === 'toutes' ? INK : BORDER, backgroundColor: personne === 'toutes' ? INK : 'transparent', color: personne === 'toutes' ? '#fff' : INK_SOFT }}>
-              Toutes
-            </button>
             {donnees.personnes.map((p) => (
-              <button key={p.initials} onClick={() => setPersonne(p.initials)} className="rounded-lg px-3 py-1.5 text-xs border"
-                style={{ borderColor: personne === p.initials ? INK : BORDER, backgroundColor: personne === p.initials ? INK : 'transparent', color: personne === p.initials ? '#fff' : INK_SOFT }}>
-                {p.initials}
-              </button>
+              <Chip key={p.initials} label={nomAffiche(donnees, p.initials)} on={personne === p.initials}
+                onClick={() => setSelection({ personne: p.initials, objectifs: [], periode })} />
             ))}
           </div>
         </div>
 
-        <button onClick={() => setInclureNonAcquis((v) => !v)} className="flex items-center gap-1.5 text-xs mb-3" style={{ color: INK_SOFT }}>
-          <span className="w-9 h-5 rounded-full relative shrink-0" style={{ backgroundColor: inclureNonAcquis ? INK : BORDER }}>
-            <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white" style={{ left: inclureNonAcquis ? '1.25rem' : '0.125rem', transition: 'left .15s' }} />
-          </span>
-          Inclure les objectifs sans donnée
-        </button>
+        <div className="mb-3">
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
+            Nom repris dans le document — pour coller aux termes exacts du projet personnalisé
+          </div>
+          <input value={(donnees.alias.personnes || {})[personne] || ''}
+            onChange={(e) => onAlias('personnes', personne, e.target.value)}
+            placeholder={`Par défaut : ${personne}`}
+            className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }} />
+        </div>
 
-        <Btn onClick={() => window.print()} className="w-full">
+        <div className="mb-3">
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Période</div>
+          <div className="flex flex-wrap gap-1.5">
+            {PERIODES.map((p) => (
+              <Chip key={p.k} label={p.label} on={periode === p.k} onClick={() => setSelection({ ...selection, periode: p.k })} />
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-3">
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Objectifs à inclure, et leur libellé dans le document</div>
+          <div className="space-y-1.5">
+            {disponibles.map((l) => {
+              const coche = (selection.objectifs || []).includes(l.objectif);
+              return (
+                <div key={l.objectif} className="flex items-center gap-2 rounded-lg px-2.5 py-2" style={{ backgroundColor: PAPER }}>
+                  <button onClick={() => basculer(l.objectif)}
+                    className="w-5 h-5 rounded border flex items-center justify-center shrink-0 text-xs"
+                    style={{ borderColor: coche ? INK : BORDER, backgroundColor: coche ? INK : 'transparent', color: '#fff' }}>
+                    {coche ? '✓' : ''}
+                  </button>
+                  <input value={(donnees.alias.objectifs || {})[cleAlias(personne, l.objectif)] || ''}
+                    onChange={(e) => onAlias('objectifs', cleAlias(personne, l.objectif), e.target.value)}
+                    placeholder={l.objectif}
+                    className="flex-1 min-w-0 rounded-lg border px-2 py-1.5 text-sm bg-transparent"
+                    style={{ borderColor: BORDER, color: INK }} />
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs mt-1.5" style={{ color: INK_SOFT }}>
+            Les libellés saisis remplacent l'intitulé de la tablette dans le document, et sont conservés.
+          </p>
+        </div>
+
+        <button onClick={() => setAvecGraphiques((v) => !v)} className="flex items-center gap-1.5 text-xs mb-3" style={{ color: INK_SOFT }}>
+          <span className="w-9 h-5 rounded-full relative shrink-0" style={{ backgroundColor: avecGraphiques ? INK : BORDER }}>
+            <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white" style={{ left: avecGraphiques ? '1.25rem' : '0.125rem', transition: 'left .15s' }} />
+          </span>
+          Inclure les graphiques
+        </button>
+        {avecGraphiques && (
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+          </div>
+        )}
+
+        <Btn onClick={() => window.print()} disabled={!retenus.length} className="w-full">
           Imprimer ou enregistrer en PDF
         </Btn>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
@@ -1099,157 +1209,391 @@ function RapportScreen({ donnees, lignes, logo, association, onLogo, onAssociati
         </p>
       </Card>
 
-      {/* Le document lui-même : c'est cette partie qui part à l'impression */}
       <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-        <div className="flex items-start justify-between gap-4 pb-4 mb-4" style={{ borderBottom: `2px solid ${INK}` }}>
+        <div className="flex items-start justify-between gap-4 pb-4 mb-5" style={{ borderBottom: `2px solid ${INK}` }}>
           <div className="min-w-0">
-            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
-              {association || 'Bilan de suivi'}
-            </div>
+            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>{association || 'Bilan de suivi'}</div>
             <div className="text-sm" style={{ color: INK_SOFT }}>
-              Bilan des objectifs · {aujourdhui}
+              {nomAffiche(donnees, personne)} · période : {libellePeriode} · établi le {aujourdhui}
             </div>
           </div>
           {logo && <img src={logo} alt="" style={{ height: 56, objectFit: 'contain' }} />}
         </div>
 
-        {parPersonne.size === 0 ? (
-          <p className="text-sm" style={{ color: INK_SOFT }}>Aucun objectif à présenter.</p>
+        {retenus.length === 0 ? (
+          <p className="text-sm" style={{ color: INK_SOFT }}>Sélectionnez au moins un objectif.</p>
         ) : (
-          Array.from(parPersonne.entries()).map(([initiales, objs]) => (
-            <div key={initiales} className="mb-6" style={{ breakInside: 'avoid' }}>
-              <div className="text-base font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>{initiales}</div>
-              <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${BORDER}` }}>
-                    <th className="text-left py-1.5 font-medium" style={{ color: INK_SOFT }}>Objectif</th>
-                    <th className="text-right py-1.5 font-medium" style={{ color: INK_SOFT }}>Séances</th>
-                    <th className="text-right py-1.5 font-medium" style={{ color: INK_SOFT }}>Dernier</th>
-                    <th className="text-right py-1.5 font-medium" style={{ color: INK_SOFT }}>État</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {objs.map((l, i) => {
-                    const dernier = l.points.length ? l.points[l.points.length - 1].value : null;
-                    return (
-                      <tr key={i} style={{ borderBottom: `1px solid ${BORDER}` }}>
-                        <td className="py-1.5 pr-2">{l.objectif}</td>
-                        <td className="py-1.5 text-right" style={{ fontFamily: F_MONO }}>{l.points.length}</td>
-                        <td className="py-1.5 text-right" style={{ fontFamily: F_MONO }}>{dernier != null ? `${dernier} %` : '—'}</td>
-                        <td className="py-1.5 text-right" style={{ color: ETATS[l.etat].color, fontWeight: 600 }}>
-                          {ETATS[l.etat].label}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ))
+          retenus.map((l, i) => {
+            const cle = cleAlias(personne, l.objectif);
+            const dernier = l.points.length ? l.points[l.points.length - 1].value : null;
+            const commentaire = (donnees.commentaires || {})[cle] || '';
+            return (
+              <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
+                <div className="flex items-start justify-between gap-3 mb-1">
+                  <div className="text-base font-semibold min-w-0 break-words" style={{ fontFamily: F_DISPLAY }}>
+                    {libelleAffiche(donnees, personne, l.objectif)}
+                  </div>
+                  <span className="text-sm font-semibold shrink-0" style={{ color: ETATS[l.etat].color }}>
+                    {ETAT_RAPPORT[l.etat]}
+                  </span>
+                </div>
+                <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
+                  {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
+                  {dernier != null && ` · dernier résultat ${dernier} %`}
+                  {l.threshold != null && ` · critère ${l.threshold} % sur ${l.needed} séances`}
+                </div>
+
+                {avecGraphiques && l.points.length > 0 && (
+                  <div className="mb-3"><Graphique points={l.points} style={style} seuil={l.threshold} hauteur={180} /></div>
+                )}
+
+                <div className="text-xs mb-1 no-print" style={{ color: INK_SOFT }}>Commentaire</div>
+                <textarea value={commentaire} onChange={(e) => onCommentaire(cle, e.target.value)} rows={3}
+                  placeholder="Observations, contexte, suites à donner…"
+                  className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent no-print"
+                  style={{ borderColor: BORDER, color: INK, fontFamily: F_BODY }} />
+                {commentaire && <p className="text-sm whitespace-pre-wrap print-only" style={{ color: INK }}>{commentaire}</p>}
+              </div>
+            );
+          })
         )}
 
         <p className="text-xs mt-6 pt-3" style={{ color: INK_SOFT, borderTop: `1px solid ${BORDER}` }}>
-          Document établi à partir des cotations relevées sur DatABA. Les états sont calculés selon
-          le critère d'acquisition défini pour chaque objectif.
+          Document établi à partir des cotations relevées sur DatABA. Les états sont calculés selon le
+          critère d'acquisition défini pour chaque objectif.
         </p>
       </div>
     </div>
   );
 }
 
-/* ==================== Application ==================== */
-const SECU_KEY = 'aba-cadre:securite';
+/* ==================== Gestion ==================== */
+function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onRetirerProtection, notify }) {
+  const [fichier, setFichier] = useState(null);
+  const [enveloppe, setEnveloppe] = useState(null);
+  const [passphrase, setPassphrase] = useState('');
+  const [erreur, setErreur] = useState('');
+  const [enCours, setEnCours] = useState(false);
+  const [exportPersonnes, setExportPersonnes] = useState([]);
+  const [demandeCle, setDemandeCle] = useState(null);
+  const [cleExport, setCleExport] = useState('');
+  const [changement, setChangement] = useState(null);
 
-/* Efface UNIQUEMENT les clés de DatABA Manager. Les deux applications sont
-   publiées sous la même adresse et partagent le même espace de stockage :
-   un effacement global emporterait les données de DatABA. */
-function effacerDonneesManager() {
-  try {
-    const aSupprimer = [];
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const k = window.localStorage.key(i);
-      if (k && k.startsWith('aba-cadre:')) aSupprimer.push(k);
+  function integrer(backup, nom) {
+    onImported(fusionnerImport(donnees, backup, nom.replace(/\.json$/i, '')));
+    setFichier(null); setEnveloppe(null); setPassphrase('');
+  }
+
+  /* Fichier venu d'un autre Manager : on reprend ses sources telles quelles,
+     pour que le rapprochement des personnes reste cohérent. */
+  function integrerManager(paquet) {
+    let cumul = donnees;
+    (paquet.sources || []).forEach((src) => {
+      const table = (paquet._idVersInitiales || {})[src] || {};
+      const backup = {
+        students: Object.entries(table).map(([id, initials]) => ({ id, initials })),
+        sessions: (paquet.seances || []).filter((s) => s.source === src),
+        crises: (paquet.crises || []).filter((c) => c.source === src),
+      };
+      cumul = fusionnerImport(cumul, backup, src);
+    });
+    cumul = {
+      ...cumul,
+      alias: {
+        personnes: { ...(cumul.alias.personnes || {}), ...((paquet.alias || {}).personnes || {}) },
+        objectifs: { ...(cumul.alias.objectifs || {}), ...((paquet.alias || {}).objectifs || {}) },
+      },
+      commentaires: { ...(cumul.commentaires || {}), ...(paquet.commentaires || {}) },
+    };
+    onImported(cumul);
+    setFichier(null); setEnveloppe(null); setPassphrase('');
+    notify('Données reprises depuis un autre Manager');
+  }
+
+  async function analyser(f) {
+    setErreur(''); setEnveloppe(null); setFichier(f);
+    if (!f) return;
+    if (/\.(xlsx|xls|csv)$/i.test(f.name)) {
+      setErreur("Ce fichier est un rapport tableur. Dans DatABA : Export → « Fichier pour DatABA Manager ».");
+      setFichier(null);
+      return;
     }
-    aSupprimer.forEach((k) => window.localStorage.removeItem(k));
-  } catch (e) { /* stockage indisponible */ }
+    let contenu;
+    try {
+      contenu = JSON.parse(await f.text());
+    } catch (e) {
+      setErreur('Fichier illisible. Attendu : une sauvegarde DatABA au format .json.');
+      setFichier(null);
+      return;
+    }
+    if (contenu.format === 'aba-backup-encrypted') { setEnveloppe(contenu); return; }
+    if (contenu.format === 'aba-backup') { integrer(contenu, f.name); return; }
+    if (contenu.format === 'aba-manager-export') { integrerManager(contenu); return; }
+    if (contenu.format === 'aba-config') {
+      setErreur('Ce fichier ne contient que la configuration, sans aucune séance.');
+      setFichier(null);
+      return;
+    }
+    setErreur('Format non reconnu.');
+    setFichier(null);
+  }
+
+  async function dechiffrer() {
+    if (!enveloppe || !passphrase) return;
+    setEnCours(true); setErreur('');
+    try {
+      const contenu = await decryptEnvelope(enveloppe, passphrase);
+      if (contenu.format === 'aba-manager-export') integrerManager(contenu);
+      else integrer(contenu, fichier.name);
+    } catch (e) {
+      setErreur('Mot de passe incorrect ou fichier corrompu.');
+    }
+    setEnCours(false);
+  }
+
+  function construirePaquet(initialesRetenues) {
+    const garder = initialesRetenues.length ? new Set(initialesRetenues) : null;
+    const ini = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+    const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
+    const seances = donnees.seances.filter((s) => !garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid))));
+    const crises = donnees.crises.filter((c) => !garder || garder.has(ini(c.source, c.studentId)));
+    const alias = { personnes: {}, objectifs: {} };
+    Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
+    Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
+    const commentaires = {};
+    Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
+
+    return {
+      format: 'aba-manager-export',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      personnes, seances, crises,
+      sources: donnees.sources,
+      _idVersInitiales: donnees._idVersInitiales,
+      alias, commentaires,
+    };
+  }
+
+  function telecharger(blob, nom) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = nom;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exporter(chiffre) {
+    const paquet = construirePaquet(exportPersonnes);
+    const suffixe = exportPersonnes.length ? exportPersonnes.map((i) => i.replace(/\./g, '')).join('-') : 'tout';
+    const nom = `manager-${suffixe}-${new Date().toISOString().slice(0, 10)}.json`;
+    if (!chiffre) {
+      telecharger(new Blob([JSON.stringify(paquet, null, 2)], { type: 'application/json' }), nom);
+      notify('Export sans chiffrement');
+      return;
+    }
+    setDemandeCle({ paquet, nom });
+  }
+
+  async function confirmerExportChiffre() {
+    if (cleExport.length < 4) return;
+    const env = await encryptJSON(demandeCle.paquet, cleExport);
+    telecharger(new Blob([JSON.stringify(env)], { type: 'application/json' }), demandeCle.nom);
+    setDemandeCle(null);
+    setCleExport('');
+    notify('Export chiffré');
+  }
+
+  return (
+    <div>
+      <Card className="mb-4">
+        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Importer</div>
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          Sauvegarde DatABA, ou export venu d'un autre Manager. Le format est reconnu au contenu ;
+          les séances déjà connues ne sont pas dupliquées.
+        </p>
+        <input type="file" onChange={(e) => analyser(e.target.files && e.target.files[0])} className="w-full text-sm mb-2" />
+        {enveloppe && (
+          <>
+            <p className="text-xs mb-2" style={{ color: INK_SOFT }}>Fichier chiffré — saisissez la clé.</p>
+            <input type="password" value={passphrase} autoFocus onChange={(e) => setPassphrase(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') dechiffrer(); }}
+              placeholder="Mot de passe du fichier"
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2" style={{ borderColor: BORDER, color: INK }} />
+            <Btn onClick={dechiffrer} disabled={!passphrase || enCours} className="w-full">
+              {enCours ? 'Déchiffrement…' : 'Déchiffrer et importer'}
+            </Btn>
+          </>
+        )}
+        {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+        {donnees.sources.length > 0 && (
+          <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
+        )}
+      </Card>
+
+      <Card className="mb-4">
+        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Exporter</div>
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          Pour transmettre à un autre poste équipé de Manager, ou pour archiver. Sans sélection,
+          tout est exporté. Libellés personnalisés et commentaires suivent.
+        </p>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {donnees.personnes.map((p) => (
+            <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
+              on={exportPersonnes.includes(p.initials)}
+              onClick={() => setExportPersonnes((cur) => (cur.includes(p.initials) ? cur.filter((x) => x !== p.initials) : [...cur, p.initials]))} />
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="outline" onClick={() => exporter(true)} className="flex-1 text-sm">Chiffré</Btn>
+          <Btn variant="ghost" onClick={() => {
+            if (window.confirm("Exporter sans chiffrement ?\n\nLe fichier sera lisible par quiconque y a accès.")) exporter(false);
+          }} className="flex-1 text-sm">Sans chiffrement</Btn>
+        </div>
+
+        {demandeCle && (
+          <div className="mt-3 rounded-xl border p-3" style={{ borderColor: BORDER, backgroundColor: PAPER }}>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mot de passe protégeant ce fichier</div>
+            <input type="password" value={cleExport} autoFocus onChange={(e) => setCleExport(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') confirmerExportChiffre(); }}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2" style={{ borderColor: BORDER, color: INK }} />
+            <div className="flex gap-2">
+              <Btn onClick={confirmerExportChiffre} disabled={cleExport.length < 4} className="flex-1 text-sm">Chiffrer et télécharger</Btn>
+              <Btn variant="ghost" onClick={() => { setDemandeCle(null); setCleExport(''); }} className="text-sm">Annuler</Btn>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Sécurité</div>
+        {securite.disabled ? (
+          <>
+            <p className="text-xs mb-3" style={{ color: NON_ACQUIS }}>
+              <strong>Protection désactivée.</strong> Les données consolidées ne sont plus chiffrées :
+              quiconque accède à cet ordinateur peut les lire.
+            </p>
+            <Btn variant="outline" onClick={() => window.location.reload()} className="w-full text-sm">
+              Réactiver une protection
+            </Btn>
+          </>
+        ) : (
+          <>
+            <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+              Mot de passe demandé à l'ouverture. Verrouillage à la mise en veille et après
+              15 minutes d'inactivité. Les données consolidées sont chiffrées avec lui.
+            </p>
+            <Btn variant="outline" onClick={() => setChangement({ etape: 'ancien', ancien: '', nouveau: '' })} className="w-full text-sm mb-2">
+              Modifier le mot de passe
+            </Btn>
+            <button
+              onClick={() => {
+                if (!window.confirm("Avez-vous une sauvegarde récente ?\n\nExportez vos données avant toute modification de la protection.\n\nOK pour continuer, Annuler pour aller sauvegarder.")) return;
+                if (window.confirm("Retirer la protection ?\n\nLes données seront déchiffrées et enregistrées en clair sur cet ordinateur.")) onRetirerProtection();
+              }}
+              className="w-full text-xs py-2" style={{ color: NON_ACQUIS }}>
+              Retirer la protection et le chiffrement
+            </button>
+          </>
+        )}
+
+        {changement && (
+          <div className="mt-3 rounded-xl border p-3" style={{ borderColor: BORDER, backgroundColor: PAPER }}>
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
+              {changement.etape === 'ancien' ? 'Mot de passe actuel' : 'Nouveau mot de passe'}
+            </div>
+            <input type="password" autoFocus
+              value={changement.etape === 'ancien' ? changement.ancien : changement.nouveau}
+              onChange={(e) => setChangement({ ...changement, [changement.etape === 'ancien' ? 'ancien' : 'nouveau']: e.target.value })}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2" style={{ borderColor: BORDER, color: INK }} />
+            <div className="flex gap-2">
+              <Btn onClick={async () => {
+                if (changement.etape === 'ancien') {
+                  const hash = await hashPin(changement.ancien, securite.pinSalt);
+                  if (hash !== securite.pinHash) { notify('Mot de passe actuel incorrect'); return; }
+                  setChangement({ ...changement, etape: 'nouveau' });
+                  return;
+                }
+                if (changement.nouveau.length < 4) return;
+                await onChangerMotDePasse(changement.nouveau);
+                setChangement(null);
+              }} className="flex-1 text-sm">
+                {changement.etape === 'ancien' ? 'Vérifier' : 'Enregistrer'}
+              </Btn>
+              <Btn variant="ghost" onClick={() => setChangement(null)} className="text-sm">Annuler</Btn>
+            </div>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
 }
 
+/* ==================== Application ==================== */
 export default function App() {
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
   const [secuLue, setSecuLue] = useState(false);
   const [verrouille, setVerrouille] = useState(true);
-  const [tab, setTab] = useState('import');
+  const [tab, setTab] = useState('bord');
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
+  const [periode, setPeriode] = useState(30);
+  const [focus, setFocus] = useState(null);
+  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: 0 });
 
-  /* Logo et nom d'association : réglages de présentation, conservés à part
-     des données de suivi. */
-  useEffect(() => {
-    try {
-      setLogo(window.localStorage.getItem('aba-cadre:logo') || null);
-      setAssociation(window.localStorage.getItem('aba-cadre:association') || '');
-    } catch (e) { /* stockage indisponible */ }
-  }, []);
-  function enregistrerLogo(v) {
-    setLogo(v);
-    try {
-      if (v) window.localStorage.setItem('aba-cadre:logo', v);
-      else window.localStorage.removeItem('aba-cadre:logo');
-    } catch (e) { /* image trop volumineuse pour le stockage */ }
-  }
-  function enregistrerAssociation(v) {
-    setAssociation(v);
-    try { window.localStorage.setItem('aba-cadre:association', v); } catch (e) {}
+  const lignes = useMemo(() => construireLignes(donnees), [donnees]);
+
+  function notify(m) {
+    setToast(m);
+    setTimeout(() => setToast(''), 3500);
   }
 
-  const lignes = React.useMemo(() => construireLignes(donnees), [donnees]);
-
-  /* Les réglages de sécurité se lisent en clair, avant tout déverrouillage.
-     Les données, elles, attendent la clé dérivée du mot de passe. */
   useEffect(() => {
     try {
       const brut = window.localStorage.getItem(SECU_KEY);
       if (brut) setSecurite(JSON.parse(brut));
-    } catch (e) { /* réglages illisibles : on repart d'une création */ }
+      setLogo(window.localStorage.getItem(`${PREFIXE}logo`) || null);
+      setAssociation(window.localStorage.getItem(`${PREFIXE}association`) || '');
+    } catch (e) { /* réglages illisibles */ }
     setSecuLue(true);
   }, []);
 
+  function ecrireSecurite(s) {
+    setSecurite(s);
+    try { window.localStorage.setItem(SECU_KEY, JSON.stringify(s)); } catch (e) {}
+  }
+
   async function deverrouiller(motDePasse) {
     let sec = securite;
-    if (!sec.dataSalt) {
-      sec = { ...sec, dataSalt: newSalt() };
-      setSecurite(sec);
-      window.localStorage.setItem(SECU_KEY, JSON.stringify(sec));
-    }
-    if (sec.failedAttempts || sec.lockUntil) {
-      sec = { ...sec, failedAttempts: 0, lockUntil: 0 };
-      setSecurite(sec);
-      window.localStorage.setItem(SECU_KEY, JSON.stringify(sec));
-    }
+    if (!sec.dataSalt) { sec = { ...sec, dataSalt: newSalt() }; ecrireSecurite(sec); }
+    if (sec.failedAttempts || sec.lockUntil) { sec = { ...sec, failedAttempts: 0, lockUntil: 0 }; ecrireSecurite(sec); }
     dataKey = await deriveDataKey(motDePasse, sec.dataSalt);
     setVerrouille(false);
     setDonnees(await chargerDonnees());
     setLoaded(true);
   }
 
-  function echecSaisie(failedAttempts, lockUntil) {
-    const suite = { ...securite, failedAttempts, lockUntil };
-    setSecurite(suite);
-    window.localStorage.setItem(SECU_KEY, JSON.stringify(suite));
-  }
-
-  /* Verrouillage automatique à la mise en veille et après inactivité */
+  /* Protection retirée : les données repassent en clair, aucun verrouillage */
   useEffect(() => {
-    if (!securite.pinHash || verrouille) return undefined;
+    if (!secuLue || loaded || !securite.disabled) return;
+    dataKey = null;
+    setVerrouille(false);
+    (async () => { setDonnees(await chargerDonnees()); setLoaded(true); })();
+  }, [secuLue, securite.disabled, loaded]);
+
+  useEffect(() => {
+    if (loaded) sauverDonnees(donnees);
+  }, [donnees, loaded]);
+
+  useEffect(() => {
+    if (!securite.pinHash || verrouille || securite.disabled) return undefined;
     let minuteur = null;
-    const INACTIF_MS = 15 * 60 * 1000;
-    const relancer = () => {
-      clearTimeout(minuteur);
-      minuteur = setTimeout(() => setVerrouille(true), INACTIF_MS);
-    };
+    const relancer = () => { clearTimeout(minuteur); minuteur = setTimeout(() => setVerrouille(true), 15 * 60 * 1000); };
     const surVisibilite = () => { if (document.visibilityState === 'hidden') setVerrouille(true); };
     document.addEventListener('visibilitychange', surVisibilite);
     ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.addEventListener(e, relancer));
@@ -1259,34 +1603,72 @@ export default function App() {
       document.removeEventListener('visibilitychange', surVisibilite);
       ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.removeEventListener(e, relancer));
     };
-  }, [securite.pinHash, verrouille]);
+  }, [securite.pinHash, securite.disabled, verrouille]);
 
-  useEffect(() => {
-    if (loaded) sauverDonnees(donnees);
-  }, [donnees, loaded]);
+  async function changerMotDePasse(nouveau) {
+    const pinSalt = newSalt();
+    const dataSalt = newSalt();
+    const pinHash = await hashPin(nouveau, pinSalt);
+    ecrireSecurite({ ...securite, disabled: false, pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 });
+    dataKey = await deriveDataKey(nouveau, dataSalt);
+    await sauverDonnees(donnees); // rechiffrées avec la nouvelle clé
+    notify('Mot de passe modifié');
+  }
+
+  async function retirerProtection() {
+    const texte = JSON.stringify(donnees);
+    dataKey = null;
+    try { window.localStorage.setItem(STORE_KEY, texte); } catch (e) {}
+    ecrireSecurite({ disabled: true, pinHash: null, pinSalt: null, dataSalt: null, failedAttempts: 0, lockUntil: 0 });
+    setVerrouille(false);
+    notify('Protection retirée, données déchiffrées');
+  }
+
+  function enregistrerLogo(v) {
+    setLogo(v);
+    try {
+      if (v) window.localStorage.setItem(`${PREFIXE}logo`, v);
+      else window.localStorage.removeItem(`${PREFIXE}logo`);
+    } catch (e) { /* image trop volumineuse pour le stockage */ }
+  }
+  function enregistrerAssociation(v) {
+    setAssociation(v);
+    try { window.localStorage.setItem(`${PREFIXE}association`, v); } catch (e) {}
+  }
+  function majAlias(categorie, cle, valeur) {
+    setDonnees((d) => ({ ...d, alias: { ...d.alias, [categorie]: { ...(d.alias[categorie] || {}), [cle]: valeur } } }));
+  }
+  function majCommentaire(cle, valeur) {
+    setDonnees((d) => ({ ...d, commentaires: { ...(d.commentaires || {}), [cle]: valeur } }));
+  }
 
   function onImported(fusion) {
     setDonnees(fusion);
-    setToast(`${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`);
-    setTimeout(() => setToast(''), 4000);
-    setTab('bilan');
+    if (fusion.nbNouvellesSeances != null) {
+      notify(`${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`);
+    }
+    setTab('bord');
+  }
+  function ouvrirPersonne(initiales, objectif) {
+    setFocus({ initiales, objectif });
+    setTab('personnes');
+  }
+  function lancerRapport(personne, objectifs) {
+    setSelectionRapport({ personne, objectifs, periode });
+    setTab('rapport');
   }
 
-  if (!secuLue) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
-  }
+  if (!secuLue) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
-  if (verrouille || !securite.pinHash) {
+  if (!securite.disabled && (verrouille || !securite.pinHash)) {
     return (
       <LockScreen
         security={securite}
         onUnlock={deverrouiller}
-        onFailedAttempt={echecSaisie}
+        onFailedAttempt={(failedAttempts, lockUntil) => ecrireSecurite({ ...securite, failedAttempts, lockUntil })}
         onSetup={async (pinHash, pinSalt, motDePasse) => {
           const dataSalt = newSalt();
-          const suite = { pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 };
-          setSecurite(suite);
-          window.localStorage.setItem(SECU_KEY, JSON.stringify(suite));
+          ecrireSecurite({ pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 });
           dataKey = await deriveDataKey(motDePasse, dataSalt);
           setVerrouille(false);
           setDonnees(await chargerDonnees());
@@ -1296,57 +1678,80 @@ export default function App() {
     );
   }
 
-  if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
-  }
+  if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
+
+  const onglets = [
+    { k: 'bord', l: 'Tableau de bord' },
+    { k: 'seances', l: 'Séances' },
+    { k: 'personnes', l: 'Personnes' },
+    { k: 'rapport', l: 'Rapport' },
+    { k: 'gestion', l: 'Gestion' },
+  ];
 
   return (
     <div className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
-      <div className="max-w-3xl mx-auto px-6 py-8">
-        <h1 className="text-2xl font-semibold mb-1 no-print" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
-        <p className="text-sm mb-6 no-print" style={{ color: INK_SOFT }}>
-          {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''} importée{donnees.seances.length !== 1 ? 's' : ''}
-        </p>
+      <div className="max-w-5xl mx-auto px-6 py-6">
+        <div className="flex items-baseline justify-between gap-4 mb-4 no-print">
+          <h1 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
+          <span className="text-xs" style={{ color: INK_SOFT }}>
+            {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
+          </span>
+        </div>
 
         <div className="flex flex-wrap gap-2 mb-6 no-print">
-          {[
-            { k: 'import', l: 'Importer' },
-            { k: 'bilan', l: 'Tableau de bord' },
-            { k: 'personnes', l: 'Par personne' },
-            { k: 'accord', l: 'Accord observateurs' },
-            { k: 'rapport', l: 'Document' },
-          ].map((t) => (
-            <button
-              key={t.k}
-              onClick={() => setTab(t.k)}
+          {onglets.map((t) => (
+            <button key={t.k} onClick={() => setTab(t.k)}
               className="rounded-xl px-4 py-2.5 text-sm font-medium border"
-              style={{
-                fontFamily: F_DISPLAY,
-                borderColor: tab === t.k ? INK : BORDER,
-                backgroundColor: tab === t.k ? INK : 'transparent',
-                color: tab === t.k ? '#fff' : INK_SOFT,
-              }}
-            >
+              style={{ fontFamily: F_DISPLAY, borderColor: tab === t.k ? INK : BORDER,
+                backgroundColor: tab === t.k ? INK : 'transparent', color: tab === t.k ? '#fff' : INK_SOFT }}>
               {t.l}
             </button>
           ))}
         </div>
 
-        {tab === 'import' && <ImportScreen donnees={donnees} onImported={onImported} />}
-        {tab === 'bilan' && <TableauDeBord donnees={donnees} lignes={lignes} />}
-        {tab === 'personnes' && <PersonneScreen donnees={donnees} lignes={lignes} />}
-        {tab === 'accord' && <AccordScreen donnees={donnees} />}
+        <div className="no-print">
+          {tab === 'bord' && (
+            <>
+              <SectionTitle sub="L'avancée récente, d'un coup d'œil.">Tableau de bord</SectionTitle>
+              <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} onOuvrirPersonne={ouvrirPersonne} />
+            </>
+          )}
+          {tab === 'seances' && (
+            <>
+              <SectionTitle sub="Volume de cotation et accord entre observateurs.">Séances</SectionTitle>
+              <SeancesScreen donnees={donnees} />
+            </>
+          )}
+          {tab === 'personnes' && (
+            <>
+              <SectionTitle sub="Le suivi complet, personne par personne.">Personnes</SectionTitle>
+              <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
+                periode={periode} setPeriode={setPeriode} onRapport={lancerRapport} />
+            </>
+          )}
+          {tab === 'gestion' && (
+            <>
+              <SectionTitle sub="Import, export et sécurité.">Gestion</SectionTitle>
+              <GestionScreen donnees={donnees} securite={securite} onImported={onImported}
+                onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection} notify={notify} />
+            </>
+          )}
+        </div>
+
         {tab === 'rapport' && (
-          <RapportScreen
-            donnees={donnees} lignes={lignes}
-            logo={logo} association={association}
-            onLogo={enregistrerLogo} onAssociation={enregistrerAssociation}
-          />
+          <>
+            <div className="no-print"><SectionTitle sub="Le document à transmettre ou à déposer dans Airmes.">Rapport</SectionTitle></div>
+            <RapportScreen donnees={donnees} lignes={lignes}
+              selection={selectionRapport} setSelection={setSelectionRapport}
+              logo={logo} association={association}
+              onLogo={enregistrerLogo} onAssociation={enregistrerAssociation}
+              onAlias={majAlias} onCommentaire={majCommentaire} />
+          </>
         )}
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm text-white shadow-lg" style={{ backgroundColor: INK }}>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm text-white shadow-lg no-print" style={{ backgroundColor: INK }}>
           {toast}
         </div>
       )}

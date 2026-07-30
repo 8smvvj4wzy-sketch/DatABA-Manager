@@ -2,9 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Visible seulement à l'impression : les commentaires sont saisis dans un
+   champ à l'écran, et rendus en texte simple sur le document. */
+.print-only { display: none; }
+
 @media print {
   .no-print { display: none !important; }
-  /* Le document occupe toute la page, sans cadre ni ombre d'écran */
+  .print-only { display: block !important; }
   body { background: #fff !important; }
   .rounded-2xl { border: none !important; padding: 0 !important; }
   @page { margin: 18mm 14mm; }
