@@ -469,6 +469,8 @@ function gereDejaLeGeste(cible) {
 function useBalayage(onGauche, onDroite) {
   const ref = useRef(null);
   const etat = useRef({ x: 0, y: 0, actif: false });
+  const [decalage, setDecalage] = useState(0);
+  const [enCours, setEnCours] = useState(false);
 
   useEffect(() => {
     const el = ref.current;
@@ -478,7 +480,18 @@ function useBalayage(onGauche, onDroite) {
       const t = e.touches[0];
       etat.current = { x: t.clientX, y: t.clientY, actif: !gereDejaLeGeste(e.target) };
     };
+    const bouge = (e) => {
+      if (!etat.current.actif) return;
+      const t = e.touches[0];
+      const dx = t.clientX - etat.current.x;
+      const dy = t.clientY - etat.current.y;
+      if (Math.abs(dx) < Math.abs(dy)) return; // geste plutôt vertical : on laisse défiler
+      setEnCours(true);
+      setDecalage(Math.max(-60, Math.min(60, dx * 0.35)));
+    };
     const fin = (e) => {
+      setEnCours(false);
+      setDecalage(0);
       if (!etat.current.actif) return;
       const t = e.changedTouches[0];
       const dx = t.clientX - etat.current.x;
@@ -491,14 +504,16 @@ function useBalayage(onGauche, onDroite) {
     };
 
     el.addEventListener('touchstart', debut, { passive: true });
+    el.addEventListener('touchmove', bouge, { passive: true });
     el.addEventListener('touchend', fin, { passive: true });
     return () => {
       el.removeEventListener('touchstart', debut);
+      el.removeEventListener('touchmove', bouge);
       el.removeEventListener('touchend', fin);
     };
   }, [onGauche, onDroite]);
 
-  return ref;
+  return { ref, decalage, enCours };
 }
 
 /* ==================== Composants de base ==================== */
@@ -1600,8 +1615,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'bilan', l: 'Bilan', icone: Target },
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
-    { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
-          { k: 'renfo', l: 'Renforcement', icone: Gift },
           { k: 'renfo', l: 'Renforcement', icone: Gift },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
@@ -1898,224 +1911,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   );
 }
 
-/* ==================== Explorateur croisé ====================
-   L'équivalent d'un tableau croisé dynamique : le cadre choisit lui-même les
-   deux axes et la mesure, sans que ces croisements aient été prévus à
-   l'avance. C'est ce qui manquait pour se passer d'Excel. */
-const BASES = [
-  { k: 'cotations', label: 'Cotations', mesures: [
-    { k: 'nombre', label: 'Nombre de cotations' },
-    { k: 'moyenne', label: 'Résultat moyen (%)' },
-    { k: 'min', label: 'Résultat le plus bas (%)' },
-    { k: 'max', label: 'Résultat le plus haut (%)' },
-  ], dims: ['personne', 'atelier', 'objectif', 'type', 'phase', 'source'] },
-  { k: 'crises', label: 'Crises et observations', mesures: [
-    { k: 'nombre', label: "Nombre d'enregistrements" },
-    { k: 'moyenne', label: 'Durée moyenne (min)' },
-    { k: 'somme', label: 'Durée totale (min)' },
-  ], dims: ['personne', 'atelier', 'nature', 'intensite', 'fonction', 'antecedent', 'comportement', 'consequence', 'source'] },
-  { k: 'renforcement', label: 'Renforcement', mesures: [
-    { k: 'somme', label: 'Temps total (min)' },
-    { k: 'moyenne', label: 'Temps moyen par séance (min)' },
-    { k: 'nombre', label: 'Nombre de séances' },
-  ], dims: ['personne', 'atelier', 'source'] },
-];
-
-const LIBELLES_DIM = {
-  personne: 'Personne', atelier: 'Atelier', objectif: 'Objectif', type: 'Type de cotation',
-  phase: 'Phase', source: 'Tablette', nature: 'Nature', intensite: 'Intensité',
-  fonction: 'Fonction', antecedent: 'Antécédent', comportement: 'Comportement',
-  consequence: 'Conséquence', jour: 'Jour', semaine: 'Semaine', mois: 'Mois', aucune: 'Aucune',
-};
-const DIMS_TEMPS = ['jour', 'semaine', 'mois'];
-
-const valeurDim = (fait, dim) => {
-  if (DIMS_TEMPS.includes(dim)) return etiquetteAgregation(cleAgregation(fait.date, dim), dim);
-  if (dim === 'aucune') return 'Total';
-  return fait[dim] == null ? '—' : String(fait[dim]);
-};
-
-function ExplorateurScreen({ donnees, periode, setPeriode }) {
-  const [base, setBase] = useState('cotations');
-  const [dimLigne, setDimLigne] = useState('personne');
-  const [dimColonne, setDimColonne] = useState('mois');
-  const [mesure, setMesure] = useState('moyenne');
-
-  const config = BASES.find((b) => b.k === base);
-  const dimsDispo = [...config.dims, ...DIMS_TEMPS, 'aucune'];
-  const faits = useMemo(() => construireFaits(donnees, base, periode), [donnees, base, periode]);
-
-  /* Croisement : lignes × colonnes, avec totaux sur les deux axes */
-  const lignesCles = [];
-  const colonnesCles = [];
-  const cellules = new Map();
-  faits.forEach((f) => {
-    const l = valeurDim(f, dimLigne);
-    const c = valeurDim(f, dimColonne);
-    if (!lignesCles.includes(l)) lignesCles.push(l);
-    if (!colonnesCles.includes(c)) colonnesCles.push(c);
-    const cle = `${l}|||${c}`;
-    if (!cellules.has(cle)) cellules.set(cle, []);
-    cellules.get(cle).push(f.valeur);
-  });
-
-  const trierCles = (cles, dim) =>
-    DIMS_TEMPS.includes(dim)
-      ? cles.slice().sort((a, b) => {
-          const f = (e) => faits.find((x) => valeurDim(x, dim) === e);
-          return cleAgregation(f(a).date, dim) - cleAgregation(f(b).date, dim);
-        })
-      : cles.slice().sort((a, b) => a.localeCompare(b, 'fr'));
-
-  const L = trierCles(lignesCles, dimLigne);
-  const C = trierCles(colonnesCles, dimColonne);
-
-  const cellule = (l, c) => agreger(cellules.get(`${l}|||${c}`) || [], mesure);
-  const totalLigne = (l) => agreger(faits.filter((f) => valeurDim(f, dimLigne) === l).map((f) => f.valeur), mesure);
-  const totalColonne = (c) => agreger(faits.filter((f) => valeurDim(f, dimColonne) === c).map((f) => f.valeur), mesure);
-  const totalGeneral = agreger(faits.map((f) => f.valeur), mesure);
-
-  /* Intensité de fond proportionnelle : les valeurs fortes sautent aux yeux */
-  const toutes = L.flatMap((l) => C.map((c) => cellule(l, c))).filter((v) => v != null);
-  const maxi = toutes.length ? Math.max(...toutes) : 1;
-  const fond = (v) => (v == null || maxi <= 0 ? 'transparent' : `rgba(26, 52, 92, ${0.05 + (v / maxi) * 0.3})`);
-
-  function exporterCsv() {
-    const sep = ';';
-    const lignesCsv = [[LIBELLES_DIM[dimLigne], ...C, 'Total'].join(sep)];
-    L.forEach((l) => lignesCsv.push([l, ...C.map((c) => cellule(l, c) ?? ''), totalLigne(l) ?? ''].join(sep)));
-    lignesCsv.push(['Total', ...C.map((c) => totalColonne(c) ?? ''), totalGeneral ?? ''].join(sep));
-    /* Le BOM permet à Excel d'ouvrir le fichier avec les accents corrects */
-    const blob = new Blob(['\uFEFF' + lignesCsv.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `croisement-${base}-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  return (
-    <div>
-      <Card className="mb-3">
-        <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Sur quoi porter l'analyse</div>
-        <div className="flex flex-wrap gap-1.5 mb-3">
-          {BASES.map((b) => (
-            <Chip key={b.k} label={b.label} on={base === b.k}
-              onClick={() => {
-                setBase(b.k);
-                setMesure(b.mesures[0].k);
-                if (!b.dims.includes(dimLigne) && !DIMS_TEMPS.includes(dimLigne)) setDimLigne(b.dims[0]);
-                if (!b.dims.includes(dimColonne) && !DIMS_TEMPS.includes(dimColonne)) setDimColonne('mois');
-              }} />
-          ))}
-        </div>
-
-        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-          <div>
-            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
-            <select value={dimLigne} onChange={(e) => setDimLigne(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {dimsDispo.map((d) => <option key={d} value={d}>{LIBELLES_DIM[d]}</option>)}
-            </select>
-          </div>
-          <div>
-            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
-            <select value={dimColonne} onChange={(e) => setDimColonne(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {dimsDispo.map((d) => <option key={d} value={d}>{LIBELLES_DIM[d]}</option>)}
-            </select>
-          </div>
-          <div>
-            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mesure</div>
-            <select value={mesure} onChange={(e) => setMesure(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {config.mesures.map((m) => <option key={m.k} value={m.k}>{m.label}</option>)}
-            </select>
-          </div>
-        </div>
-      </Card>
-
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
-
-      {faits.length === 0 ? (
-        <Empty>Aucune donnée sur cette période.</Empty>
-      ) : (
-        <Card>
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            <span className="text-xs" style={{ color: INK_SOFT }}>
-              {faits.length} élément{faits.length !== 1 ? 's' : ''} · {config.mesures.find((m) => m.k === mesure).label}
-            </span>
-            <Btn variant="outline" onClick={exporterCsv} className="ml-auto text-xs py-1.5">
-              <Download size={14} /> Exporter en CSV
-            </Btn>
-          </div>
-
-          <div style={{ overflowX: 'auto' }} data-no-swipe>
-            <table className="text-sm" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
-              <thead>
-                <tr>
-                  <th className="text-left px-2 py-2 whitespace-nowrap"
-                    style={{ borderBottom: `2px solid ${INK}`, color: INK_SOFT, position: 'sticky', left: 0, backgroundColor: CARD }}>
-                    {LIBELLES_DIM[dimLigne]}
-                  </th>
-                  {C.map((c) => (
-                    <th key={c} className="text-right px-2 py-2 whitespace-nowrap"
-                      style={{ borderBottom: `2px solid ${INK}`, color: INK_SOFT }}>{c}</th>
-                  ))}
-                  <th className="text-right px-2 py-2 whitespace-nowrap"
-                    style={{ borderBottom: `2px solid ${INK}`, color: INK, fontWeight: 600 }}>Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {L.map((l) => (
-                  <tr key={l}>
-                    <td className="px-2 py-1.5 whitespace-nowrap"
-                      style={{ borderBottom: `1px solid ${BORDER}`, position: 'sticky', left: 0, backgroundColor: CARD }}>{l}</td>
-                    {C.map((c) => {
-                      const v = cellule(l, c);
-                      return (
-                        <td key={c} className="px-2 py-1.5 text-right"
-                          style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO, backgroundColor: fond(v) }}>
-                          {v == null ? '' : v}
-                        </td>
-                      );
-                    })}
-                    <td className="px-2 py-1.5 text-right"
-                      style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO, fontWeight: 600 }}>
-                      {totalLigne(l) ?? ''}
-                    </td>
-                  </tr>
-                ))}
-                <tr>
-                  <td className="px-2 py-2 whitespace-nowrap"
-                    style={{ borderTop: `2px solid ${INK}`, fontWeight: 600, position: 'sticky', left: 0, backgroundColor: CARD }}>Total</td>
-                  {C.map((c) => (
-                    <td key={c} className="px-2 py-2 text-right"
-                      style={{ borderTop: `2px solid ${INK}`, fontFamily: F_MONO, fontWeight: 600 }}>{totalColonne(c) ?? ''}</td>
-                  ))}
-                  <td className="px-2 py-2 text-right"
-                    style={{ borderTop: `2px solid ${INK}`, fontFamily: F_MONO, fontWeight: 700 }}>{totalGeneral ?? ''}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <p className="text-xs mt-3" style={{ color: INK_SOFT }}>
-            Les totaux sont recalculés sur l'ensemble des éléments, pas additionnés depuis les
-            cellules : une moyenne de moyennes serait fausse dès que les effectifs diffèrent.
-          </p>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-/* ==================== Explorateur croisé ====================
-   Deux axes au choix et une mesure : c'est l'équivalent d'un tableau croisé
-   dynamique, sans quitter l'application ni prévoir la combinaison à l'avance. */
 const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte' },
   { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %' },
@@ -3105,8 +2900,56 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
   );
 }
 
+/* ==================== Écran d'erreur ====================
+   Sans lui, une erreur de rendu laisse un écran blanc sans aucun message —
+   ce qui a rendu le diagnostic d'un incident bien plus long qu'il n'aurait dû
+   l'être. Reprend le principe déjà en place sur DatABA. */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, info: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    this.setState({ info });
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    const message = String((this.state.error && this.state.error.message) || this.state.error);
+    const pile = (this.state.info && this.state.info.componentStack) || '';
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER, fontFamily: F_BODY }}>
+        <div className="w-full max-w-md">
+          <h1 className="text-lg font-semibold mb-2" style={{ fontFamily: F_DISPLAY, color: INK }}>Une erreur est survenue</h1>
+          <p className="text-sm mb-3" style={{ color: INK_SOFT }}>
+            Recopiez le message ci-dessous, il indique précisément l'origine du problème.
+          </p>
+          <pre className="text-xs rounded-xl p-3 mb-3 whitespace-pre-wrap" style={{ backgroundColor: CARD, border: `1px solid ${BORDER}`, color: NON_ACQUIS, maxHeight: 240, overflowY: 'auto' }}>
+            {message}
+            {pile ? `\n${pile.split('\n').slice(0, 8).join('\n')}` : ''}
+          </pre>
+          <div className="flex gap-2">
+            <Btn onClick={() => window.location.reload()} className="flex-1 text-sm">Recharger</Btn>
+            <Btn
+              variant="outline"
+              onClick={() => {
+                if (navigator.clipboard) navigator.clipboard.writeText(`${message}\n${pile}`);
+              }}
+              className="text-sm"
+            >
+              Copier
+            </Btn>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
 /* ==================== Application ==================== */
-export default function App() {
+function ManagerApp() {
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
@@ -3128,18 +2971,7 @@ export default function App() {
     [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales]
   );
 
-  /* Balayage entre onglets, pour l'usage sur mobile */
-  const ORDRE_ONGLETS = ['bord', 'seances', 'personnes', 'crises', 'explorer', 'rapport', 'gestion'];
-  const allerA = (pas) => {
-    const i = ORDRE_ONGLETS.indexOf(tab);
-    const j = Math.min(ORDRE_ONGLETS.length - 1, Math.max(0, i + pas));
-    if (j !== i) setTab(ORDRE_ONGLETS[j]);
-  };
-  const balayage = useBalayage({
-    onGauche: () => allerA(1),
-    onDroite: () => allerA(-1),
-    actif: !verrouille && loaded,
-  });
+
 
   function notify(m) {
     setToast(m);
@@ -3260,6 +3092,25 @@ export default function App() {
     setTab('rapport');
   }
 
+  const onglets = [
+    { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
+    { k: 'seances', l: 'Séances', icone: CalendarDays },
+    { k: 'personnes', l: 'Personnes', icone: Users },
+    { k: 'crises', l: 'Crises', icone: AlertTriangle },
+    { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
+    { k: 'rapport', l: 'Rapport', icone: FileText },
+    { k: 'gestion', l: 'Gestion', icone: Settings },
+  ];
+
+  /* Balayage entre onglets, pour l'usage sur mobile. */
+  const rangActuel = onglets.findIndex((t) => t.k === tab);
+  const allerA = (n) => {
+    if (n < 0 || n >= onglets.length) return;
+    setTab(onglets[n].k);
+    window.scrollTo({ top: 0 });
+  };
+  const balayage = useBalayage(() => allerA(rangActuel + 1), () => allerA(rangActuel - 1));
+
   if (!secuLue) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   if (!securite.disabled && (verrouille || !securite.pinHash)) {
@@ -3282,18 +3133,8 @@ export default function App() {
 
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
-  const onglets = [
-    { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
-    { k: 'seances', l: 'Séances', icone: CalendarDays },
-    { k: 'personnes', l: 'Personnes', icone: Users },
-    { k: 'crises', l: 'Crises', icone: AlertTriangle },
-    { k: 'explorer', l: 'Explorer', icone: Table2 },
-    { k: 'rapport', l: 'Rapport', icone: FileText },
-    { k: 'gestion', l: 'Gestion', icone: Settings },
-  ];
-
   return (
-    <div className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
+    <div ref={balayage.ref} className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
       <div
         className="max-w-5xl mx-auto px-6 py-6"
         style={{
@@ -3352,12 +3193,6 @@ export default function App() {
           )}
           {tab === 'explorer' && (
             <>
-              <SectionTitle icone={Table2} sub="Croisez ce que vous voulez : les axes et la mesure sont libres.">Explorer</SectionTitle>
-              <ExplorateurScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
-            </>
-          )}
-          {tab === 'explorer' && (
-            <>
               <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
               <ExplorerScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
             </>
@@ -3390,5 +3225,13 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <ManagerApp />
+    </ErrorBoundary>
   );
 }
