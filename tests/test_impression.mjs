@@ -9,6 +9,9 @@ const brancher=(p)=>{p.enfants.forEach(e=>{e.parent=p;brancher(e);});return p;};
 const zone=noeud('zone');
 const carte=noeud('carte',[noeud('commandes'),zone]);
 const contenu=noeud('contenu',[carte]);
+/* Tous les onglets vivent dans un conteneur marqué no-print : c'est lui qui
+   produisait des pages blanches, en masquant la zone avec le reste. */
+contenu.classes.add('no-print');
 const onglets=noeud('onglets');
 const entete=noeud('entete');
 const conteneur=noeud('conteneur',[entete,onglets,contenu]);
@@ -27,6 +30,8 @@ marquer(zone);
 
 /* Règle CSS : .chemin > *:not(.chemin):not(.zone) { display:none } */
 function masque(n){
+  /* .no-print:not(.chemin-impression) { display:none } */
+  if(n.classes.has('no-print')&&!n.classes.has('chemin'))return true;
   const p=n.parent;
   if(!p)return false;
   return p.classes.has('chemin')&&!n.classes.has('chemin')&&!n.classes.has('zone');
@@ -34,6 +39,7 @@ function masque(n){
 /* Un nœud est absent du rendu si lui ou un ancêtre est masqué */
 function absent(n){let x=n;while(x){if(masque(x))return true;x=x.parent;}return false;}
 
+t('un conteneur no-print sur le chemin ne masque plus la zone', absent(zone), false);
 t('la zone est imprimée', absent(zone), false);
 t('ses ancêtres aussi', [absent(carte),absent(contenu),absent(conteneur),absent(app)], [false,false,false,false]);
 t('les onglets sont retirés', absent(onglets), true);
@@ -52,8 +58,14 @@ function nettoyer(cible){
   body.classes.delete('chemin');cible.classes.delete('zone');
 }
 nettoyer(zone);
-const toutes=[];(function parcours(n){toutes.push(n.classes.size);n.enfants.forEach(parcours);})(body);
-t('aucune classe ne subsiste après impression', toutes.every(x=>x===0), true);
+/* Seules les classes posées pour l'impression doivent disparaître ; no-print
+   appartient au balisage permanent et reste en place. */
+const restantes=[];(function parcours(n){
+  if(n.classes.has('chemin')||n.classes.has('zone'))restantes.push(n.nom);
+  n.enfants.forEach(parcours);})(body);
+t('aucune classe d impression ne subsiste', restantes, []);
 t('et tout redevient visible', [absent(onglets),absent(toast)], [false,false]);
+/* Hors impression ciblée, le conteneur no-print doit redevenir masquant */
+t('le no-print reprend son effet une fois le chemin nettoyé', absent(zone), true);
 
 console.log(`\n${ok} réussis, ${ko} échecs`);process.exit(ko?1:0);
