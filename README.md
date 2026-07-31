@@ -34,29 +34,66 @@ jour, par semaine ou par mois**.
 
 Les analyses s'affichent au choix **en nombre ou en pourcentage**.
 
-## Les cinq onglets
+## Les sept onglets
 
-**Tableau de bord** — l'avancée récente sur la période choisie. Répartition des objectifs, volume de crises
-avec sa tendance, et la liste des objectifs prioritaires avec un mini-graphique
-et leur état : Bientôt, Plateau, En cours, Dormant. Un appui ouvre la fiche
-complète de la personne concernée.
+**Tableau de bord** — l'avancée récente sur la période choisie. Répartition des
+objectifs, volume de crises avec sa tendance, puis **deux listes distinctes** :
+« Objectifs prioritaires » et « Autres objectifs travaillés », chacune avec son
+mini-graphique et son état (Bientôt, Plateau, En cours, Dormant). Quand des
+prioritaires existent, la seconde liste est repliée — un appui sur son titre la
+déplie. Un appui sur une ligne ouvre la fiche complète de la personne.
 
-**Séances** — les séances les plus cotées, et l'accord inter-observateurs. Les
-paires sont repérées automatiquement : deux séances du même jour, du même
-atelier, marquées « deux observateurs en parallèle » dans DatABA et venues
-d'appareils différents.
+**Séances** — la liste de tout ce qui a été importé, avec **recherche** (date,
+personne, atelier) et tri par date ou par nombre de cotations. Un appui déplie
+le **détail complet** de la séance : intervenant, durée, et pour chaque
+personne ses objectifs cotés avec leur résultat, ses notes et son temps de
+renforcement.
 
-**Personnes** — le suivi complet, avec cinq vues : Objectifs (courbes, quatre
-styles au choix), Bilan, **Radar** (quels objectifs sont travaillés et à quel
-niveau), Crises, Croisement autonomie/crises. La période est ajustable partout.
-Un bouton **Générer un rapport** reprend la personne, ses objectifs et la
-période en cours.
+Un bouton **Retirer cette séance de l'analyse** la fait disparaître des
+graphiques et des rapports de ce poste. Les cotations elles-mêmes ne sont pas
+modifiables ici : la tablette reste la source. Réimporter une sauvegarde qui
+contient cette séance la ramènera — c'est rappelé dans la confirmation.
 
-**Crises** — d'abord une **chronologie** : le nombre de crises au fil du temps,
-en barres empilées ou en courbes, regroupé par jour, semaine ou mois. Un
+Plus bas, l'**accord inter-observateurs**. Les paires sont repérées
+automatiquement : deux séances du même jour, du même atelier, marquées « deux
+observateurs en parallèle » dans DatABA et venues d'appareils différents.
+
+**Personnes accompagnées** — le suivi complet, avec six vues : Objectifs,
+Bilan, **Radar** (quels objectifs sont travaillés et à quel niveau), Crises,
+Renforcement, Croisement autonomie/crises. La période est ajustable partout.
+
+En haut de la fiche, un **aperçu des crises** de la période : les occurrences
+seules, en barres, avec une **courbe de tendance** et la mention « en hausse »
+ou « en baisse » quand l'évolution est nette. Un appui bascule vers l'onglet
+Crises, déjà filtré sur cette personne.
+
+Dans la vue Objectifs, chaque courbe porte trois commandes : **Replier** (pour
+se concentrer sur les autres), **Agrandir** (une courbe dense est illisible en
+petit) et **PNG** pour l'enregistrer en image et la coller dans un compte rendu.
+
+> L'image exportée reprend le graphique tel qu'il est affiché, en double
+> résolution pour rester net à l'impression. Les polices du site n'y sont pas
+> embarquées : les étiquettes sortent dans une police système approchante.
+
+Deux boutons de rapport : **Générer un rapport** reprend la personne, ses
+objectifs et la période ; **Rapport de crise** ouvre le même document centré
+sur le bilan des crises.
+
+**Crises** — d'abord une **chronologie** : l'évolution au fil du temps, en
+barres empilées ou en courbes, regroupée par jour, semaine ou mois. Un
 sélecteur **« Découper par »** transforme chaque dimension en séries —
 intensité, personne, atelier, antécédent, comportement, conséquence, fonction
-supposée — comme les segments d'un tableau croisé dynamique.
+supposée — comme les segments d'un tableau croisé dynamique. Un bouton **PNG**
+enregistre le graphique en image.
+
+Une bascule **« Mesurer »** choisit ce que compte le graphique : le **nombre**
+d'enregistrements, ou la **durée cumulée** en minutes. Les deux ne racontent pas
+la même chose — une semaine peut compter peu de crises mais très longues.
+
+La carte de synthèse affiche la **durée cumulée**, la **durée moyenne** et la
+**plus longue**. La moyenne ne porte que sur les enregistrements réellement
+chronométrés : une observation ABC n'a pas de durée, et l'inclure tirerait la
+moyenne vers zéro.
 
 Viennent ensuite les répartitions d'ensemble : **occurrences par intensité**,
 puis par **jour de la semaine**, **atelier**, **antécédent**, **comportement**
@@ -72,17 +109,35 @@ Crises du tableau de bord.
 > séries, les moins fréquentes sont réunies sous « Autres », sans qu'aucune
 > crise ne soit perdue.
 
+**Explorer** — le croisement libre de deux axes, comme un tableau croisé
+dynamique, avec export CSV. En bas du même onglet, la **lecture d'un rapport
+Excel** sans ouvrir Excel : tri, filtres et recherche sur le fichier reçu. Elle
+reste accessible même si aucune sauvegarde n'a encore été importée.
+
 **Rapport** — le document à transmettre. Les objectifs y apparaissent en
 **Acquis / En cours d'acquisition / Non acquis** — les nuances de travail
 interne (plateau, dormant) n'ont pas leur place dans un document officiel.
 Graphiques optionnels, **commentaire libre sous chaque objectif**, et
 **personnalisation des libellés** pour reprendre les termes exacts du projet
-personnalisé. Logo et nom d'association en en-tête. Le bouton ouvre la fenêtre
-d'impression : imprimante, ou « Enregistrer au format PDF » pour Airmes.
+personnalisé.
+
+Chaque objectif peut recevoir un **code EFL**, affiché en pastille devant son
+intitulé dans le document. Le code est attaché à l'objectif, pas à la
+personne : saisi une fois, il vaut pour toutes celles qui travaillent cette
+compétence.
+
+Un interrupteur **Inclure un bilan des crises** ajoute au document, pour la
+personne et la période retenues : le nombre de crises et d'observations,
+l'intensité moyenne, les durées, une chronologie par intensité avec sa
+tendance, et les trois antécédents, comportements et conséquences les plus
+fréquents. Le rapport peut ne contenir que ce bilan, sans aucun objectif.
+
+Logo et nom d'association en en-tête. Le bouton ouvre la fenêtre d'impression :
+imprimante, ou « Enregistrer au format PDF » pour Airmes.
 
 **Gestion** — import des sauvegardes DatABA (chiffrées ou non), export d'une ou
-plusieurs personnes vers un autre poste Manager, **purge des données**,
-**lecture d'un rapport Excel** sans ouvrir Excel, et réglages de sécurité.
+plusieurs personnes vers un autre poste Manager, **purge des données**, et
+réglages de sécurité.
 
 ## Purger les données
 
@@ -99,6 +154,10 @@ Quatre niveaux, dans l'onglet Gestion :
 > Les suppressions sont définitives et ne concernent que ce poste. Les tablettes
 > gardent leurs propres données : une réimportation depuis le dossier partagé
 > reste toujours possible.
+
+Pour retirer **une seule séance** — une cotation d'essai, un doublon — passez
+par l'onglet Séances plutôt que par une purge : dépliez la séance et utilisez
+**Retirer cette séance de l'analyse**.
 
 ## Rapprochement des personnes
 
