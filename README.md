@@ -126,11 +126,20 @@ intitulé dans le document. Le code est attaché à l'objectif, pas à la
 personne : saisi une fois, il vaut pour toutes celles qui travaillent cette
 compétence.
 
-Un interrupteur **Inclure un bilan des crises** ajoute au document, pour la
-personne et la période retenues : le nombre de crises et d'observations,
-l'intensité moyenne, les durées, une chronologie par intensité avec sa
-tendance, et les trois antécédents, comportements et conséquences les plus
-fréquents. Le rapport peut ne contenir que ce bilan, sans aucun objectif.
+Le bouton **Composer un bilan des crises** bascule vers l'onglet Crises, où le
+bilan se règle avec tous les filtres habituels. **Valider et revenir au
+rapport** l'y attache ; il s'imprime à la suite des objectifs. Le rapport peut
+ne contenir que ce bilan, sans aucun objectif.
+
+**Rapports enregistrés.** Donnez un nom, enregistrez, et retrouvez la
+composition plus tard pour la reprendre : personne, période, objectifs retenus
+et réglages du bilan des crises.
+
+> Seule la composition est conservée, pas les chiffres. Un rapport rouvert se
+> recalcule sur les cotations du moment — c'est ce qu'on veut pour un bilan
+> trimestriel qu'on reprend, mais cela signifie qu'il ne rejoue pas à
+> l'identique un document déjà transmis. Réenregistrer sous le même nom
+> remplace l'existant.
 
 Logo et nom d'association en en-tête. Le bouton ouvre la fenêtre d'impression :
 imprimante, ou « Enregistrer au format PDF » pour Airmes.
@@ -139,16 +148,25 @@ imprimante, ou « Enregistrer au format PDF » pour Airmes.
 plusieurs personnes vers un autre poste Manager, **purge des données**, et
 réglages de sécurité.
 
+## Le bilan des crises
+
+L'onglet Crises **est** le composeur de bilan. Réglez-y les filtres — personnes,
+type, période, regroupement, découpage, nombre ou durée cumulée, barres ou
+courbes — puis, sous **Réglages du bilan → Modifier**, décochez les blocs qui
+n'ont pas à figurer : les conséquences, les fonctions supposées, le jour de la
+semaine… Deux raccourcis, **Tout inclure** et **Le minimum**.
+
+Deux exports, qui ne donnent pas la même chose :
+
+- **PNG du graphique** — l'image de la chronologie seule.
+- **PDF du bilan** — le document complet, exactement ce qui est à l'écran, de
+  l'évolution dans le temps jusqu'aux conséquences, avec en tête le rappel des
+  réglages.
+
+> Ce même bilan est celui qui s'attache à un rapport de personne : le rendu est
+> partagé, ce qui est décoché ici est décoché là aussi.
+
 ## Exporter ce qui est à l'écran
-
-Deux endroits permettent d'exporter directement le réglage en cours, sans
-passer par l'onglet Rapport.
-
-**Onglet Crises.** Réglez la chronologie — personnes, type, regroupement,
-découpage, nombre ou durée cumulée, barres ou courbes — puis **PNG** pour une
-image, ou **PDF** pour un document. Le document reprend le titre, la période et
-le rappel des réglages : une chronologie sortie de son contexte ne dit ni sur
-qui elle porte, ni ce qu'elle compte.
 
 **Fiche personne, vue Objectifs.** Choisissez le style de courbe, repliez celles
 dont vous n'avez pas besoin, puis **PDF**. Seules les courbes restées visibles
