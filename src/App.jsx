@@ -128,6 +128,10 @@ const SECU_KEY = `${PREFIXE}securite`;
 const VIDE = {
   personnes: [], seances: [], crises: [], sources: [],
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
+  /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
+     personne-objectif : une même compétence garde son code quelle que soit la
+     personne qui la travaille. La clé est donc le nom de l'objectif. */
+  codesEfl: {},
 };
 
 function normaliser(d) {
@@ -136,6 +140,7 @@ function normaliser(d) {
     ...d,
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
     commentaires: d.commentaires || {},
+    codesEfl: d.codesEfl || {},
   };
 }
 async function chargerDonnees() {
@@ -442,6 +447,7 @@ function renforcementsDe(donnees, initiales) {
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
 const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
+const codeEflDe = (d, objectif) => ((d.codesEfl || {})[objectif] || '').trim();
 
 /* ==================== Navigation par balayage ====================
    Sur mobile, passer d'un onglet à l'autre au doigt. Les zones qui défilent
@@ -711,6 +717,106 @@ function etiquetteAgregation(cle, granularite) {
   return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
 }
 
+/* ==================== Téléchargement et export d'image ==================== */
+function telechargerFichier(blob, nom) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nom;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* Rasterise le graphique affiché en PNG, sans bibliothèque : on sérialise le
+   SVG produit par recharts et on le repeint dans un canvas. Deux précautions —
+   un fond opaque, sinon le PNG est transparent et illisible une fois collé
+   dans un document ; et un facteur d'échelle, sinon l'image sort à la taille
+   écran et pixellise à l'impression.
+   Limite assumée : les polices Google ne sont pas embarquées dans le SVG, les
+   étiquettes sortent donc dans une police système approchante. */
+async function exporterGraphePng(conteneur, nomFichier) {
+  const svg = conteneur && conteneur.querySelector('svg');
+  if (!svg) return false;
+  const boite = svg.getBoundingClientRect();
+  const largeur = Math.ceil(boite.width) || 640;
+  const hauteur = Math.ceil(boite.height) || 320;
+
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  clone.setAttribute('width', String(largeur));
+  clone.setAttribute('height', String(hauteur));
+  const fond = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  fond.setAttribute('width', '100%');
+  fond.setAttribute('height', '100%');
+  fond.setAttribute('fill', CARD);
+  clone.insertBefore(fond, clone.firstChild);
+
+  const source = new XMLSerializer().serializeToString(clone);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('svg illisible'));
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(source)}`;
+    });
+  } catch (e) {
+    return false;
+  }
+
+  const echelle = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = largeur * echelle;
+  canvas.height = hauteur * echelle;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(echelle, echelle);
+  ctx.drawImage(image, 0, 0, largeur, hauteur);
+  await new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (blob) telechargerFichier(blob, nomFichier);
+      resolve();
+    }, 'image/png');
+  });
+  return true;
+}
+
+/* Droite de tendance par moindres carrés. Renvoie la valeur ajustée pour
+   chaque point, ou null si la série est trop courte pour qu'une pente ait le
+   moindre sens. */
+function tendanceLineaire(valeurs) {
+  const n = valeurs.length;
+  if (n < 3) return null;
+  const sx = (n - 1) * n / 2;
+  const sy = valeurs.reduce((a, v) => a + v, 0);
+  const sxy = valeurs.reduce((a, v, i) => a + i * v, 0);
+  const sxx = valeurs.reduce((a, _, i) => a + i * i, 0);
+  const denom = n * sxx - sx * sx;
+  if (!denom) return null;
+  const pente = (n * sxy - sx * sy) / denom;
+  const origine = (sy - pente * sx) / n;
+  return valeurs.map((_, i) => Math.round((origine + pente * i) * 100) / 100);
+}
+
+/* Sens de la tendance, dit en clair — mais seulement s'il est net.
+   Un écart absolu ne suffit pas comme critère : « +0,5 crise » ne veut pas
+   dire la même chose chez quelqu'un qui en fait une par semaine et chez
+   quelqu'un qui en fait vingt. On exige donc les deux : au moins une crise
+   d'écart sur toute la période, et au moins un quart de la moyenne. Sans
+   cela, neuf semaines identiques suivies d'un unique soubresaut suffisaient
+   à afficher « en hausse » — un signal d'alerte pour rien. */
+function sensTendance(valeurs) {
+  const ajustees = tendanceLineaire(valeurs);
+  if (!ajustees) return null;
+  const ecart = ajustees[ajustees.length - 1] - ajustees[0];
+  const moyenne = valeurs.reduce((a, v) => a + v, 0) / valeurs.length;
+  if (Math.abs(ecart) < 1 || Math.abs(ecart) < 0.25 * moyenne) return null;
+  return ecart > 0 ? 'en hausse' : 'en baisse';
+}
+
+/* Nom de fichier sans caractère qui gêne un système de fichiers */
+const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'graphique';
+
 function Graphique({ points, style, seuil, hauteur = 220 }) {
   const donnees = points.map((p) => ({
     label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
@@ -882,13 +988,23 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne, onOuvrirCrises }) {
   const [unite, setUnite] = useState('nombre');
   const [etatOuvert, setEtatOuvert] = useState(null);
+  /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
+     la liste doit rester le sujet principal de la page. */
+  const [autresOuverts, setAutresOuverts] = useState(false);
 
   const recentes = lignes
     .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }))
     .filter((l) => l.points.length > 0);
-  const prioritaires = recentes.filter((l) => l.prioritaire);
+  /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
+     qu'un objectif prioritaire existait sur la période, les autres
+     disparaissaient et l'intitulé changeait tout seul : d'un appareil à
+     l'autre, selon les séances importées, le même écran s'appelait tantôt
+     « Objectifs prioritaires » tantôt « Objectifs travaillés » sans que rien
+     ne l'explique. Les deux groupes sont désormais toujours nommés. */
   const rang = { bientot: 0, plateau: 1, en_cours: 2, dormant: 3, acquis: 4, non_acquis: 5 };
-  const affichees = (prioritaires.length ? prioritaires : recentes).slice().sort((a, b) => rang[a.etat] - rang[b.etat]);
+  const parEtat = (a, b) => rang[a.etat] - rang[b.etat];
+  const prioritaires = recentes.filter((l) => l.prioritaire).sort(parEtat);
+  const autres = recentes.filter((l) => !l.prioritaire).sort(parEtat);
 
   const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
   const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
@@ -1017,38 +1133,71 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
         </button>
       </div>
 
-      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
-        {prioritaires.length ? 'Objectifs prioritaires' : 'Objectifs travaillés'} — appuyez pour ouvrir la fiche
-      </div>
-      {affichees.length === 0 ? (
+      {recentes.length === 0 ? (
         <Empty>Aucun objectif coté sur cette période.</Empty>
       ) : (
-        <div className="space-y-1.5">
-          {affichees.map((l, i) => (
-            <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
-              className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
-              style={{ borderColor: BORDER, backgroundColor: CARD }}>
-              <div className="min-w-0 flex-1">
-                <div className="text-sm break-words">
-                  <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
-                  {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
-                </div>
-                <div className="text-xs" style={{ color: INK_SOFT }}>
-                  {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
-                  {l.threshold != null && ` · seuil ${l.threshold} %`}
-                  {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
-                  {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
-                </div>
+        <>
+          {prioritaires.length > 0 && (
+            <>
+              <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
+                Objectifs prioritaires — appuyez pour ouvrir la fiche
               </div>
-              <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
-              <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
-                style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
-                {ETATS[l.etat].court}
-              </span>
-            </button>
-          ))}
-        </div>
+              <LigneObjectifs lignes={prioritaires} donnees={donnees} onOuvrir={onOuvrirPersonne} />
+            </>
+          )}
+
+          {autres.length > 0 && (() => {
+            /* Sans prioritaires au-dessus, cette liste est le contenu principal
+               de la page : elle reste dépliée quoi qu'il arrive. */
+            const repliable = prioritaires.length > 0;
+            const ouverte = !repliable || autresOuverts;
+            return (
+              <>
+                <button onClick={() => repliable && setAutresOuverts((v) => !v)}
+                  className="text-xs uppercase tracking-wide mb-2 flex items-center gap-1.5 w-full text-left"
+                  style={{ color: INK_SOFT, marginTop: repliable ? '1.25rem' : 0, cursor: repliable ? 'pointer' : 'default' }}>
+                  {repliable ? 'Autres objectifs travaillés' : 'Objectifs travaillés'} ({autres.length})
+                  {repliable && <span style={{ fontFamily: F_MONO }}>{ouverte ? '▾' : '▸'}</span>}
+                  {!repliable && <span className="normal-case">— appuyez pour ouvrir la fiche</span>}
+                </button>
+                {ouverte && <LigneObjectifs lignes={autres} donnees={donnees} onOuvrir={onOuvrirPersonne} />}
+              </>
+            );
+          })()}
+        </>
       )}
+    </div>
+  );
+}
+
+/* Liste d'objectifs du tableau de bord. Extraite pour que les deux groupes —
+   prioritaires et autres — partagent exactement le même rendu. */
+function LigneObjectifs({ lignes, donnees, onOuvrir }) {
+  return (
+    <div className="space-y-1.5">
+      {lignes.map((l, i) => (
+        <button key={`${l.initials}|${l.objectif}|${i}`} onClick={() => onOuvrir(l.initials, l.objectif)}
+          className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
+          style={{ borderColor: BORDER, backgroundColor: CARD }}>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm break-words">
+              <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
+              {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
+            </div>
+            <div className="text-xs" style={{ color: INK_SOFT }}>
+              {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
+              {l.threshold != null && ` · seuil ${l.threshold} %`}
+              {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
+              {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
+            </div>
+          </div>
+          <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
+          <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
+            style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+            {ETATS[l.etat].court}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -1164,9 +1313,18 @@ function comparerPaire(paire, donnees) {
   return { lignes, points, pct: points ? Math.round((accords / points) * 100) : null };
 }
 
-/* ==================== Séances ==================== */
-function SeancesScreen({ donnees }) {
+/* ==================== Séances ====================
+   Deux usages distincts sur le même écran : parcourir ce qui a été importé
+   (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
+   observateurs. */
+function SeancesScreen({ donnees, onSupprimerSeance }) {
   const [choisie, setChoisie] = useState(null);
+  const [ouverte, setOuverte] = useState(null);      // séance dépliée
+  const [recherche, setRecherche] = useState('');
+  const [tri, setTri] = useState('date');
+  const [toutes, setToutes] = useState(false);       // au-delà des 25 premières
+
+  const LOT = 25;
 
   const seances = donnees.seances.map((s) => {
     let cotations = 0;
@@ -1177,8 +1335,26 @@ function SeancesScreen({ donnees }) {
         if (obj && entry && objectiveScoreValue(obj, entry) != null) cotations += 1;
       });
     });
-    return { ...s, cotations };
-  }).sort((a, b) => b.cotations - a.cotations);
+    const table = (donnees._idVersInitiales || {})[s.source] || {};
+    const initiales = (s.studentIds || []).map((sid) => table[sid]).filter(Boolean);
+    return { ...s, cotations, initiales };
+  });
+
+  const q = recherche.trim().toLowerCase();
+  const filtrees = seances.filter((s) => {
+    if (!q) return true;
+    const champs = [
+      new Date(s.date).toLocaleDateString('fr-FR'),
+      s.source || '',
+      nomAtelier(donnees, s.source, s.atelierId),
+      ...s.initiales.map((i) => nomAffiche(donnees, i)),
+    ].join(' ').toLowerCase();
+    return champs.includes(q);
+  }).sort((a, b) => (tri === 'cotations'
+    ? b.cotations - a.cotations
+    : new Date(b.date) - new Date(a.date)));
+
+  const affichees = toutes ? filtrees : filtrees.slice(0, LOT);
 
   const paires = trouverPaires(donnees.seances);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
@@ -1188,25 +1364,39 @@ function SeancesScreen({ donnees }) {
 
   return (
     <div>
-      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Séances les plus cotées</div>
-      <div className="space-y-1.5 mb-6">
-        {seances.slice(0, 12).map((s) => (
-          <div key={s.id} className="rounded-xl border px-3.5 py-3 flex items-center justify-between gap-3" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-            <div className="min-w-0">
-              <div className="text-sm font-medium">
-                {new Date(s.date).toLocaleDateString('fr-FR')}
-                {s.doubleCotation && <span className="text-xs ml-2 px-1.5 py-0.5 rounded" style={{ backgroundColor: INK, color: '#fff' }}>double cotation</span>}
-              </div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>
-                {s.source} · {(s.studentIds || []).length} personne{(s.studentIds || []).length !== 1 ? 's' : ''}
-              </div>
-            </div>
-            <span className="text-sm shrink-0" style={{ fontFamily: F_MONO, color: INK }}>{s.cotations}</span>
-          </div>
-        ))}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
+          placeholder="Rechercher une date, une personne, un atelier…"
+          className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
+          style={{ borderColor: BORDER, color: INK }} />
+        <div className="flex gap-1.5">
+          <Chip label="Par date" on={tri === 'date'} onClick={() => setTri('date')} />
+          <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => setTri('cotations')} />
+        </div>
       </div>
 
-      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Accord inter-observateurs</div>
+      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
+        {filtrees.length} séance{filtrees.length !== 1 ? 's' : ''}
+        {q && ` sur ${seances.length}`} — appuyez pour voir le détail
+      </div>
+
+      <div className="space-y-1.5 mb-4">
+        {affichees.map((s) => (
+          <DetailSeance key={s.id} seance={s} donnees={donnees}
+            ouverte={ouverte === s.id}
+            onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+            onSupprimer={() => onSupprimerSeance(s)} />
+        ))}
+        {!affichees.length && <Empty>Aucune séance ne correspond à cette recherche.</Empty>}
+      </div>
+
+      {filtrees.length > LOT && (
+        <Btn variant="outline" onClick={() => setToutes((v) => !v)} className="text-sm mb-6">
+          {toutes ? `N'afficher que les ${LOT} premières` : `Afficher les ${filtrees.length - LOT} autres`}
+        </Btn>
+      )}
+
+      <div className="text-xs uppercase tracking-wide mb-2 mt-6" style={{ color: INK_SOFT }}>Accord inter-observateurs</div>
       {paires.length === 0 ? (
         <Card>
           <p className="text-sm" style={{ color: INK_SOFT }}>
@@ -1262,6 +1452,96 @@ function SeancesScreen({ donnees }) {
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/* Une séance dans la liste, dépliable sur son détail complet.
+   Les cotations ne sont pas modifiables ici : la tablette reste la source, et
+   un réimport de la même séance rétablirait de toute façon ses valeurs. */
+function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
+  const table = (donnees._idVersInitiales || {})[seance.source] || {};
+  const intervenant = ((donnees._intervenants || {})[seance.source] || {})[seance.intervenantId];
+  const dureeMin = seance.endedAt && seance.startedAt
+    ? Math.round(Math.max(0, seance.endedAt - seance.startedAt) / 60000) : null;
+
+  return (
+    <div className="rounded-xl border" style={{ borderColor: ouverte ? INK : BORDER, backgroundColor: CARD }}>
+      <button onClick={onBasculer} className="w-full px-3.5 py-3 flex items-center justify-between gap-3 text-left">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">
+            {new Date(seance.date).toLocaleDateString('fr-FR')}
+            {seance.doubleCotation && (
+              <span className="text-xs ml-2 px-1.5 py-0.5 rounded" style={{ backgroundColor: INK, color: '#fff' }}>double cotation</span>
+            )}
+          </div>
+          <div className="text-xs break-words" style={{ color: INK_SOFT }}>
+            {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
+            {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
+          </div>
+        </div>
+        <span className="text-sm shrink-0 flex items-center gap-2" style={{ fontFamily: F_MONO, color: INK }}>
+          {seance.cotations}
+          <span style={{ color: INK_SOFT }}>{ouverte ? '▾' : '▸'}</span>
+        </span>
+      </button>
+
+      {ouverte && (
+        <div className="px-3.5 pb-3.5 pt-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <div className="text-xs mb-3 mt-2" style={{ color: INK_SOFT }}>
+            {intervenant && <>Intervenant : <strong style={{ color: INK }}>{intervenant}</strong> · </>}
+            {dureeMin != null && <>Durée : <strong style={{ color: INK }}>{dureeMin} min</strong> · </>}
+            Mode : {seance.mode === 'balance' ? 'Balance Program' : 'atelier'}
+          </div>
+
+          {(seance.studentIds || []).map((sid) => {
+            const ini = table[sid];
+            const objectifs = (seance.selectedObjectives || {})[sid] || [];
+            const note = (seance.notes || {})[sid];
+            const renfo = (seance.reinforcement || {})[sid];
+            return (
+              <div key={sid} className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
+                <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>
+                  {ini ? nomAffiche(donnees, ini) : 'Personne inconnue'}
+                  {renfo && renfo.totalMs > 0 && (
+                    <span className="text-xs font-normal ml-2" style={{ color: INK_SOFT }}>
+                      renforcement {Math.round(renfo.totalMs / 60000)} min
+                    </span>
+                  )}
+                </div>
+                {objectifs.length === 0 ? (
+                  <div className="text-xs" style={{ color: INK_SOFT }}>Aucun objectif sélectionné.</div>
+                ) : objectifs.map((oid) => {
+                  const obj = (seance.objectiveSnapshot || {})[oid];
+                  if (!obj) return null;
+                  const entry = (seance.data || {})[sid] && seance.data[sid][oid];
+                  const score = objectiveScoreValue(obj, entry);
+                  return (
+                    <div key={oid} className="flex items-baseline justify-between gap-2 text-xs py-0.5">
+                      <span className="min-w-0 break-words">
+                        {ini ? libelleAffiche(donnees, ini, obj.name) : obj.name}
+                        <span style={{ color: INK_SOFT }}> · {TYPES_COTATION[obj.type] || obj.type}</span>
+                      </span>
+                      <span className="shrink-0" style={{ fontFamily: F_MONO, color: score == null ? INK_SOFT : INK }}>
+                        {score == null ? 'non coté' : `${score} %`}
+                      </span>
+                    </div>
+                  );
+                })}
+                {note && (
+                  <div className="text-xs mt-1.5 pt-1.5 whitespace-pre-wrap" style={{ color: INK_SOFT, borderTop: `1px solid ${BORDER}` }}>
+                    {note}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <button onClick={onSupprimer} className="flex items-center gap-1.5 text-xs mt-1" style={{ color: NON_ACQUIS }}>
+            <Trash2 size={13} /> Retirer cette séance de l'analyse
+          </button>
+        </div>
       )}
     </div>
   );
@@ -1323,18 +1603,22 @@ function valeursSegment(donnees, crise, segmentation) {
 
 /* Chronologie des crises, découpée en séries.
    Les périodes sans aucune crise sont conservées : un trou dans la courbe est
-   une information, l'écraser laisserait croire à une continuité. */
-function chronologieCrises(donnees, crises, granularite, segmentation) {
+   une information, l'écraser laisserait croire à une continuité.
+   « mesure » vaut 'nombre' (chaque crise pèse 1) ou 'duree' (chaque crise pèse
+   ses minutes) : une semaine peut compter peu de crises mais très longues. */
+function chronologieCrises(donnees, crises, granularite, segmentation, mesure = 'nombre') {
   const paquets = new Map();
   const totaux = new Map();
+  const poids = (c) => (mesure === 'duree' ? Math.round((c.durationMs || 0) / 60000) : 1);
 
   crises.forEach((c) => {
     const cle = cleAgregation(c.date, granularite);
     if (!paquets.has(cle)) paquets.set(cle, {});
     const bucket = paquets.get(cle);
+    const p = poids(c);
     valeursSegment(donnees, c, segmentation).forEach((v) => {
-      bucket[v] = (bucket[v] || 0) + 1;
-      totaux.set(v, (totaux.get(v) || 0) + 1);
+      bucket[v] = (bucket[v] || 0) + p;
+      totaux.set(v, (totaux.get(v) || 0) + p);
     });
   });
 
@@ -1360,12 +1644,25 @@ function chronologieCrises(donnees, crises, granularite, segmentation) {
   return { donnees: donneesGraphe, series, regroupe };
 }
 
-function CrisesScreen({ donnees, periode, setPeriode }) {
+function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusConsomme }) {
   const [unite, setUnite] = useState('nombre');
   const [type, setType] = useState('crise');
   const [personnes, setPersonnes] = useState([]);      // vide = toutes
   const [segmentation, setSegmentation] = useState('intensite');
   const [forme, setForme] = useState('barres');
+  const [mesure, setMesure] = useState('nombre');      // effectif ou minutes cumulées
+  const refChrono = useRef(null);
+
+  /* Arrivée depuis la fiche d'une personne : on préselectionne son filtre,
+     puis on rend la main pour que l'utilisateur puisse l'enlever librement.
+     La dépendance se limite à focusPersonne : onFocusConsomme est recréée à
+     chaque rendu du parent, la lister relancerait l'effet en boucle. */
+  useEffect(() => {
+    if (!focusPersonne) return;
+    setPersonnes([focusPersonne]);
+    setType('crise');
+    onFocusConsomme();
+  }, [focusPersonne]);
 
   const iniDe = (c) => ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
 
@@ -1375,7 +1672,17 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
   const retenues = toutes.filter((c) => dansPeriode(c.date, periode));
 
   const gran = periode.granularite || 'semaine';
-  const chrono = chronologieCrises(donnees, retenues, gran, segmentation);
+  const chrono = chronologieCrises(donnees, retenues, gran, segmentation, mesure);
+
+  /* Durées : renseignées pour les crises chronométrées, à zéro pour les
+     observations ABC. La moyenne ne porte que sur les enregistrements
+     réellement chronométrés, sinon les observations la tirent vers le bas. */
+  const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
+  const chronometrees = retenues.filter((c) => (c.durationMs || 0) > 0);
+  const dureeTotale = retenues.reduce((a, c) => a + minutesDe(c), 0);
+  const dureeMoyenne = chronometrees.length
+    ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : 0;
+  const dureeMax = chronometrees.length ? Math.max(...chronometrees.map(minutesDe)) : 0;
 
   const compter = (valeurs) => {
     const m = new Map();
@@ -1473,9 +1780,19 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Évolution dans le temps</span>
           <div className="ml-auto flex gap-1.5">
+            <Btn variant="outline" className="text-xs py-1.5"
+              onClick={() => exporterGraphePng(refChrono.current, `crises-${nomSain(libellePeriode(periode))}.png`)}>
+              <Download size={13} /> PNG
+            </Btn>
             <Chip label="Barres" on={forme === 'barres'} onClick={() => setForme('barres')} />
             <Chip label="Courbes" on={forme === 'courbes'} onClick={() => setForme('courbes')} />
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5 mb-2">
+          <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesurer</span>
+          <Chip label="Nombre" on={mesure === 'nombre'} onClick={() => setMesure('nombre')} />
+          <Chip label="Durée cumulée (min)" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 mb-3">
@@ -1489,7 +1806,7 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
           <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
         ) : (
           <>
-            <div style={{ height: 300 }}>
+            <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
               <ResponsiveContainer width="100%" height="100%">
                 {forme === 'courbes' ? (
                   <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
@@ -1519,10 +1836,11 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
               </ResponsiveContainer>
             </div>
             <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-              Regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} — réglable au-dessus.
+              {mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} — réglable au-dessus.
               {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
               {SEGMENTATIONS.find((sg) => sg.k === segmentation).multi &&
                 " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
+              {mesure === 'duree' && " Une observation ABC n'a pas de durée : elle pèse zéro dans cette vue."}
             </p>
           </>
         )}
@@ -1542,6 +1860,31 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
             </span>
           )}
         </div>
+
+        {chronometrees.length > 0 && (
+          <div className="flex flex-wrap gap-5 mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div>
+              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{dureeTotale} min</div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
+            </div>
+            <div>
+              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>
+                en moyenne ({chronometrees.length}/{retenues.length} chronométrée{chronometrees.length !== 1 ? 's' : ''})
+              </div>
+            </div>
+            <div>
+              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMax} min</div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>la plus longue</div>
+            </div>
+          </div>
+        )}
+        {chronometrees.length === 0 && retenues.length > 0 && (
+          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+            Aucune durée relevée sur cette période — les observations ABC n'en portent pas,
+            et une crise n'en a que si le chronomètre a été lancé dans DatABA.
+          </p>
+        )}
       </Card>
 
       <Barres titre="Occurrences par intensité" donnees={parIntensite}
@@ -1561,13 +1904,152 @@ function CrisesScreen({ donnees, periode, setPeriode }) {
 }
 
 /* ==================== Personnes ==================== */
-function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, onRapport }) {
+/* Aperçu des crises dans la fiche personne : occurrences seules, avec la
+   tendance de la période. Volontairement dépouillé — il sert à repérer qu'il
+   se passe quelque chose, l'analyse se fait dans l'onglet Crises, où il
+   renvoie d'un appui. */
+function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
+  const vraies = crises.filter((c) => (c.kind || 'crise') === 'crise');
+
+  const paquets = new Map();
+  vraies.forEach((c) => {
+    const k = cleAgregation(c.date, granularite);
+    paquets.set(k, (paquets.get(k) || 0) + 1);
+  });
+  const ordonnes = Array.from(paquets.entries()).sort((a, b) => a[0] - b[0]);
+  const valeurs = ordonnes.map(([, n]) => n);
+  const tendance = tendanceLineaire(valeurs);
+  const points = ordonnes.map(([k, n], i) => ({
+    label: etiquetteAgregation(k, granularite),
+    Crises: n,
+    Tendance: tendance ? tendance[i] : null,
+  }));
+
+  const sens = sensTendance(valeurs);
+
+  if (!vraies.length) return null;
+
+  return (
+    <button onClick={onOuvrir} className="w-full text-left rounded-2xl border p-4 mb-4"
+      style={{ borderColor: BORDER, backgroundColor: CARD }}>
+      <div className="flex items-center gap-2 mb-2">
+        <AlertTriangle size={14} style={{ color: INK_SOFT }} />
+        <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Crises sur la période</span>
+        <span className="text-sm font-semibold ml-1" style={{ fontFamily: F_MONO, color: CRISE }}>{vraies.length}</span>
+        {sens && (
+          <span className="text-xs px-1.5 py-0.5 rounded"
+            style={{ backgroundColor: sens === 'en hausse' ? `${NON_ACQUIS}18` : `${ACQUIS}18`, color: sens === 'en hausse' ? NON_ACQUIS : ACQUIS }}>
+            {sens}
+          </span>
+        )}
+        <span className="text-xs ml-auto" style={{ color: INK }}>analyser →</span>
+      </div>
+      <div style={{ height: 110 }} data-no-swipe>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
+            <XAxis dataKey="label" tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+            <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+            <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+            <Bar dataKey="Crises" fill={CRISE} radius={[3, 3, 0, 0]} isAnimationActive={false} />
+            {tendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="text-xs mt-1" style={{ color: INK_SOFT }}>
+        Occurrences par {granularite === 'jour' ? 'jour' : granularite === 'mois' ? 'mois' : 'semaine'}
+        {tendance && ', ligne pointillée : tendance'}. Les observations ABC ne sont pas comptées.
+      </p>
+    </button>
+  );
+}
+
+/* Une courbe d'objectif et ses trois commandes : replier (pour se concentrer
+   sur les autres), agrandir (une courbe dense est illisible à 220 px), et
+   exporter en image (pour coller dans un compte rendu sans passer par une
+   capture d'écran). */
+function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surligne, onMasquer, onAgrandir }) {
+  const refGraphe = useRef(null);
+  const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
+  const code = codeEflDe(donnees, ligne.objectif);
+
+  return (
+    <Card style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium break-words">
+            {code && (
+              <span className="text-xs mr-1.5 px-1.5 py-0.5 rounded"
+                style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
+                {code}
+              </span>
+            )}
+            {libelle}
+          </div>
+          <div className="text-xs" style={{ color: INK_SOFT }}>
+            {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
+            {ligne.threshold != null && ` · seuil ${ligne.threshold} %`}
+          </div>
+        </div>
+        <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
+          style={{ backgroundColor: ETATS[ligne.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+          {ETATS[ligne.etat].label}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+        <Btn variant="ghost" onClick={onMasquer} className="text-xs py-1">
+          {masque ? 'Afficher la courbe' : 'Replier'}
+        </Btn>
+        {!masque && ligne.points.length > 0 && (
+          <>
+            <Btn variant="ghost" onClick={onAgrandir} className="text-xs py-1">
+              {agrandi ? 'Réduire' : 'Agrandir'}
+            </Btn>
+            <Btn variant="ghost" className="text-xs py-1"
+              onClick={() => exporterGraphePng(refGraphe.current, `${nomSain(nomAffiche(donnees, personne))}-${nomSain(libelle)}.png`)}>
+              <Download size={13} /> PNG
+            </Btn>
+          </>
+        )}
+      </div>
+
+      {masque ? null : ligne.points.length ? (
+        <div ref={refGraphe} data-no-swipe>
+          <Graphique points={ligne.points} style={style} seuil={ligne.threshold}
+            hauteur={agrandi ? 460 : surligne ? 300 : 220} />
+        </div>
+      ) : (
+        <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
+      )}
+    </Card>
+  );
+}
+
+function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, onRapport, onRapportCrises, onOuvrirCrises }) {
   const [vue, setVue] = useState('objectifs');
   const [style, setStyle] = useState('ligne');
+  /* Objectifs dont on a replié la courbe, et celui qu'on a agrandi. Repérés
+     par leur nom : les identifiants d'objectif changent d'une tablette à
+     l'autre, le nom est ce qui reste stable côté consolidation. */
+  const [masques, setMasques] = useState([]);
+  const [agrandi, setAgrandi] = useState(null);
+
+  /* Calculé avant le retour anticipé plus bas : l'effet qui suit doit être
+     appelé à chaque rendu, sans quoi l'ordre des hooks change selon qu'une
+     personne existe ou non. */
+  const personne = (focus && focus.initiales)
+    || (donnees.personnes.length ? donnees.personnes[0].initials : null);
+
+  /* Changer de personne remet les courbes à plat : un objectif replié chez
+     l'une n'a pas de raison de l'être chez l'autre, même s'il porte le même
+     nom. */
+  useEffect(() => {
+    setMasques([]);
+    setAgrandi(null);
+  }, [personne]);
 
   if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour commencer.</Empty>;
 
-  const personne = (focus && focus.initiales) || donnees.personnes[0].initials;
   const objectifOuvert = focus && focus.objectif;
 
   const siennes = lignes
@@ -1635,40 +2117,50 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
           Générer un rapport
         </Btn>
-        <span className="text-xs" style={{ color: INK_SOFT }}>Reprend cette personne, ces objectifs et cette période.</span>
+        <Btn variant="outline" onClick={() => onRapportCrises(personne)} className="text-sm">
+          <AlertTriangle size={14} /> Rapport de crise
+        </Btn>
+        <span className="text-xs" style={{ color: INK_SOFT }}>Reprend cette personne et cette période.</span>
       </div>
 
-      {vue === 'objectifs' && (
-        <>
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
-          </div>
-          {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
-            <div className="space-y-3">
-              {siennes.map((l, i) => (
-                <Card key={i} style={objectifOuvert === l.objectif ? { borderColor: INK, borderWidth: 2 } : undefined}>
-                  <div className="flex items-start justify-between gap-3 mb-2">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</div>
-                      <div className="text-xs" style={{ color: INK_SOFT }}>
-                        {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
-                        {l.threshold != null && ` · seuil ${l.threshold} %`}
-                      </div>
-                    </div>
-                    <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
-                      style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
-                      {ETATS[l.etat].label}
-                    </span>
-                  </div>
-                  {l.points.length
-                    ? <Graphique points={l.points} style={style} seuil={l.threshold} hauteur={objectifOuvert === l.objectif ? 300 : 220} />
-                    : <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>}
-                </Card>
-              ))}
+      <ApercuCrises donnees={donnees} personne={personne} crises={crisesPersonne}
+        granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
+
+      {vue === 'objectifs' && (() => {
+        const visibles = siennes.filter((l) => !masques.includes(l.objectif));
+        const basculerMasque = (nom) => setMasques((cur) => (cur.includes(nom) ? cur.filter((x) => x !== nom) : [...cur, nom]));
+        return (
+          <>
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+              {masques.length > 0 && (
+                <Btn variant="ghost" onClick={() => setMasques([])} className="text-xs py-1.5 ml-auto">
+                  Réafficher {masques.length} courbe{masques.length !== 1 ? 's' : ''}
+                </Btn>
+              )}
             </div>
-          )}
-        </>
-      )}
+
+            {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
+              <div className="space-y-3">
+                {siennes.map((l) => (
+                  <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
+                    style={style}
+                    masque={masques.includes(l.objectif)}
+                    agrandi={agrandi === l.objectif}
+                    surligne={objectifOuvert === l.objectif}
+                    onMasquer={() => basculerMasque(l.objectif)}
+                    onAgrandir={() => setAgrandi(agrandi === l.objectif ? null : l.objectif)} />
+                ))}
+                {visibles.length === 0 && (
+                  <p className="text-xs text-center py-4" style={{ color: INK_SOFT }}>
+                    Toutes les courbes sont repliées.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {vue === 'bilan' && (
         <Card>
@@ -1735,9 +2227,16 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
         if (!releves.length) return <Empty>Aucune séance sur cette période.</Empty>;
         const avecRenfo = releves.filter((r) => r.renfoMin > 0);
+        const totalRenfo = releves.reduce((a, r) => a + r.renfoMin, 0);
+        /* Deux moyennes, parce qu'elles ne répondent pas à la même question :
+           la générale compte les séances sans renforcement comme des zéros et
+           dit la place du renforcement dans l'accompagnement ; celle « quand il
+           y en a » ne porte que sur les séances concernées et dit la durée
+           habituelle d'un renforcement. Confondre les deux fait conclure à une
+           baisse là où il n'y a qu'un changement de fréquence. */
+        const moyenneGenerale = releves.length ? Math.round(totalRenfo / releves.length) : 0;
         const moyenneRenfo = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.renfoMin, 0) / avecRenfo.length) : 0;
         const moyennePart = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.part, 0) / avecRenfo.length) : 0;
-        const totalRenfo = releves.reduce((a, r) => a + r.renfoMin, 0);
         const graphe = releves.map((r) => ({
           label: new Date(r.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
           Renforcement: r.renfoMin,
@@ -1748,8 +2247,14 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
             <Card className="mb-3">
               <div className="flex flex-wrap gap-5">
                 <div>
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{moyenneGenerale} min</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance</div>
+                </div>
+                <div>
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenneRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance avec renforcement</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>
+                    quand il y en a ({avecRenfo.length}/{releves.length} séances)
+                  </div>
                 </div>
                 <div>
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyennePart} %</div>
@@ -1759,14 +2264,10 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>au total sur la période</div>
                 </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{avecRenfo.length}/{releves.length}</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>séances avec renforcement</div>
-                </div>
               </div>
               <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                La moyenne ne porte que sur les séances où un renforcement a été relevé : y inclure
-                les autres la tirerait vers zéro et masquerait la réalité des séances concernées.
+                Une séance sans renforcement compte comme zéro dans la moyenne générale : c'est ce qui
+                la distingue de la moyenne « quand il y en a », calculée sur les seules séances concernées.
               </p>
             </Card>
 
@@ -1789,94 +2290,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               </div>
             </Card>
           </>
-        );
-      })()}
-
-      {vue === 'renfo' && (() => {
-        const table = {};
-        donnees.sources.forEach((src) => {
-          const sid = idPourSource(donnees, src, personne);
-          if (sid) table[src] = sid;
-        });
-        const points = donnees.seances
-          .filter((se) => dansPeriode(se.date, periode))
-          .map((se) => {
-            const sid = table[se.source];
-            const r = sid && (se.reinforcement || {})[sid];
-            if (!sid || !(se.studentIds || []).includes(sid)) return null;
-            return {
-              date: se.date,
-              minutes: r && r.totalMs ? Math.round(r.totalMs / 60000) : 0,
-              seance: Math.round(Math.max(0, (se.endedAt || 0) - (se.startedAt || 0)) / 60000),
-            };
-          })
-          .filter(Boolean)
-          .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-        const avecRenfo = points.filter((p) => p.minutes > 0);
-        const moyenne = points.length ? Math.round(points.reduce((a, p) => a + p.minutes, 0) / points.length) : 0;
-        const moyenneQuandPresent = avecRenfo.length
-          ? Math.round(avecRenfo.reduce((a, p) => a + p.minutes, 0) / avecRenfo.length) : 0;
-        const totalRenfo = points.reduce((a, p) => a + p.minutes, 0);
-        const totalSeance = points.reduce((a, p) => a + p.seance, 0);
-        const part = totalSeance ? Math.round((totalRenfo / totalSeance) * 100) : 0;
-
-        if (!points.length) return <Empty>Aucune séance pour cette personne sur la période.</Empty>;
-
-        const donneesGraphe = points.map((p) => ({
-          label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
-          renforcement: p.minutes,
-          activite: Math.max(0, p.seance - p.minutes),
-        }));
-
-        return (
-          <div>
-            <Card className="mb-3">
-              <div className="flex flex-wrap gap-5">
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenne} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{moyenneQuandPresent} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>
-                    quand il y en a ({avecRenfo.length}/{points.length} séances)
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{part} %</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>du temps de séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>au total</div>
-                </div>
-              </div>
-            </Card>
-
-            <Card>
-              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-                Par séance : temps de renforcement et temps d'activité
-              </div>
-              <div style={{ height: 260 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={donneesGraphe} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="activite" name="Activité" stackId="t" fill={INK} isAnimationActive={false} />
-                    <Bar dataKey="renforcement" name="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                Une séance sans renforcement compte comme zéro dans la moyenne générale : c'est ce qui
-                la distingue de la moyenne « quand il y en a », calculée sur les seules séances concernées.
-              </p>
-            </Card>
-          </div>
         );
       })()}
 
@@ -2014,7 +2427,16 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  if (!donnees.seances.length) return <Empty>Importez une sauvegarde pour explorer les données.</Empty>;
+  /* Sans séance importée, le croisement n'a rien à montrer — mais le lecteur de
+     rapport tableur, lui, reste utilisable : il ne dépend d'aucun import. */
+  if (!donnees.seances.length) {
+    return (
+      <div>
+        <Empty>Importez une sauvegarde depuis l'onglet Gestion pour explorer les données.</Empty>
+        <div className="mt-4"><LecteurExcel /></div>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -2129,16 +2551,21 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
         )}
       </Card>
 
-      <p className="text-xs" style={{ color: INK_SOFT }}>
+      <p className="text-xs mb-4" style={{ color: INK_SOFT }}>
         Une moyenne de moyennes n'est pas une moyenne générale : le total d'une ligne est recalculé
         sur l'ensemble de ses cotations, il ne correspond donc pas à la moyenne des cases affichées.
       </p>
+
+      {/* Le lecteur de rapport tableur vit ici et non dans Gestion : c'est un
+          outil de consultation, il a sa place auprès du croisement plutôt
+          qu'auprès des réglages. */}
+      <LecteurExcel />
     </div>
   );
 }
 
 /* ==================== Rapport ==================== */
-function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire }) {
+function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire, onCodeEfl }) {
   const [avecGraphiques, setAvecGraphiques] = useState(true);
   const [style, setStyle] = useState('ligne');
 
@@ -2146,6 +2573,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 
   const personne = selection.personne || donnees.personnes[0].initials;
   const periode = selection.periode || periodeVide();
+  const avecCrises = !!selection.avecCrises;
 
   const disponibles = lignes.filter((l) => l.initials === personne);
   const retenus = disponibles
@@ -2209,7 +2637,9 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         </div>
 
         <div className="mb-3">
-          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Objectifs à inclure, et leur libellé dans le document</div>
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
+            Objectifs à inclure, leur code EFL et leur libellé dans le document
+          </div>
           <div className="space-y-1.5">
             {disponibles.map((l) => {
               const coche = (selection.objectifs || []).includes(l.objectif);
@@ -2220,6 +2650,12 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                     style={{ borderColor: coche ? INK : BORDER, backgroundColor: coche ? INK : 'transparent', color: '#fff' }}>
                     {coche ? '✓' : ''}
                   </button>
+                  <input value={(donnees.codesEfl || {})[l.objectif] || ''}
+                    onChange={(e) => onCodeEfl(l.objectif, e.target.value)}
+                    placeholder="EFL"
+                    title="Code du référentiel, repris à côté de l'objectif dans le document"
+                    className="w-20 shrink-0 rounded-lg border px-2 py-1.5 text-sm bg-transparent"
+                    style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }} />
                   <input value={(donnees.alias.objectifs || {})[cleAlias(personne, l.objectif)] || ''}
                     onChange={(e) => onAlias('objectifs', cleAlias(personne, l.objectif), e.target.value)}
                     placeholder={l.objectif}
@@ -2231,6 +2667,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           </div>
           <p className="text-xs mt-1.5" style={{ color: INK_SOFT }}>
             Les libellés saisis remplacent l'intitulé de la tablette dans le document, et sont conservés.
+            Le code EFL est attaché à l'objectif : saisi une fois, il vaut pour toutes les personnes qui le travaillent.
           </p>
         </div>
 
@@ -2246,7 +2683,15 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           </div>
         )}
 
-        <Btn onClick={() => window.print()} disabled={!retenus.length} className="w-full">
+        <button onClick={() => setSelection({ ...selection, avecCrises: !avecCrises })}
+          className="flex items-center gap-1.5 text-xs mb-3" style={{ color: INK_SOFT }}>
+          <span className="w-9 h-5 rounded-full relative shrink-0" style={{ backgroundColor: avecCrises ? INK : BORDER }}>
+            <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white" style={{ left: avecCrises ? '1.25rem' : '0.125rem', transition: 'left .15s' }} />
+          </span>
+          Inclure un bilan des crises
+        </button>
+
+        <Btn onClick={() => window.print()} disabled={!retenus.length && !avecCrises} className="w-full">
           <Printer size={16} /> Imprimer ou enregistrer en PDF
         </Btn>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
@@ -2267,7 +2712,9 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         </div>
 
         {retenus.length === 0 ? (
-          <p className="text-sm" style={{ color: INK_SOFT }}>Sélectionnez au moins un objectif.</p>
+          <p className="text-sm" style={{ color: INK_SOFT }}>
+            {avecCrises ? 'Aucun objectif sélectionné — le document ne contient que le bilan des crises.' : 'Sélectionnez au moins un objectif.'}
+          </p>
         ) : (
           retenus.map((l, i) => {
             const cle = cleAlias(personne, l.objectif);
@@ -2277,6 +2724,12 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
               <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
                 <div className="flex items-start justify-between gap-3 mb-1">
                   <div className="text-base font-semibold min-w-0 break-words" style={{ fontFamily: F_DISPLAY }}>
+                    {codeEflDe(donnees, l.objectif) && (
+                      <span className="text-xs font-medium mr-2 px-1.5 py-0.5 rounded align-middle"
+                        style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
+                        {codeEflDe(donnees, l.objectif)}
+                      </span>
+                    )}
                     {libelleAffiche(donnees, personne, l.objectif)}
                   </div>
                   <span className="text-sm font-semibold shrink-0" style={{ color: ETATS[l.etat].color }}>
@@ -2304,11 +2757,167 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           })
         )}
 
+        {avecCrises && (
+          <BilanCrises donnees={donnees} personne={personne} periode={periode}
+            avecGraphiques={avecGraphiques} style={style} />
+        )}
+
         <p className="text-xs mt-6 pt-3" style={{ color: INK_SOFT, borderTop: `1px solid ${BORDER}` }}>
           Document établi à partir des cotations relevées sur DatABA. Les états sont calculés selon le
           critère d'acquisition défini pour chaque objectif.
         </p>
       </div>
+    </div>
+  );
+}
+
+/* ==================== Bilan des crises dans le rapport ====================
+   Le même document sert pour les objectifs et pour les crises : un seul
+   en-tête, un seul geste d'impression. Les répartitions sont limitées aux
+   trois valeurs les plus fréquentes — un rapport transmis à des tiers n'a pas
+   vocation à déverser toute la liste des étiquettes cochées. */
+function BilanCrises({ donnees, personne, periode, avecGraphiques, style }) {
+  const refGraphe = useRef(null);
+
+  const crises = (donnees.crises || []).filter((c) => {
+    if (!c.studentId) return false;
+    const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+    return ini === personne && dansPeriode(c.date, periode);
+  });
+  const vraiesCrises = crises.filter((c) => (c.kind || 'crise') === 'crise');
+  const observations = crises.filter((c) => (c.kind || 'crise') === 'abc');
+
+  const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
+  const chronometrees = vraiesCrises.filter((c) => (c.durationMs || 0) > 0);
+  const dureeTotale = vraiesCrises.reduce((a, c) => a + minutesDe(c), 0);
+  const dureeMoyenne = chronometrees.length
+    ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : null;
+
+  const notees = vraiesCrises.filter((c) => c.intensite);
+  const intensiteMoy = notees.length
+    ? Math.round((notees.reduce((a, c) => a + c.intensite, 0) / notees.length) * 10) / 10 : null;
+
+  const compter = (valeurs) => {
+    const m = new Map();
+    valeurs.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  };
+  const topAntecedents = compter(crises.flatMap((c) => c.antecedentTags || []));
+  const topComportements = compter(crises.flatMap((c) => c.comportementTags || []));
+  const topConsequences = compter(crises.flatMap((c) => c.consequenceTags || []));
+
+  const gran = periode.granularite || 'semaine';
+  const chrono = chronologieCrises(donnees, vraiesCrises, gran, 'intensite', 'nombre');
+  const serieTotale = chrono.donnees.map((d) => chrono.series.reduce((a, s) => a + (d[s] || 0), 0));
+  const tendance = tendanceLineaire(serieTotale);
+  const graphe = chrono.donnees.map((d, i) => ({
+    ...d,
+    Tendance: tendance ? tendance[i] : null,
+  }));
+
+  if (!crises.length) {
+    return (
+      <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}` }}>
+        <div className="text-base font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+        <p className="text-sm" style={{ color: INK_SOFT }}>
+          Aucune crise ni observation consignée sur la période.
+        </p>
+      </div>
+    );
+  }
+
+  const Ligne = ({ titre, valeurs }) => (
+    valeurs.length ? (
+      <div className="text-sm mb-1">
+        <span style={{ color: INK_SOFT }}>{titre} : </span>
+        {valeurs.map(([v, n], i) => (
+          <span key={v}>{i > 0 && ' · '}{v} <span style={{ fontFamily: F_MONO, color: INK_SOFT }}>({n})</span></span>
+        ))}
+      </div>
+    ) : null
+  );
+
+  return (
+    <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}`, breakInside: 'avoid' }}>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div className="text-base font-semibold" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+        {avecGraphiques && chrono.donnees.length > 0 && (
+          <Btn variant="outline" className="text-xs py-1.5 no-print"
+            onClick={() => exporterGraphePng(refGraphe.current, `crises-${nomSain(nomAffiche(donnees, personne))}.png`)}>
+            <Download size={13} /> PNG
+          </Btn>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-6 mb-4">
+        <div>
+          <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{vraiesCrises.length}</div>
+          <div className="text-xs" style={{ color: INK_SOFT }}>crise{vraiesCrises.length !== 1 ? 's' : ''} sur la période</div>
+        </div>
+        {observations.length > 0 && (
+          <div>
+            <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{observations.length}</div>
+            <div className="text-xs" style={{ color: INK_SOFT }}>observation{observations.length !== 1 ? 's' : ''} ABC</div>
+          </div>
+        )}
+        {intensiteMoy != null && (
+          <div>
+            <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: INTENSITES[Math.round(intensiteMoy)].color }}>
+              {intensiteMoy} / 3
+            </div>
+            <div className="text-xs" style={{ color: INK_SOFT }}>intensité moyenne ({notees.length} notée{notees.length !== 1 ? 's' : ''})</div>
+          </div>
+        )}
+        {dureeMoyenne != null && (
+          <>
+            <div>
+              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>durée moyenne</div>
+            </div>
+            <div>
+              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeTotale} min</div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {avecGraphiques && chrono.donnees.length > 0 && (
+        <div style={{ height: 220 }} className="mb-3" ref={refGraphe} data-no-swipe>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+              <CartesianGrid stroke={BORDER} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+              <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {chrono.series.map((nom, i) => (
+                style === 'ligne'
+                  ? <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+                  : <Bar key={nom} dataKey={nom} stackId="c" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]} isAnimationActive={false} />
+              ))}
+              {tendance && (
+                <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {avecGraphiques && chrono.donnees.length > 0 && (
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          Nombre de crises par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}, réparties par intensité.
+          {tendance && ' La ligne pointillée est la tendance générale sur la période.'}
+        </p>
+      )}
+
+      <Ligne titre="Antécédents les plus fréquents" valeurs={topAntecedents} />
+      <Ligne titre="Comportements les plus fréquents" valeurs={topComportements} />
+      <Ligne titre="Conséquences les plus fréquentes" valeurs={topConsequences} />
+
+      <p className="text-xs mt-3" style={{ color: INK_SOFT }}>
+        Ces fréquences décrivent ce qui a été observé et coché pendant la période. Elles orientent
+        une hypothèse sans l'établir : l'analyse fonctionnelle reste du ressort du professionnel.
+      </p>
     </div>
   );
 }
@@ -2527,6 +3136,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         objectifs: { ...(cumul.alias.objectifs || {}), ...((paquet.alias || {}).objectifs || {}) },
       },
       commentaires: { ...(cumul.commentaires || {}), ...(paquet.commentaires || {}) },
+      codesEfl: { ...(cumul.codesEfl || {}), ...(paquet.codesEfl || {}) },
     };
     onImported(cumul);
     setFichier(null); setEnveloppe(null); setPassphrase('');
@@ -2537,7 +3147,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     setErreur(''); setEnveloppe(null); setFichier(f);
     if (!f) return;
     if (/\.(xlsx|xls|csv)$/i.test(f.name)) {
-      setErreur("Ce fichier est un rapport tableur : il se consulte plus bas, dans « Lire un rapport Excel ». Pour alimenter l'analyse, utilisez dans DatABA : Export → « Fichier pour DatABA Manager ».");
+      setErreur("Ce fichier est un rapport tableur : il se consulte dans l'onglet Explorer, tout en bas. Pour alimenter l'analyse, utilisez dans DatABA : Export → « Fichier pour DatABA Manager ».");
       setFichier(null);
       return;
     }
@@ -2585,6 +3195,9 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
     const commentaires = {};
     Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
+    /* Les codes EFL ne dépendent d'aucune personne : ils partent en entier,
+       même sur un export restreint à quelques personnes. */
+    const codesEfl = { ...(donnees.codesEfl || {}) };
 
     return {
       format: 'aba-manager-export',
@@ -2595,7 +3208,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       _idVersInitiales: donnees._idVersInitiales,
       _ateliers: donnees._ateliers,
       _intervenants: donnees._intervenants,
-      alias, commentaires,
+      alias, commentaires, codesEfl,
     };
   }
 
@@ -2831,8 +3444,6 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         </div>
       </Card>
 
-      <div className="mb-4"><LecteurExcel /></div>
-
       <Card>
         <div className="flex items-center gap-1.5 mb-2">
           <Lock size={16} style={{ color: INK_SOFT }} />
@@ -2961,7 +3572,10 @@ function ManagerApp() {
   const [association, setAssociation] = useState('');
   const [periode, setPeriode] = useState(periodeVide());
   const [focus, setFocus] = useState(null);
-  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide() });
+  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), avecCrises: false });
+  /* Personne sur laquelle préselectionner le filtre en arrivant dans Crises,
+     consommée aussitôt : l'utilisateur doit pouvoir l'enlever ensuite. */
+  const [focusCrises, setFocusCrises] = useState(null);
 
   /* Le calcul ne dépend que des données analytiques. Sans cette séparation,
      taper une lettre dans un commentaire de rapport relançait l'analyse de
@@ -3066,6 +3680,11 @@ function ManagerApp() {
   function majCommentaire(cle, valeur) {
     setDonnees((d) => ({ ...d, commentaires: { ...(d.commentaires || {}), [cle]: valeur } }));
   }
+  /* Le code est saisi une fois et vaut pour toutes les personnes qui
+     travaillent cet objectif : la clé est le nom de l'objectif, pas le couple. */
+  function majCodeEfl(objectif, valeur) {
+    setDonnees((d) => ({ ...d, codesEfl: { ...(d.codesEfl || {}), [objectif]: valeur } }));
+  }
 
   /* Toute purge passe par ici : un seul point d'écriture, un seul message. */
   function purger(transformer) {
@@ -3087,15 +3706,42 @@ function ManagerApp() {
     setFocus({ initiales, objectif });
     setTab('personnes');
   }
+
+  /* Retrait d'une séance consolidée. On ne touche qu'à cette application :
+     la séance reste intacte sur la tablette, et un nouvel import la
+     ramènerait — c'est dit dans la confirmation pour éviter la surprise. */
+  function supprimerSeance(seance) {
+    const table = (donnees._idVersInitiales || {})[seance.source] || {};
+    const qui = (seance.studentIds || []).map((sid) => table[sid]).filter(Boolean).join(', ');
+    const ok = window.confirm(
+      `Retirer cette séance de l'analyse ?\n\n`
+      + `${new Date(seance.date).toLocaleDateString('fr-FR')} · ${seance.source}`
+      + `${qui ? `\nPersonnes : ${qui}` : ''}\n\n`
+      + `Elle disparaîtra des graphiques et des rapports de ce poste. La séance reste `
+      + `sur la tablette : si vous réimportez une sauvegarde qui la contient, elle reviendra.`
+    );
+    if (!ok) return;
+    setDonnees((d) => ({ ...d, seances: d.seances.filter((s) => s.id !== seance.id) }));
+    notify('Séance retirée de l’analyse');
+  }
   function lancerRapport(personne, objectifs) {
-    setSelectionRapport({ personne, objectifs, periode });
+    setSelectionRapport({ personne, objectifs, periode, avecCrises: false });
     setTab('rapport');
+  }
+  /* Rapport centré sur les crises : aucun objectif retenu, le bilan seul. */
+  function lancerRapportCrises(personne) {
+    setSelectionRapport({ personne, objectifs: [], periode, avecCrises: true });
+    setTab('rapport');
+  }
+  function ouvrirCrises(initiales) {
+    setFocusCrises(initiales || null);
+    setTab('crises');
   }
 
   const onglets = [
     { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
     { k: 'seances', l: 'Séances', icone: CalendarDays },
-    { k: 'personnes', l: 'Personnes', icone: Users },
+    { k: 'personnes', l: 'Personnes accompagnées', icone: Users },
     { k: 'crises', l: 'Crises', icone: AlertTriangle },
     { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
     { k: 'rapport', l: 'Rapport', icone: FileText },
@@ -3169,26 +3815,28 @@ function ManagerApp() {
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
-                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => setTab('crises')} />
+                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
           {tab === 'seances' && (
             <>
-              <SectionTitle sub="Volume de cotation et accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
-              <SeancesScreen donnees={donnees} />
+              <SectionTitle sub="Consulter ce qui a été importé, et vérifier l'accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
+              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} />
             </>
           )}
           {tab === 'personnes' && (
             <>
-              <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes</SectionTitle>
+              <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes accompagnées</SectionTitle>
               <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
-                periode={periode} setPeriode={setPeriode} onRapport={lancerRapport} />
+                periode={periode} setPeriode={setPeriode} onRapport={lancerRapport}
+                onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises} />
             </>
           )}
           {tab === 'crises' && (
             <>
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
-              <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+              <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
+                focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)} />
             </>
           )}
           {tab === 'explorer' && (
@@ -3214,7 +3862,7 @@ function ManagerApp() {
               selection={selectionRapport} setSelection={setSelectionRapport}
               logo={logo} association={association}
               onLogo={enregistrerLogo} onAssociation={enregistrerAssociation}
-              onAlias={majAlias} onCommentaire={majCommentaire} />
+              onAlias={majAlias} onCommentaire={majCommentaire} onCodeEfl={majCodeEfl} />
           </>
         )}
       </div>
