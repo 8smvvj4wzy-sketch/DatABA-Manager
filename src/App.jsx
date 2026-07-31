@@ -138,6 +138,11 @@ const VIDE = {
      personne-objectif : une même compétence garde son code quelle que soit la
      personne qui la travaille. La clé est donc le nom de l'objectif. */
   codesEfl: {},
+  /* Rapports enregistrés : uniquement leur composition — personne, période,
+     objectifs retenus, réglages du bilan de crise. Les commentaires et les
+     libellés vivent déjà à part et suivent d'eux-mêmes, si bien qu'un rapport
+     rouvert reflète les cotations les plus récentes plutôt qu'un figé. */
+  rapports: [],
 };
 
 function normaliser(d) {
@@ -147,6 +152,7 @@ function normaliser(d) {
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
+    rapports: d.rapports || [],
   };
 }
 async function chargerDonnees() {
@@ -1837,115 +1843,267 @@ function chronologieCrises(donnees, crises, granularite, segmentation, mesure = 
   return { donnees: donneesGraphe, series, regroupe };
 }
 
-function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusConsomme }) {
-  const [unite, setUnite] = useState('nombre');
-  const [type, setType] = useState('crise');
-  const [personnes, setPersonnes] = useState([]);      // vide = toutes
-  const [segmentation, setSegmentation] = useState('intensite');
-  const [forme, setForme] = useState('barres');
-  const [mesure, setMesure] = useState('nombre');      // effectif ou minutes cumulées
-  const refChrono = useRef(null);
-  const refZone = useRef(null);
+/* Blocs composant un bilan de crise. Ils sont listés ici une seule fois : le
+   même rendu sert à l'écran, à l'export PDF depuis l'onglet Crises, et au
+   bilan inclus dans le rapport d'une personne. Sans cette mise en commun, la
+   version imprimée et la version affichée divergeraient à la première
+   modification. */
+const BLOCS_CRISE = [
+  { k: 'chronologie', label: 'Évolution dans le temps' },
+  { k: 'synthese', label: 'Enregistrements et durées' },
+  { k: 'intensite', label: 'Occurrences par intensité' },
+  { k: 'jour', label: 'Jour de la semaine' },
+  { k: 'atelier', label: 'Atelier' },
+  { k: 'antecedent', label: 'Antécédents' },
+  { k: 'comportement', label: 'Comportements' },
+  { k: 'consequence', label: 'Conséquences' },
+  { k: 'fonction', label: 'Fonctions supposées' },
+  { k: 'avertissement', label: 'Rappel sur l’interprétation' },
+];
+const TOUS_LES_BLOCS = BLOCS_CRISE.map((b) => b.k);
 
-  /* Arrivée depuis la fiche d'une personne : on préselectionne son filtre,
-     puis on rend la main pour que l'utilisateur puisse l'enlever librement.
-     La dépendance se limite à focusPersonne : onFocusConsomme est recréée à
-     chaque rendu du parent, la lister relancerait l'effet en boucle. */
-  useEffect(() => {
-    if (!focusPersonne) return;
-    setPersonnes([focusPersonne]);
-    setType('crise');
-    onFocusConsomme();
-  }, [focusPersonne]);
+const configCriseVide = () => ({
+  personnes: [],
+  type: 'crise',
+  segmentation: 'intensite',
+  forme: 'barres',
+  mesure: 'nombre',
+  unite: 'nombre',
+  blocs: TOUS_LES_BLOCS,
+});
 
-  const iniDe = (c) => ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+/* Barres horizontales : les intitulés sont longs, un axe vertical les
+   tronquerait. */
+function BarresCrise({ titre, donnees: d, couleur, note, valeur, suffixe }) {
+  if (!d.length || d.every((x) => !x.n)) return null;
+  const max = Math.max(...d.map((x) => x.n)) || 1;
+  return (
+    <Card className="mb-3">
+      <div className="text-xs uppercase tracking-wide mb-1" style={{ color: INK_SOFT }}>{titre}</div>
+      {note && <p className="text-xs mb-2" style={{ color: INK_SOFT }}>{note}</p>}
+      <div className="space-y-2 mt-2">
+        {d.map((x, i) => (
+          <div key={i}>
+            <div className="flex items-center justify-between text-xs mb-0.5">
+              <span className="min-w-0 break-words pr-2">{x.label}</span>
+              <span className="shrink-0" style={{ fontFamily: F_MONO, color: INK_SOFT }}>
+                {valeur(x.n)}{suffixe}
+              </span>
+            </div>
+            <div className="h-2 rounded-full" style={{ backgroundColor: PAPER }}>
+              <div style={{ width: `${(x.n / max) * 100}%`, height: '100%', borderRadius: 999, backgroundColor: x.couleur || couleur }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
 
-  const toutes = (donnees.crises || [])
-    .filter((c) => (type === 'tout' || (c.kind || 'crise') === type))
-    .filter((c) => !personnes.length || personnes.includes(iniDe(c)));
-  const retenues = toutes.filter((c) => dansPeriode(c.date, periode));
-
+/* Corps du bilan : tout ce qui va de la chronologie aux conséquences, dans
+   l'ordre de l'onglet. « config.blocs » décide de ce qui apparaît. */
+function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
+  const actif = (k) => (config.blocs || TOUS_LES_BLOCS).includes(k);
   const gran = periode.granularite || 'semaine';
-  const chrono = chronologieCrises(donnees, retenues, gran, segmentation, mesure);
+  const chrono = chronologieCrises(donnees, crises, gran, config.segmentation, config.mesure);
 
-  /* Durées : renseignées pour les crises chronométrées, à zéro pour les
-     observations ABC. La moyenne ne porte que sur les enregistrements
-     réellement chronométrés, sinon les observations la tirent vers le bas. */
   const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
-  const chronometrees = retenues.filter((c) => (c.durationMs || 0) > 0);
-  const dureeTotale = retenues.reduce((a, c) => a + minutesDe(c), 0);
+  const chronometrees = crises.filter((c) => (c.durationMs || 0) > 0);
+  const dureeTotale = crises.reduce((a, c) => a + minutesDe(c), 0);
   const dureeMoyenne = chronometrees.length
     ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : 0;
   const dureeMax = chronometrees.length ? Math.max(...chronometrees.map(minutesDe)) : 0;
-
-  /* Rappel des réglages, imprimé sous le titre. Une chronologie sortie de son
-     contexte ne dit ni sur qui elle porte, ni ce qu'elle compte. */
-  const resumeReglages = [
-    personnes.length ? personnes.map((i) => nomAffiche(donnees, i)).join(', ') : 'Toutes les personnes',
-    type === 'crise' ? 'Crises' : type === 'abc' ? 'Observations ABC' : 'Crises et observations',
-    `par ${gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}`,
-    `découpé par ${(SEGMENTATIONS.find((sg) => sg.k === segmentation) || {}).label.toLowerCase()}`,
-    mesure === 'duree' ? 'durée cumulée en minutes' : 'nombre d’enregistrements',
-    forme === 'courbes' ? 'en courbes' : 'en barres',
-  ].join(' · ');
 
   const compter = (valeurs) => {
     const m = new Map();
     valeurs.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
     return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
   };
-  const total = retenues.length || 1;
-  const valeur = (n) => (unite === 'pct' ? Math.round((n / total) * 100) : n);
-  const suffixe = unite === 'pct' ? ' %' : '';
+  const total = crises.length || 1;
+  const valeur = (n) => (config.unite === 'pct' ? Math.round((n / total) * 100) : n);
+  const suffixe = config.unite === 'pct' ? ' %' : '';
 
-  /* Occurrences par intensité : effectif brut, l'intensité étant une échelle */
   const parIntensite = [1, 2, 3].map((n) => ({
     label: `${n} · ${INTENSITES[n].label}`,
-    n: retenues.filter((c) => c.intensite === n).length,
+    n: crises.filter((c) => c.intensite === n).length,
     couleur: INTENSITES[n].color,
   }));
-  const notees = retenues.filter((c) => c.intensite).length;
-
-  /* Jour de la semaine : dans l'ordre du calendrier, pas par fréquence */
+  const notees = crises.filter((c) => c.intensite).length;
   const parJour = JOURS_SEMAINE.map((j) => ({
     label: j,
-    n: retenues.filter((c) => new Date(c.date).toLocaleDateString('fr-FR', { weekday: 'long' }) === j).length,
+    n: crises.filter((c) => new Date(c.date).toLocaleDateString('fr-FR', { weekday: 'long' }) === j).length,
   }));
+  const enListe = (paires) => paires.map(([label, n]) => ({ label, n }));
+  const parAtelier = compter(crises.map((c) => nomAtelier(donnees, c.source, c.atelierId)));
+  const parAntecedent = compter(crises.flatMap((c) => c.antecedentTags || []));
+  const parComportement = compter(crises.flatMap((c) => c.comportementTags || []));
+  const parConsequence = compter(crises.flatMap((c) => c.consequenceTags || []));
+  const parFonction = compter(crises.map((c) => (c.fonction ? (FONCTIONS[c.fonction] || c.fonction) : null)).filter(Boolean));
 
-  const parAtelier = compter(retenues.map((c) => nomAtelier(donnees, c.source, c.atelierId)));
-  const parAntecedent = compter(retenues.flatMap((c) => c.antecedentTags || []));
-  const parComportement = compter(retenues.flatMap((c) => c.comportementTags || []));
-  const parConsequence = compter(retenues.flatMap((c) => c.consequenceTags || []));
-
-  /* Barres horizontales : les intitulés sont longs, un axe vertical les
-     tronquerait. */
-  const Barres = ({ titre, donnees: d, couleur, note }) => {
-    if (!d.length || d.every((x) => !x.n)) return null;
-    const max = Math.max(...d.map((x) => x.n)) || 1;
-    return (
-      <Card className="mb-3">
-        <div className="text-xs uppercase tracking-wide mb-1" style={{ color: INK_SOFT }}>{titre}</div>
-        {note && <p className="text-xs mb-2" style={{ color: INK_SOFT }}>{note}</p>}
-        <div className="space-y-2 mt-2">
-          {d.map((x, i) => (
-            <div key={i}>
-              <div className="flex items-center justify-between text-xs mb-0.5">
-                <span className="min-w-0 break-words pr-2">{x.label}</span>
-                <span className="shrink-0" style={{ fontFamily: F_MONO, color: INK_SOFT }}>
-                  {valeur(x.n)}{suffixe}
-                </span>
+  return (
+    <>
+      {actif('chronologie') && (
+        <Card className="mb-3">
+          <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Évolution dans le temps</div>
+          {chrono.donnees.length === 0 ? (
+            <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
+          ) : (
+            <>
+              <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
+                <ResponsiveContainer width="100%" height="100%">
+                  {config.forme === 'courbes' ? (
+                    <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                      <CartesianGrid stroke={BORDER} vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      {chrono.series.map((nom, i) => (
+                        <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+                          strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+                      ))}
+                    </LineChart>
+                  ) : (
+                    <BarChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                      <CartesianGrid stroke={BORDER} vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      {chrono.series.map((nom, i) => (
+                        <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+                          radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
+                      ))}
+                    </BarChart>
+                  )}
+                </ResponsiveContainer>
               </div>
-              <div className="h-2 rounded-full" style={{ backgroundColor: PAPER }}>
-                <div style={{ width: `${(x.n / max) * 100}%`, height: '100%', borderRadius: 999, backgroundColor: x.couleur || couleur }} />
+              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                {config.mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}.
+                {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
+                {(SEGMENTATIONS.find((sg) => sg.k === config.segmentation) || {}).multi &&
+                  " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
+                {config.mesure === 'duree' && " Une observation ABC n'a pas de durée : elle pèse zéro dans cette vue."}
+              </p>
+            </>
+          )}
+        </Card>
+      )}
+
+      {actif('synthese') && (
+        <Card className="mb-3">
+          <div className="flex flex-wrap items-baseline gap-4">
+            <span>
+              <span className="text-2xl font-semibold" style={{ fontFamily: F_MONO }}>{crises.length}</span>
+              <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>
+                enregistrement{crises.length !== 1 ? 's' : ''} sur {libellePeriode(periode)}
+              </span>
+            </span>
+            {notees > 0 && (
+              <span className="text-xs" style={{ color: INK_SOFT }}>
+                dont <span style={{ fontFamily: F_MONO }}>{notees}</span> avec une intensité renseignée
+              </span>
+            )}
+          </div>
+          {chronometrees.length > 0 && (
+            <div className="flex flex-wrap gap-5 mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+              <div>
+                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{dureeTotale} min</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
+              </div>
+              <div>
+                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>
+                  en moyenne ({chronometrees.length}/{crises.length} chronométrée{chronometrees.length !== 1 ? 's' : ''})
+                </div>
+              </div>
+              <div>
+                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMax} min</div>
+                <div className="text-xs" style={{ color: INK_SOFT }}>la plus longue</div>
               </div>
             </div>
-          ))}
-        </div>
-      </Card>
-    );
-  };
+          )}
+          {chronometrees.length === 0 && crises.length > 0 && (
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Aucune durée relevée sur cette période — les observations ABC n'en portent pas,
+              et une crise n'en a que si le chronomètre a été lancé dans DatABA.
+            </p>
+          )}
+        </Card>
+      )}
 
-  const enListe = (paires) => paires.map(([label, n]) => ({ label, n }));
+      {actif('intensite') && (
+        <BarresCrise titre="Occurrences par intensité" donnees={parIntensite} valeur={valeur} suffixe={suffixe}
+          note={notees < crises.length ? `${crises.length - notees} enregistrement(s) sans intensité renseignée, non comptés ici.` : null} />
+      )}
+      {actif('jour') && <BarresCrise titre="Répartition par jour de la semaine" donnees={parJour} couleur={INK} valeur={valeur} suffixe={suffixe} />}
+      {actif('atelier') && <BarresCrise titre="Répartition par atelier" donnees={enListe(parAtelier)} couleur={INK} valeur={valeur} suffixe={suffixe} />}
+      {actif('antecedent') && <BarresCrise titre="Antécédents" donnees={enListe(parAntecedent)} couleur={CRISE} valeur={valeur} suffixe={suffixe} />}
+      {actif('comportement') && <BarresCrise titre="Comportements" donnees={enListe(parComportement)} couleur={CRISE} valeur={valeur} suffixe={suffixe} />}
+      {actif('consequence') && <BarresCrise titre="Conséquences" donnees={enListe(parConsequence)} couleur={CRISE} valeur={valeur} suffixe={suffixe} />}
+      {actif('fonction') && <BarresCrise titre="Fonctions supposées" donnees={enListe(parFonction)} couleur={INK} valeur={valeur} suffixe={suffixe} />}
+
+      {actif('avertissement') && (
+        <p className="text-xs" style={{ color: INK_SOFT }}>
+          Ces répartitions décrivent ce qui a été observé et coché. Elles orientent une hypothèse,
+          elles ne l'établissent pas : une analyse fonctionnelle reste du ressort du professionnel.
+        </p>
+      )}
+    </>
+  );
+}
+
+/* Filtre commun à l'écran et au rapport : sans lui, le bilan inclus dans un
+   document ne porterait pas exactement sur les mêmes enregistrements que
+   celui qui a servi à le composer. */
+function crisesRetenues(donnees, config, periode) {
+  const iniDe = (c) => ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+  return (donnees.crises || [])
+    .filter((c) => (config.type === 'tout' || (c.kind || 'crise') === config.type))
+    .filter((c) => !(config.personnes || []).length || config.personnes.includes(iniDe(c)))
+    .filter((c) => dansPeriode(c.date, periode));
+}
+
+function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusConsomme,
+  composition, onValiderBilan, onAnnulerBilan }) {
+  const [config, setConfig] = useState(configCriseVide());
+  const [reglagesOuverts, setReglagesOuverts] = useState(false);
+  const refChrono = useRef(null);
+  const refZone = useRef(null);
+
+  const maj = (champs) => setConfig((c) => ({ ...c, ...champs }));
+
+  /* Arrivée depuis la fiche d'une personne, ou depuis un rapport à composer :
+     on préselectionne le filtre, puis on rend la main pour que l'utilisateur
+     puisse le modifier librement.
+     La dépendance se limite à focusPersonne : onFocusConsomme est recréée à
+     chaque rendu du parent, la lister relancerait l'effet en boucle. */
+  useEffect(() => {
+    if (!focusPersonne) return;
+    setConfig((c) => ({ ...c, personnes: [focusPersonne], type: 'crise' }));
+    onFocusConsomme();
+  }, [focusPersonne]);
+
+  /* Reprise d'un bilan déjà composé : on repart de ses réglages exacts plutôt
+     que des réglages par défaut, sinon revenir le modifier le reconstruirait
+     de zéro. */
+  useEffect(() => {
+    if (composition && composition.config) setConfig(composition.config);
+  }, [composition && composition.jeton]);
+
+  const retenues = crisesRetenues(donnees, config, periode);
+  const basculerBloc = (k) => setConfig((c) => ({
+    ...c,
+    blocs: (c.blocs || []).includes(k) ? c.blocs.filter((x) => x !== k) : [...(c.blocs || []), k],
+  }));
+
+  const resumeReglages = [
+    (config.personnes || []).length ? config.personnes.map((i) => nomAffiche(donnees, i)).join(', ') : 'Toutes les personnes',
+    config.type === 'crise' ? 'Crises' : config.type === 'abc' ? 'Observations ABC' : 'Crises et observations',
+    `par ${(periode.granularite || 'semaine') === 'jour' ? 'jour' : (periode.granularite || 'semaine') === 'mois' ? 'mois' : 'semaine'}`,
+    `découpé par ${(SEGMENTATIONS.find((sg) => sg.k === config.segmentation) || {}).label.toLowerCase()}`,
+    config.mesure === 'duree' ? 'durée cumulée en minutes' : 'nombre d’enregistrements',
+  ].join(' · ');
 
   if (!(donnees.crises || []).length) {
     return <Empty>Aucune crise ni observation importée.</Empty>;
@@ -1953,7 +2111,27 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
 
   return (
     <div>
-      <div className="flex flex-wrap items-center gap-2 mb-3">
+      {composition && (
+        /* Bandeau de composition : on est venu du rapport, il faut pouvoir y
+           retourner sans se demander comment. */
+        <Card className="mb-3 no-print" style={{ borderColor: INK, borderWidth: 2 }}>
+          <div className="text-sm font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>
+            Bilan de crise pour {nomAffiche(donnees, composition.personne)}
+          </div>
+          <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+            Réglez ci-dessous ce que doit contenir le bilan, puis validez : il sera repris
+            dans le rapport, à la suite des objectifs.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={() => onValiderBilan(config)} className="text-sm">
+              <Check size={15} /> Valider et revenir au rapport
+            </Btn>
+            <Btn variant="ghost" onClick={onAnnulerBilan} className="text-sm">Annuler</Btn>
+          </div>
+        </Card>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 mb-3 no-print">
         <div className="flex gap-1.5">
           {[
             { k: 'crise', l: 'Crises' },
@@ -1961,164 +2139,95 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
             { k: 'tout', l: 'Les deux' },
           ].map((o) => (
             <Chip key={o.k} label={`${o.l} (${(donnees.crises || []).filter((c) => o.k === 'tout' || (c.kind || 'crise') === o.k).length})`}
-              on={type === o.k} onClick={() => setType(o.k)} />
+              on={config.type === o.k} onClick={() => maj({ type: o.k })} />
           ))}
         </div>
-        <div className="ml-auto"><BasculeUnite unite={unite} setUnite={setUnite} /></div>
+        <div className="ml-auto"><BasculeUnite unite={config.unite} setUnite={(u) => maj({ unite: u })} /></div>
       </div>
 
       {donnees.personnes.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-3">
-          <Chip label="Toutes les personnes" on={!personnes.length} onClick={() => setPersonnes([])} />
+        <div className="flex flex-wrap gap-1.5 mb-3 no-print">
+          <Chip label="Toutes les personnes" on={!(config.personnes || []).length} onClick={() => maj({ personnes: [] })} />
           {donnees.personnes.map((p) => (
             <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
-              on={personnes.includes(p.initials)}
-              onClick={() => setPersonnes((cur) => (cur.includes(p.initials) ? cur.filter((x) => x !== p.initials) : [...cur, p.initials]))} />
+              on={(config.personnes || []).includes(p.initials)}
+              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials)
+                ? config.personnes.filter((x) => x !== p.initials)
+                : [...(config.personnes || []), p.initials] })} />
           ))}
         </div>
       )}
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite />
+      <div className="no-print"><SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite /></div>
 
-      {/* Chronologie : le nombre de crises au fil du temps, découpé en séries */}
-      <Card className="mb-3">
-        <div className="flex flex-wrap items-center gap-2 mb-2 no-print">
-          <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Évolution dans le temps</span>
-          <div className="ml-auto flex gap-1.5">
+      <Card className="mb-3 no-print">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Réglages du bilan</span>
+          <div className="ml-auto flex flex-wrap gap-1.5">
             <Btn variant="outline" className="text-xs py-1.5"
               onClick={() => exporterGraphePng(refChrono.current, `crises-${nomSain(libellePeriode(periode))}.png`)}>
-              <Download size={13} /> PNG
+              <Download size={13} /> PNG du graphique
             </Btn>
             <Btn variant="outline" className="text-xs py-1.5" onClick={() => imprimerZone(refZone.current)}>
-              <Printer size={13} /> PDF
+              <Printer size={13} /> PDF du bilan
             </Btn>
-            <Chip label="Barres" on={forme === 'barres'} onClick={() => setForme('barres')} />
-            <Chip label="Courbes" on={forme === 'courbes'} onClick={() => setForme('courbes')} />
+            <Btn variant="ghost" className="text-xs py-1.5" onClick={() => setReglagesOuverts((v) => !v)}>
+              {reglagesOuverts ? 'Replier' : 'Modifier'}
+            </Btn>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
-          <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesurer</span>
-          <Chip label="Nombre" on={mesure === 'nombre'} onClick={() => setMesure('nombre')} />
-          <Chip label="Durée cumulée (min)" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5 mb-3 no-print">
-          <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
-          {SEGMENTATIONS.map((sg) => (
-            <Chip key={sg.k} label={sg.label} on={segmentation === sg.k} onClick={() => setSegmentation(sg.k)} />
-          ))}
-        </div>
-
-        {/* Zone exportée en PDF : le graphique tel qu'il est réglé, précédé du
-            rappel des réglages. Sans ce rappel, une chronologie sortie de son
-            contexte ne dit ni sur qui ni sur quoi elle porte. */}
-        <div ref={refZone}>
-          <div className="print-only" style={{ marginBottom: '0.75rem' }}>
-            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
-              Crises — {libellePeriode(periode)}
+        {reglagesOuverts && (
+          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Graphique</span>
+              <Chip label="Barres" on={config.forme === 'barres'} onClick={() => maj({ forme: 'barres' })} />
+              <Chip label="Courbes" on={config.forme === 'courbes'} onClick={() => maj({ forme: 'courbes' })} />
             </div>
-            <div className="text-xs" style={{ color: INK_SOFT }}>{resumeReglages}</div>
-          </div>
-
-          {chrono.donnees.length === 0 ? (
-            <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
-          ) : (
-            <>
-              <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
-              <ResponsiveContainer width="100%" height="100%">
-                {forme === 'courbes' ? (
-                  <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    {chrono.series.map((nom, i) => (
-                      <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
-                        strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
-                    ))}
-                  </LineChart>
-                ) : (
-                  <BarChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    {chrono.series.map((nom, i) => (
-                      <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
-                        radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
-                    ))}
-                  </BarChart>
-                )}
-              </ResponsiveContainer>
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesurer</span>
+              <Chip label="Nombre" on={config.mesure === 'nombre'} onClick={() => maj({ mesure: 'nombre' })} />
+              <Chip label="Durée cumulée (min)" on={config.mesure === 'duree'} onClick={() => maj({ mesure: 'duree' })} />
             </div>
-            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-              {mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}.
-              {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
-              {SEGMENTATIONS.find((sg) => sg.k === segmentation).multi &&
-                " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
-              {mesure === 'duree' && " Une observation ABC n'a pas de durée : elle pèse zéro dans cette vue."}
-            </p>
-          </>
-          )}
-        </div>
-      </Card>
-
-      <Card className="mb-3">
-        <div className="flex flex-wrap items-baseline gap-4">
-          <span>
-            <span className="text-2xl font-semibold" style={{ fontFamily: F_MONO }}>{retenues.length}</span>
-            <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>
-              enregistrement{retenues.length !== 1 ? 's' : ''} sur {libellePeriode(periode)}
-            </span>
-          </span>
-          {notees > 0 && (
-            <span className="text-xs" style={{ color: INK_SOFT }}>
-              dont <span style={{ fontFamily: F_MONO }}>{notees}</span> avec une intensité renseignée
-            </span>
-          )}
-        </div>
-
-        {chronometrees.length > 0 && (
-          <div className="flex flex-wrap gap-5 mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
-            <div>
-              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{dureeTotale} min</div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
+              {SEGMENTATIONS.map((sg) => (
+                <Chip key={sg.k} label={sg.label} on={config.segmentation === sg.k} onClick={() => maj({ segmentation: sg.k })} />
+              ))}
             </div>
-            <div>
-              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>
-                en moyenne ({chronometrees.length}/{retenues.length} chronométrée{chronometrees.length !== 1 ? 's' : ''})
-              </div>
+
+            <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
+              Contenu du bilan — décochez ce qui n'a pas à figurer dans le document
             </div>
-            <div>
-              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMax} min</div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>la plus longue</div>
+            <div className="flex flex-wrap gap-1.5">
+              {BLOCS_CRISE.map((b) => (
+                <Chip key={b.k} label={b.label} on={(config.blocs || []).includes(b.k)} onClick={() => basculerBloc(b.k)} />
+              ))}
+            </div>
+            <div className="flex gap-2 mt-2">
+              <Btn variant="ghost" className="text-xs py-1" onClick={() => maj({ blocs: TOUS_LES_BLOCS })}>Tout inclure</Btn>
+              <Btn variant="ghost" className="text-xs py-1" onClick={() => maj({ blocs: ['chronologie', 'synthese'] })}>Le minimum</Btn>
             </div>
           </div>
         )}
-        {chronometrees.length === 0 && retenues.length > 0 && (
-          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-            Aucune durée relevée sur cette période — les observations ABC n'en portent pas,
-            et une crise n'en a que si le chronomètre a été lancé dans DatABA.
-          </p>
-        )}
       </Card>
 
-      <Barres titre="Occurrences par intensité" donnees={parIntensite}
-        note={notees < retenues.length ? `${retenues.length - notees} enregistrement(s) sans intensité renseignée, non comptés ici.` : null} />
-      <Barres titre="Répartition par jour de la semaine" donnees={parJour} couleur={INK} />
-      <Barres titre="Répartition par atelier" donnees={enListe(parAtelier)} couleur={INK} />
-      <Barres titre="Antécédents" donnees={enListe(parAntecedent)} couleur={CRISE} />
-      <Barres titre="Comportements" donnees={enListe(parComportement)} couleur={CRISE} />
-      <Barres titre="Conséquences" donnees={enListe(parConsequence)} couleur={CRISE} />
+      {/* Zone exportée en PDF : le bilan tel qu'il est réglé, précédé de son
+          titre et du rappel des réglages. */}
+      <div ref={refZone}>
+        <div className="print-only" style={{ marginBottom: '0.75rem' }}>
+          <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
+            Bilan des crises — {libellePeriode(periode)}
+          </div>
+          <div className="text-xs" style={{ color: INK_SOFT }}>{resumeReglages}</div>
+        </div>
 
-      <p className="text-xs" style={{ color: INK_SOFT }}>
-        Ces répartitions décrivent ce qui a été observé et coché. Elles orientent une hypothèse,
-        elles ne l'établissent pas : une analyse fonctionnelle reste du ressort du professionnel.
-      </p>
+        {retenues.length === 0 ? (
+          <Empty>Aucun enregistrement sur cette période avec ces filtres.</Empty>
+        ) : (
+          <BlocsCrise donnees={donnees} crises={retenues} periode={periode} config={config} refChrono={refChrono} />
+        )}
+      </div>
     </div>
   );
 }
@@ -2863,15 +2972,15 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
 }
 
 /* ==================== Rapport ==================== */
-function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire, onCodeEfl }) {
+function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire, onCodeEfl, onComposerBilan, onEnregistrer, onOuvrirRapport, onSupprimerRapport }) {
   const [avecGraphiques, setAvecGraphiques] = useState(true);
   const [style, setStyle] = useState('ligne');
+  const [nomRapport, setNomRapport] = useState('');
 
   if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour composer un rapport.</Empty>;
 
   const personne = selection.personne || donnees.personnes[0].initials;
   const periode = selection.periode || periodeVide();
-  const avecCrises = !!selection.avecCrises;
 
   const disponibles = lignes.filter((l) => l.initials === personne);
   const retenus = disponibles
@@ -2895,6 +3004,54 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 
   return (
     <div>
+      <Card className="mb-4 no-print">
+        <div className="text-sm font-semibold mb-3" style={{ fontFamily: F_DISPLAY }}>Rapports enregistrés</div>
+
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <input value={nomRapport} onChange={(e) => setNomRapport(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && nomRapport.trim()) onEnregistrer(nomRapport); }}
+            placeholder="Nom du rapport — ex. Bilan trimestriel L.M."
+            className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
+            style={{ borderColor: BORDER, color: INK }} />
+          <Btn onClick={() => onEnregistrer(nomRapport)} disabled={!nomRapport.trim()} className="text-sm">
+            Enregistrer
+          </Btn>
+        </div>
+
+        {(donnees.rapports || []).length === 0 ? (
+          <p className="text-xs" style={{ color: INK_SOFT }}>
+            Aucun rapport enregistré. Enregistrer conserve la composition — personne, période,
+            objectifs retenus et bilan des crises — pour y revenir plus tard.
+          </p>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              {(donnees.rapports || []).map((r) => (
+                <div key={r.id} className="rounded-xl px-3 py-2.5 flex items-center gap-2" style={{ backgroundColor: PAPER }}>
+                  <button onClick={() => { onOuvrirRapport(r); setNomRapport(r.nom); }} className="min-w-0 flex-1 text-left">
+                    <div className="text-sm font-medium break-words">{r.nom}</div>
+                    <div className="text-xs" style={{ color: INK_SOFT }}>
+                      {nomAffiche(donnees, r.personne)} · {libellePeriode(r.periode)}
+                      {' · '}{(r.objectifs || []).length} objectif{(r.objectifs || []).length !== 1 ? 's' : ''}
+                      {r.bilanCrises && ' · avec bilan des crises'}
+                      {' · modifié le '}{new Date(r.majLe).toLocaleDateString('fr-FR')}
+                    </div>
+                  </button>
+                  <button onClick={() => onSupprimerRapport(r)} className="shrink-0 p-1.5" title="Supprimer ce rapport">
+                    <Trash2 size={14} style={{ color: NON_ACQUIS }} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Seule la composition est conservée : un rapport rouvert se recalcule sur les cotations
+              du moment, il ne fige pas les chiffres du jour où il a été enregistré. Réenregistrer
+              sous le même nom remplace l'existant.
+            </p>
+          </>
+        )}
+      </Card>
+
       <Card className="mb-4 no-print">
         <div className="text-sm font-semibold mb-3" style={{ fontFamily: F_DISPLAY }}>Composer le rapport</div>
 
@@ -2981,15 +3138,28 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           </div>
         )}
 
-        <button onClick={() => setSelection({ ...selection, avecCrises: !avecCrises })}
-          className="flex items-center gap-1.5 text-xs mb-3" style={{ color: INK_SOFT }}>
-          <span className="w-9 h-5 rounded-full relative shrink-0" style={{ backgroundColor: avecCrises ? INK : BORDER }}>
-            <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white" style={{ left: avecCrises ? '1.25rem' : '0.125rem', transition: 'left .15s' }} />
-          </span>
-          Inclure un bilan des crises
-        </button>
+        {/* Le bilan de crise se compose dans l'onglet Crises, là où se trouvent
+            déjà tous les réglages. Y renvoyer évite de les redemander ici sous
+            une seconde forme, qui finirait par diverger. */}
+        <div className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
+          <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
+            {selection.bilanCrises
+              ? 'Un bilan des crises est joint à ce rapport.'
+              : "Aucun bilan des crises n'est joint à ce rapport."}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Btn variant="outline" onClick={() => onComposerBilan(personne)} className="text-sm">
+              <AlertTriangle size={14} /> {selection.bilanCrises ? 'Modifier le bilan des crises' : 'Composer un bilan des crises'}
+            </Btn>
+            {selection.bilanCrises && (
+              <Btn variant="ghost" onClick={() => setSelection({ ...selection, bilanCrises: null })} className="text-sm">
+                Retirer
+              </Btn>
+            )}
+          </div>
+        </div>
 
-        <Btn onClick={() => window.print()} disabled={!retenus.length && !avecCrises} className="w-full">
+        <Btn onClick={() => window.print()} disabled={!retenus.length && !selection.bilanCrises} className="w-full">
           <Printer size={16} /> Imprimer ou enregistrer en PDF
         </Btn>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
@@ -3011,7 +3181,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 
         {retenus.length === 0 ? (
           <p className="text-sm" style={{ color: INK_SOFT }}>
-            {avecCrises ? 'Aucun objectif sélectionné — le document ne contient que le bilan des crises.' : 'Sélectionnez au moins un objectif.'}
+            {selection.bilanCrises ? 'Aucun objectif sélectionné — le document ne contient que le bilan des crises.' : 'Sélectionnez au moins un objectif.'}
           </p>
         ) : (
           retenus.map((l, i) => {
@@ -3086,9 +3256,8 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           })
         )}
 
-        {avecCrises && (
-          <BilanCrises donnees={donnees} personne={personne} periode={periode}
-            avecGraphiques={avecGraphiques} style={style} />
+        {selection.bilanCrises && (
+          <BilanCrises donnees={donnees} config={selection.bilanCrises} periode={periode} />
         )}
 
         <p className="text-xs mt-6 pt-3" style={{ color: INK_SOFT, borderTop: `1px solid ${BORDER}` }}>
@@ -3101,156 +3270,31 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 }
 
 /* ==================== Bilan des crises dans le rapport ====================
-   Le même document sert pour les objectifs et pour les crises : un seul
-   en-tête, un seul geste d'impression. Les répartitions sont limitées aux
-   trois valeurs les plus fréquentes — un rapport transmis à des tiers n'a pas
-   vocation à déverser toute la liste des étiquettes cochées. */
-function BilanCrises({ donnees, personne, periode, avecGraphiques, style }) {
-  const refGraphe = useRef(null);
+   Volontairement mince : tout le rendu vient de BlocsCrise, le même qui sert à
+   l'écran. Le bilan imprimé dans un rapport est donc exactement celui qui a
+   été composé dans l'onglet Crises, blocs décochés compris. */
+function BilanCrises({ donnees, config, periode }) {
+  const crises = crisesRetenues(donnees, config, periode);
+  const qui = (config.personnes || []).length
+    ? config.personnes.map((i) => nomAffiche(donnees, i)).join(', ')
+    : 'toutes les personnes';
 
-  const crises = (donnees.crises || []).filter((c) => {
-    if (!c.studentId) return false;
-    const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
-    return ini === personne && dansPeriode(c.date, periode);
-  });
-  const vraiesCrises = crises.filter((c) => (c.kind || 'crise') === 'crise');
-  const observations = crises.filter((c) => (c.kind || 'crise') === 'abc');
-
-  const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
-  const chronometrees = vraiesCrises.filter((c) => (c.durationMs || 0) > 0);
-  const dureeTotale = vraiesCrises.reduce((a, c) => a + minutesDe(c), 0);
-  const dureeMoyenne = chronometrees.length
-    ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : null;
-
-  const notees = vraiesCrises.filter((c) => c.intensite);
-  const intensiteMoy = notees.length
-    ? Math.round((notees.reduce((a, c) => a + c.intensite, 0) / notees.length) * 10) / 10 : null;
-
-  const compter = (valeurs) => {
-    const m = new Map();
-    valeurs.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
-    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  };
-  const topAntecedents = compter(crises.flatMap((c) => c.antecedentTags || []));
-  const topComportements = compter(crises.flatMap((c) => c.comportementTags || []));
-  const topConsequences = compter(crises.flatMap((c) => c.consequenceTags || []));
-
-  const gran = periode.granularite || 'semaine';
-  const chrono = chronologieCrises(donnees, vraiesCrises, gran, 'intensite', 'nombre');
-  const serieTotale = chrono.donnees.map((d) => chrono.series.reduce((a, s) => a + (d[s] || 0), 0));
-  const tendance = tendanceLineaire(serieTotale);
-  const graphe = chrono.donnees.map((d, i) => ({
-    ...d,
-    Tendance: tendance ? tendance[i] : null,
-  }));
-
-  if (!crises.length) {
-    return (
-      <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}` }}>
-        <div className="text-base font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+  return (
+    <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}` }}>
+      <div className="text-base font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+      <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
+        {qui} · {libellePeriode(periode)}
+      </div>
+      {crises.length === 0 ? (
         <p className="text-sm" style={{ color: INK_SOFT }}>
           Aucune crise ni observation consignée sur la période.
         </p>
-      </div>
-    );
-  }
-
-  const Ligne = ({ titre, valeurs }) => (
-    valeurs.length ? (
-      <div className="text-sm mb-1">
-        <span style={{ color: INK_SOFT }}>{titre} : </span>
-        {valeurs.map(([v, n], i) => (
-          <span key={v}>{i > 0 && ' · '}{v} <span style={{ fontFamily: F_MONO, color: INK_SOFT }}>({n})</span></span>
-        ))}
-      </div>
-    ) : null
-  );
-
-  return (
-    <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}`, breakInside: 'avoid' }}>
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <div className="text-base font-semibold" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
-        {avecGraphiques && chrono.donnees.length > 0 && (
-          <Btn variant="outline" className="text-xs py-1.5 no-print"
-            onClick={() => exporterGraphePng(refGraphe.current, `crises-${nomSain(nomAffiche(donnees, personne))}.png`)}>
-            <Download size={13} /> PNG
-          </Btn>
-        )}
-      </div>
-
-      <div className="flex flex-wrap gap-6 mb-4">
-        <div>
-          <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{vraiesCrises.length}</div>
-          <div className="text-xs" style={{ color: INK_SOFT }}>crise{vraiesCrises.length !== 1 ? 's' : ''} sur la période</div>
-        </div>
-        {observations.length > 0 && (
-          <div>
-            <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{observations.length}</div>
-            <div className="text-xs" style={{ color: INK_SOFT }}>observation{observations.length !== 1 ? 's' : ''} ABC</div>
-          </div>
-        )}
-        {intensiteMoy != null && (
-          <div>
-            <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: INTENSITES[Math.round(intensiteMoy)].color }}>
-              {intensiteMoy} / 3
-            </div>
-            <div className="text-xs" style={{ color: INK_SOFT }}>intensité moyenne ({notees.length} notée{notees.length !== 1 ? 's' : ''})</div>
-          </div>
-        )}
-        {dureeMoyenne != null && (
-          <>
-            <div>
-              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>durée moyenne</div>
-            </div>
-            <div>
-              <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeTotale} min</div>
-              <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
-            </div>
-          </>
-        )}
-      </div>
-
-      {avecGraphiques && chrono.donnees.length > 0 && (
-        <div style={{ height: 220 }} className="mb-3" ref={refGraphe} data-no-swipe>
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-              <CartesianGrid stroke={BORDER} vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-              <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              {chrono.series.map((nom, i) => (
-                style === 'ligne'
-                  ? <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
-                  : <Bar key={nom} dataKey={nom} stackId="c" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]} isAnimationActive={false} />
-              ))}
-              {tendance && (
-                <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />
-              )}
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
+      ) : (
+        <BlocsCrise donnees={donnees} crises={crises} periode={periode} config={config} />
       )}
-      {avecGraphiques && chrono.donnees.length > 0 && (
-        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-          Nombre de crises par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}, réparties par intensité.
-          {tendance && ' La ligne pointillée est la tendance générale sur la période.'}
-        </p>
-      )}
-
-      <Ligne titre="Antécédents les plus fréquents" valeurs={topAntecedents} />
-      <Ligne titre="Comportements les plus fréquents" valeurs={topComportements} />
-      <Ligne titre="Conséquences les plus fréquentes" valeurs={topConsequences} />
-
-      <p className="text-xs mt-3" style={{ color: INK_SOFT }}>
-        Ces fréquences décrivent ce qui a été observé et coché pendant la période. Elles orientent
-        une hypothèse sans l'établir : l'analyse fonctionnelle reste du ressort du professionnel.
-      </p>
     </div>
   );
 }
-
 /* ==================== Lecture d'un rapport Excel ====================
    Le cadre reçoit deux types de fichiers : la sauvegarde qui alimente
    l'analyse, et le rapport tableur destiné à la lecture. Plutôt que de le
@@ -3901,7 +3945,11 @@ function ManagerApp() {
   const [association, setAssociation] = useState('');
   const [periode, setPeriode] = useState(periodeVide());
   const [focus, setFocus] = useState(null);
-  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), avecCrises: false });
+  const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
+  /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
+     Le jeton force la reprise des réglages à chaque nouvelle demande, même si
+     la configuration est identique à la précédente. */
+  const [compositionBilan, setCompositionBilan] = useState(null);
   /* Personne sur laquelle préselectionner le filtre en arrivant dans Crises,
      consommée aussitôt : l'utilisateur doit pouvoir l'enlever ensuite. */
   const [focusCrises, setFocusCrises] = useState(null);
@@ -4054,13 +4102,70 @@ function ManagerApp() {
     notify('Séance retirée de l’analyse');
   }
   function lancerRapport(personne, objectifs) {
-    setSelectionRapport({ personne, objectifs, periode, avecCrises: false });
+    setSelectionRapport({ personne, objectifs, periode, bilanCrises: null });
     setTab('rapport');
   }
-  /* Rapport centré sur les crises : aucun objectif retenu, le bilan seul. */
+  /* Rapport centré sur les crises : aucun objectif retenu, on part directement
+     composer le bilan. */
   function lancerRapportCrises(personne) {
-    setSelectionRapport({ personne, objectifs: [], periode, avecCrises: true });
+    setSelectionRapport({ personne, objectifs: [], periode, bilanCrises: null });
+    composerBilan(personne);
+  }
+
+  /* Aller composer un bilan dans l'onglet Crises, puis revenir au rapport. */
+  function composerBilan(personne) {
+    setCompositionBilan({
+      personne,
+      config: selectionRapport.bilanCrises || { ...configCriseVide(), personnes: [personne] },
+      jeton: Date.now(),
+    });
+    setTab('crises');
+  }
+  function validerBilan(config) {
+    setSelectionRapport((sel) => ({ ...sel, bilanCrises: config }));
+    setCompositionBilan(null);
     setTab('rapport');
+    notify('Bilan des crises joint au rapport');
+  }
+  function annulerBilan() {
+    setCompositionBilan(null);
+    setTab('rapport');
+  }
+
+  /* Enregistrement d'un rapport. Réenregistrer sous un nom déjà pris écrase
+     l'existant : c'est ce qu'on attend quand on revient corriger un document,
+     et cela évite de collectionner des doublons homonymes. */
+  function enregistrerRapport(nom) {
+    const titre = String(nom || '').trim();
+    if (!titre) return;
+    const entree = {
+      id: `${Date.now()}`,
+      nom: titre,
+      majLe: new Date().toISOString(),
+      personne: selectionRapport.personne,
+      objectifs: selectionRapport.objectifs || [],
+      periode: selectionRapport.periode,
+      bilanCrises: selectionRapport.bilanCrises || null,
+    };
+    setDonnees((d) => {
+      const autres = (d.rapports || []).filter((r) => r.nom !== titre);
+      return { ...d, rapports: [entree, ...autres] };
+    });
+    notify(`Rapport « ${titre} » enregistré`);
+  }
+  function ouvrirRapport(r) {
+    setSelectionRapport({
+      personne: r.personne,
+      objectifs: r.objectifs || [],
+      periode: r.periode || periodeVide(),
+      bilanCrises: r.bilanCrises || null,
+    });
+    setTab('rapport');
+  }
+  function supprimerRapport(r) {
+    if (!window.confirm(`Supprimer le rapport « ${r.nom} » ?\n\nSeule sa composition est effacée : aucune donnée de suivi n'est touchée.`)) return;
+    setDonnees((d) => ({ ...d, rapports: (d.rapports || []).filter((x) => x.id !== r.id) }));
+    notify('Rapport supprimé');
   }
   function ouvrirCrises(initiales) {
     setFocusCrises(initiales || null);
@@ -4165,7 +4270,8 @@ function ManagerApp() {
             <>
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
-                focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)} />
+                focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
+                composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan} />
             </>
           )}
           {tab === 'explorer' && (
@@ -4191,7 +4297,10 @@ function ManagerApp() {
               selection={selectionRapport} setSelection={setSelectionRapport}
               logo={logo} association={association}
               onLogo={enregistrerLogo} onAssociation={enregistrerAssociation}
-              onAlias={majAlias} onCommentaire={majCommentaire} onCodeEfl={majCodeEfl} />
+              onAlias={majAlias} onCommentaire={majCommentaire} onCodeEfl={majCodeEfl}
+              onComposerBilan={composerBilan}
+              onEnregistrer={enregistrerRapport} onOuvrirRapport={ouvrirRapport}
+              onSupprimerRapport={supprimerRapport} />
           </>
         )}
       </div>

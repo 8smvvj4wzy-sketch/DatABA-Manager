@@ -7,7 +7,11 @@
 .print-only { display: none; }
 
 @media print {
-  .no-print { display: none !important; }
+  /* Un élément marqué no-print reste masqué — sauf s'il se trouve sur le
+     chemin de la zone qu'on imprime. Tous les onglets sont enfermés dans un
+     conteneur no-print : sans cette exception, imprimer une zone située à
+     l'intérieur ne sortait que des pages blanches. */
+  .no-print:not(.chemin-impression) { display: none !important; }
   .print-only { display: block !important; }
   body { background: #fff !important; }
   .rounded-2xl { border: none !important; padding: 0 !important; }
