@@ -34,6 +34,9 @@ const ETATS = {
   plateau: { label: 'En plateau', court: 'Plateau', color: EN_COURS },
   en_cours: { label: "En cours d'acquisition", court: 'En cours', color: '#5B8AC4' },
   dormant: { label: 'Sans cotation récente', court: 'Dormant', color: INK_SOFT },
+  /* Suivi en mesure brute (occurrences, minutes, latence) : aucun seuil
+     d'acquisition en pourcentage ne s'y applique. */
+  mesure: { label: 'Suivi en mesure', court: 'Mesure', color: '#7A6FA8' },
   non_acquis: { label: 'Non acquis', court: 'Non acquis', color: NON_ACQUIS },
 };
 /* Le rapport transmis ne retient que trois états : les nuances de travail
@@ -44,6 +47,9 @@ const ETAT_RAPPORT = {
   plateau: "En cours d'acquisition",
   en_cours: "En cours d'acquisition",
   dormant: "En cours d'acquisition",
+  /* Un relevé d'occurrences ou de durée ne se juge pas sur l'échelle
+     Acquis / Non acquis : il se lit à son évolution, affichée juste à côté. */
+  mesure: 'Suivi en mesure',
   non_acquis: 'Non acquis',
 };
 
@@ -271,24 +277,50 @@ function critereDe(obj) {
 
 function analyserObjectif(seances, tableParSource, obj) {
   const points = [];
+  const mesures = [];
+  let unite = null;
   seances.forEach((sess) => {
     const sid = tableParSource[sess.source];
     if (!sid) return;
     const oid = Object.keys(sess.objectiveSnapshot || {}).find((k) => sess.objectiveSnapshot[k].name === obj.name);
     if (!oid || !((sess.selectedObjectives || {})[sid] || []).includes(oid)) return;
     const entry = (sess.data || {})[sid] && sess.data[sid][oid];
-    const v = objectiveScoreValue(sess.objectiveSnapshot[oid], entry);
-    if (v != null) points.push({ date: sess.date, value: v, favorite: !!sess.objectiveSnapshot[oid].favorite });
+    const snap = sess.objectiveSnapshot[oid];
+    const v = objectiveScoreValue(snap, entry);
+    if (v != null) points.push({ date: sess.date, value: v, favorite: !!snap.favorite });
+
+    /* Les mesures brutes vivent à part des points en pourcentage. Les mélanger
+       fausserait toutes les moyennes d'autonomie du reste de l'application :
+       un compteur d'occurrences à 12 n'est pas un score de 12 %. */
+    const m = valeurCotation(snap, entry);
+    if (m && m.unite !== '%') {
+      mesures.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
+      unite = m.unite;
+    }
   });
   points.sort((a, b) => new Date(a.date) - new Date(b.date));
+  mesures.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const crit = critereDe(obj);
   const base = {
     points,
+    mesures,
+    unite,
     threshold: crit ? crit.threshold : null,
     needed: crit ? crit.needed : null,
-    prioritaire: points.some((p) => p.favorite),
+    prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
   };
+
+  /* Un objectif suivi en mesure brute — occurrences, minutes, latence — n'a
+     pas de pourcentage à comparer au seuil d'acquisition. Le classer « Non
+     acquis » comme avant était faux : il n'était pas raté, il n'était pas
+     mesuré sur cette échelle. Il garde donc son propre état, et seule
+     l'absence de cotation récente peut encore le rendre dormant. */
+  if (!points.length && mesures.length) {
+    const jours = Math.floor((Date.now() - new Date(mesures[mesures.length - 1].date)) / 86400000);
+    if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak: 0, jours };
+    return { ...base, etat: 'mesure', streak: 0 };
+  }
   if (!points.length) return { ...base, etat: 'non_acquis', streak: 0 };
 
   let streak = 0;
@@ -717,7 +749,79 @@ function etiquetteAgregation(cle, granularite) {
   return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
 }
 
-/* ==================== Téléchargement et export d'image ==================== */
+/* ==================== Types sans pourcentage ====================
+   objectiveScoreValue ne rend un score que pour les quatre types qui
+   s'expriment en pourcentage d'indépendance. Les quatre autres — occurrence,
+   timer, intervalle, latence — produisaient donc zéro point dans Manager,
+   alors que DatABA sait parfaitement les chiffrer. Un objectif « demandes
+   spontanées » coté à l'occurrence était invisible ici.
+   On rend chaque type dans son unité propre, avec le sens d'une hausse :
+   plus de demandes spontanées, c'est un progrès ; plus de latence, non. */
+const UNITES_BRUTES = {
+  occurrence: { unite: 'occurrences', cumulable: true, hausseFavorable: true },
+  timer: { unite: 'min', cumulable: true, hausseFavorable: true },
+  latency: { unite: 's', cumulable: false, hausseFavorable: false },
+  interval: { unite: '%', cumulable: false, hausseFavorable: true },
+};
+
+function parseHM(v) {
+  if (!v || typeof v !== 'string') return null;
+  const m = v.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/* Part du niveau cible sur le temps total observé, comme le calcule DatABA :
+   relevés en direct et périodes saisies à la main s'additionnent. */
+function partNiveauCible(obj, entry) {
+  const c = (obj && obj.config) || {};
+  const pas = c.intervalSeconds || (c.intervalMinutes || 5) * 60;
+  const totaux = {};
+  Object.values(entry.marks || {}).forEach((lid) => {
+    if (lid) totaux[lid] = (totaux[lid] || 0) + pas;
+  });
+  (entry.segments || []).forEach((s) => {
+    const a = parseHM(s.start);
+    const b = parseHM(s.end);
+    const duree = a === null || b === null || b <= a ? 0 : (b - a) * 60;
+    if (duree > 0 && s.levelId) totaux[s.levelId] = (totaux[s.levelId] || 0) + duree;
+  });
+  const total = Object.values(totaux).reduce((a, b) => a + b, 0);
+  if (!total) return null;
+  const niveaux = c.levels || [];
+  const cible = c.targetLevelId || (niveaux[0] && niveaux[0].id);
+  return Math.round(((totaux[cible] || 0) / total) * 100);
+}
+
+/* Valeur d'une cotation, quel que soit son type : le pourcentage quand il
+   existe, sinon la mesure brute. Renvoie null si rien n'a été relevé. */
+function valeurCotation(obj, entry) {
+  if (!obj || !entry) return null;
+  const score = objectiveScoreValue(obj, entry);
+  if (score != null) return { valeur: score, unite: '%', cumulable: false, hausseFavorable: true };
+
+  if (obj.type === 'occurrence') {
+    if (typeof entry.count !== 'number') return null;
+    return { valeur: entry.count, ...UNITES_BRUTES.occurrence };
+  }
+  if (obj.type === 'timer') {
+    if (typeof entry.elapsedMs !== 'number' || entry.elapsedMs <= 0) return null;
+    return { valeur: Math.round(entry.elapsedMs / 60000), ...UNITES_BRUTES.timer };
+  }
+  if (obj.type === 'latency') {
+    if (!Array.isArray(entry.latencies) || !entry.latencies.length) return null;
+    const moy = entry.latencies.reduce((a, b) => a + b, 0) / entry.latencies.length;
+    return { valeur: Math.round(moy / 100) / 10, ...UNITES_BRUTES.latency };
+  }
+  if (obj.type === 'interval') {
+    const part = partNiveauCible(obj, entry);
+    if (part == null) return null;
+    return { valeur: part, ...UNITES_BRUTES.interval };
+  }
+  return null;
+}
+
+
 function telechargerFichier(blob, nom) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -814,20 +918,109 @@ function sensTendance(valeurs) {
   return ecart > 0 ? 'en hausse' : 'en baisse';
 }
 
+/* ==================== Moyenne par jour et évolution ====================
+   Une mesure brute se lit mal séance par séance : trois cotations le même jour
+   pèseraient trois fois plus qu'une seule dans la courbe et dans la tendance.
+   On ramène donc chaque journée à une valeur, puis on regarde l'évolution de
+   cette moyenne sur la période. */
+function moyennesParJour(mesures) {
+  const parJour = new Map();
+  mesures.forEach((m) => {
+    const cle = cleAgregation(m.date, 'jour');
+    if (!parJour.has(cle)) parJour.set(cle, []);
+    parJour.get(cle).push(m.value);
+  });
+  return Array.from(parJour.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([cle, valeurs]) => ({
+      date: new Date(cle).toISOString(),
+      value: Math.round((valeurs.reduce((a, v) => a + v, 0) / valeurs.length) * 10) / 10,
+      seances: valeurs.length,
+    }));
+}
+
+/* En dessous de ce nombre de journées, annoncer « +35 % » serait donner un
+   chiffre à du bruit. On affiche alors la moyenne, sans progression. */
+const MIN_JOURS_EVOLUTION = 5;
+
+/* Évolution exprimée en pourcentage. On compare les deux extrémités de la
+   droite de tendance et non la première et la dernière valeur : un jour
+   exceptionnel à l'un des bouts suffirait sinon à inverser le sens.
+   Une moyenne de départ nulle n'a pas de pourcentage — le rapport serait une
+   division par zéro. On rend alors les deux valeurs, à dire en clair. */
+function evolutionMoyenne(journalieres) {
+  if (journalieres.length < MIN_JOURS_EVOLUTION) return null;
+  const ajustees = tendanceLineaire(journalieres.map((j) => j.value));
+  if (!ajustees) return null;
+  const arrondi = (x) => Math.round(x * 10) / 10;
+  const depart = ajustees[0];
+  const arrivee = ajustees[ajustees.length - 1];
+  return {
+    depart: arrondi(depart),
+    arrivee: arrondi(arrivee),
+    pct: depart > 0 ? Math.round(((arrivee - depart) / depart) * 100) : null,
+    jours: journalieres.length,
+  };
+}
+
+/* Imprime une seule zone de l'écran — la chronologie des crises, les courbes
+   d'une personne — telle qu'elle est réglée, sans passer par l'onglet Rapport.
+   On marque la cible et toute la chaîne de ses ancêtres ; la feuille de style
+   masque alors, à chaque niveau, les frères qui ne mènent pas à elle.
+   Les classes sont posées directement sur les nœuds plutôt que par un état
+   React : window.print() s'exécute dans le même tour de boucle que le clic, un
+   rendu React n'aurait pas encore eu lieu au moment de l'impression.
+   Le nettoyage passe par afterprint, avec un délai de secours pour les
+   navigateurs qui ne l'émettent pas, et couvre aussi l'annulation. */
+function imprimerZone(element) {
+  if (!element) return false;
+  const ancetres = [];
+  let n = element.parentElement;
+  while (n && n !== document.body) {
+    n.classList.add('chemin-impression');
+    ancetres.push(n);
+    n = n.parentElement;
+  }
+  document.body.classList.add('chemin-impression', 'impression-ciblee');
+  element.classList.add('zone-impression');
+
+  let fait = false;
+  const nettoyer = () => {
+    if (fait) return;
+    fait = true;
+    element.classList.remove('zone-impression');
+    ancetres.forEach((a) => a.classList.remove('chemin-impression'));
+    document.body.classList.remove('chemin-impression', 'impression-ciblee');
+    window.removeEventListener('afterprint', nettoyer);
+  };
+  window.addEventListener('afterprint', nettoyer);
+  window.print();
+  setTimeout(nettoyer, 2000);
+  return true;
+}
+
 /* Nom de fichier sans caractère qui gêne un système de fichiers */
 const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'graphique';
 
-function Graphique({ points, style, seuil, hauteur = 220 }) {
+function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
   const donnees = points.map((p) => ({
     label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
     valeur: p.value,
   }));
+  /* Un pourcentage se lit toujours sur 0-100 : borner l'axe évite de faire
+     passer une variation de trois points pour un bouleversement. Une mesure
+     brute — occurrences, minutes, secondes — n'a pas de maximum connu, on
+     laisse alors recharts choisir l'échelle. */
+  const enPourcent = unite === '%';
+  const etiquette = enPourcent ? 'Résultat' : 'Moyenne du jour';
   const axes = (
     <>
       <CartesianGrid stroke={BORDER} vertical={false} />
       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-      <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} %`, 'Résultat']} />
+      <YAxis domain={enPourcent ? [0, 100] : [0, 'auto']} allowDecimals={!enPourcent}
+        tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+        formatter={(v) => [`${v} ${unite}`, etiquette]} />
       {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
     </>
   );
@@ -1652,6 +1845,7 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
   const [forme, setForme] = useState('barres');
   const [mesure, setMesure] = useState('nombre');      // effectif ou minutes cumulées
   const refChrono = useRef(null);
+  const refZone = useRef(null);
 
   /* Arrivée depuis la fiche d'une personne : on préselectionne son filtre,
      puis on rend la main pour que l'utilisateur puisse l'enlever librement.
@@ -1683,6 +1877,17 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
   const dureeMoyenne = chronometrees.length
     ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : 0;
   const dureeMax = chronometrees.length ? Math.max(...chronometrees.map(minutesDe)) : 0;
+
+  /* Rappel des réglages, imprimé sous le titre. Une chronologie sortie de son
+     contexte ne dit ni sur qui elle porte, ni ce qu'elle compte. */
+  const resumeReglages = [
+    personnes.length ? personnes.map((i) => nomAffiche(donnees, i)).join(', ') : 'Toutes les personnes',
+    type === 'crise' ? 'Crises' : type === 'abc' ? 'Observations ABC' : 'Crises et observations',
+    `par ${gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}`,
+    `découpé par ${(SEGMENTATIONS.find((sg) => sg.k === segmentation) || {}).label.toLowerCase()}`,
+    mesure === 'duree' ? 'durée cumulée en minutes' : 'nombre d’enregistrements',
+    forme === 'courbes' ? 'en courbes' : 'en barres',
+  ].join(' · ');
 
   const compter = (valeurs) => {
     const m = new Map();
@@ -1777,36 +1982,50 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
 
       {/* Chronologie : le nombre de crises au fil du temps, découpé en séries */}
       <Card className="mb-3">
-        <div className="flex flex-wrap items-center gap-2 mb-2">
+        <div className="flex flex-wrap items-center gap-2 mb-2 no-print">
           <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Évolution dans le temps</span>
           <div className="ml-auto flex gap-1.5">
             <Btn variant="outline" className="text-xs py-1.5"
               onClick={() => exporterGraphePng(refChrono.current, `crises-${nomSain(libellePeriode(periode))}.png`)}>
               <Download size={13} /> PNG
             </Btn>
+            <Btn variant="outline" className="text-xs py-1.5" onClick={() => imprimerZone(refZone.current)}>
+              <Printer size={13} /> PDF
+            </Btn>
             <Chip label="Barres" on={forme === 'barres'} onClick={() => setForme('barres')} />
             <Chip label="Courbes" on={forme === 'courbes'} onClick={() => setForme('courbes')} />
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 mb-2">
+        <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
           <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesurer</span>
           <Chip label="Nombre" on={mesure === 'nombre'} onClick={() => setMesure('nombre')} />
           <Chip label="Durée cumulée (min)" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+        <div className="flex flex-wrap items-center gap-1.5 mb-3 no-print">
           <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
           {SEGMENTATIONS.map((sg) => (
             <Chip key={sg.k} label={sg.label} on={segmentation === sg.k} onClick={() => setSegmentation(sg.k)} />
           ))}
         </div>
 
-        {chrono.donnees.length === 0 ? (
-          <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
-        ) : (
-          <>
-            <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
+        {/* Zone exportée en PDF : le graphique tel qu'il est réglé, précédé du
+            rappel des réglages. Sans ce rappel, une chronologie sortie de son
+            contexte ne dit ni sur qui ni sur quoi elle porte. */}
+        <div ref={refZone}>
+          <div className="print-only" style={{ marginBottom: '0.75rem' }}>
+            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
+              Crises — {libellePeriode(periode)}
+            </div>
+            <div className="text-xs" style={{ color: INK_SOFT }}>{resumeReglages}</div>
+          </div>
+
+          {chrono.donnees.length === 0 ? (
+            <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
+          ) : (
+            <>
+              <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
               <ResponsiveContainer width="100%" height="100%">
                 {forme === 'courbes' ? (
                   <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
@@ -1836,14 +2055,15 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
               </ResponsiveContainer>
             </div>
             <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-              {mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} — réglable au-dessus.
+              {mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}.
               {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
               {SEGMENTATIONS.find((sg) => sg.k === segmentation).multi &&
                 " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
               {mesure === 'duree' && " Une observation ABC n'a pas de durée : elle pèse zéro dans cette vue."}
             </p>
           </>
-        )}
+          )}
+        </div>
       </Card>
 
       <Card className="mb-3">
@@ -1972,8 +2192,28 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
   const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
   const code = codeEflDe(donnees, ligne.objectif);
 
+  /* Deux régimes d'affichage. Les objectifs cotés en pourcentage gardent leur
+     courbe de séances et leur seuil. Ceux suivis en mesure brute passent par
+     la moyenne par jour : sans ça, un jour à trois cotations déformerait la
+     courbe et la tendance. */
+  const enMesure = !ligne.points.length && (ligne.mesures || []).length > 0;
+  const journalieres = enMesure ? moyennesParJour(ligne.mesures) : [];
+  const evolution = enMesure ? evolutionMoyenne(journalieres) : null;
+  const courbe = enMesure ? journalieres : ligne.points;
+  const moyenne = journalieres.length
+    ? Math.round((journalieres.reduce((a, j) => a + j.value, 0) / journalieres.length) * 10) / 10 : null;
+
+  /* Une hausse de latence n'est pas un progrès : la couleur suit le sens de
+     l'objectif, pas le signe du pourcentage. */
+  const favorable = evolution && evolution.pct != null && evolution.pct !== 0
+    ? ((evolution.pct > 0) === (ligne.unite !== 's'))
+    : null;
+
   return (
-    <Card style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
+    /* Repliée, la carte sort aussi de l'export : imprimer un en-tête sans sa
+       courbe n'aurait aucun intérêt, et replier sert précisément à choisir ce
+       qui part dans le document. */
+    <Card className={masque ? 'no-print' : ''} style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="min-w-0">
           <div className="text-sm font-medium break-words">
@@ -1986,8 +2226,17 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
             {libelle}
           </div>
           <div className="text-xs" style={{ color: INK_SOFT }}>
-            {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
-            {ligne.threshold != null && ` · seuil ${ligne.threshold} %`}
+            {enMesure ? (
+              <>
+                {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''} de relevé
+                {moyenne != null && ` · ${moyenne} ${ligne.unite} par jour en moyenne`}
+              </>
+            ) : (
+              <>
+                {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
+                {ligne.threshold != null && ` · seuil ${ligne.threshold} %`}
+              </>
+            )}
           </div>
         </div>
         <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
@@ -1996,11 +2245,39 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
         </span>
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+      {enMesure && (
+        <div className="rounded-xl px-3 py-2 mb-2" style={{ backgroundColor: PAPER }}>
+          {evolution ? (
+            <>
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="text-lg font-semibold" style={{ fontFamily: F_MONO, color: favorable === null ? INK : favorable ? ACQUIS : NON_ACQUIS }}>
+                  {evolution.pct != null
+                    ? `${evolution.pct > 0 ? '+' : ''}${evolution.pct} %`
+                    : `${evolution.depart} → ${evolution.arrivee} ${ligne.unite}`}
+                </span>
+                <span className="text-xs" style={{ color: INK_SOFT }}>
+                  {evolution.pct != null && `de ${evolution.depart} à ${evolution.arrivee} ${ligne.unite} · `}
+                  sur {evolution.jours} jours de relevé
+                </span>
+              </div>
+              <p className="text-xs mt-1" style={{ color: INK_SOFT }}>
+                Évolution de la moyenne quotidienne, lue sur la tendance de la période et non sur le
+                premier et le dernier jour.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs" style={{ color: INK_SOFT }}>
+              Moins de {MIN_JOURS_EVOLUTION} jours de relevé : une progression chiffrée ne voudrait rien dire ici.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
         <Btn variant="ghost" onClick={onMasquer} className="text-xs py-1">
           {masque ? 'Afficher la courbe' : 'Replier'}
         </Btn>
-        {!masque && ligne.points.length > 0 && (
+        {!masque && courbe.length > 0 && (
           <>
             <Btn variant="ghost" onClick={onAgrandir} className="text-xs py-1">
               {agrandi ? 'Réduire' : 'Agrandir'}
@@ -2013,10 +2290,11 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
         )}
       </div>
 
-      {masque ? null : ligne.points.length ? (
+      {masque ? null : courbe.length ? (
         <div ref={refGraphe} data-no-swipe>
-          <Graphique points={ligne.points} style={style} seuil={ligne.threshold}
-            hauteur={agrandi ? 460 : surligne ? 300 : 220} />
+          <Graphique points={courbe} style={style} seuil={enMesure ? null : ligne.threshold}
+            hauteur={agrandi ? 460 : surligne ? 300 : 220}
+            unite={enMesure ? ligne.unite : '%'} />
         </div>
       ) : (
         <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
@@ -2033,6 +2311,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      l'autre, le nom est ce qui reste stable côté consolidation. */
   const [masques, setMasques] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
+  const refObjectifs = useRef(null);
 
   /* Calculé avant le retour anticipé plus bas : l'effet qui suit doit être
      appelé à chaque rendu, sans quoi l'ordre des hooks change selon qu'une
@@ -2131,31 +2410,50 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         const basculerMasque = (nom) => setMasques((cur) => (cur.includes(nom) ? cur.filter((x) => x !== nom) : [...cur, nom]));
         return (
           <>
-            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+            <div className="flex flex-wrap items-center gap-1.5 mb-3 no-print">
               {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+              <Btn variant="outline" className="text-xs py-1.5 ml-auto"
+                onClick={() => imprimerZone(refObjectifs.current)} disabled={!visibles.length}>
+                <Printer size={13} /> PDF
+              </Btn>
               {masques.length > 0 && (
-                <Btn variant="ghost" onClick={() => setMasques([])} className="text-xs py-1.5 ml-auto">
+                <Btn variant="ghost" onClick={() => setMasques([])} className="text-xs py-1.5">
                   Réafficher {masques.length} courbe{masques.length !== 1 ? 's' : ''}
                 </Btn>
               )}
             </div>
 
             {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
-              <div className="space-y-3">
-                {siennes.map((l) => (
-                  <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
-                    style={style}
-                    masque={masques.includes(l.objectif)}
-                    agrandi={agrandi === l.objectif}
-                    surligne={objectifOuvert === l.objectif}
-                    onMasquer={() => basculerMasque(l.objectif)}
-                    onAgrandir={() => setAgrandi(agrandi === l.objectif ? null : l.objectif)} />
-                ))}
-                {visibles.length === 0 && (
-                  <p className="text-xs text-center py-4" style={{ color: INK_SOFT }}>
-                    Toutes les courbes sont repliées.
-                  </p>
-                )}
+              /* Zone exportée : seules les courbes laissées visibles en sortent,
+                 dans le style choisi. Ce qui est replié à l'écran n'est pas
+                 imprimé — c'est tout l'intérêt de pouvoir replier. */
+              <div ref={refObjectifs}>
+                <div className="print-only" style={{ marginBottom: '0.75rem' }}>
+                  <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAffiche(donnees, personne)} — {libellePeriode(periode)}
+                  </div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>
+                    {visibles.length} objectif{visibles.length !== 1 ? 's' : ''} sur {siennes.length}
+                    {masques.length > 0 && ` · ${masques.length} replié${masques.length !== 1 ? 's' : ''}`}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {siennes.map((l) => (
+                    <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
+                      style={style}
+                      masque={masques.includes(l.objectif)}
+                      agrandi={agrandi === l.objectif}
+                      surligne={objectifOuvert === l.objectif}
+                      onMasquer={() => basculerMasque(l.objectif)}
+                      onAgrandir={() => setAgrandi(agrandi === l.objectif ? null : l.objectif)} />
+                  ))}
+                  {visibles.length === 0 && (
+                    <p className="text-xs text-center py-4" style={{ color: INK_SOFT }}>
+                      Toutes les courbes sont repliées.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </>
@@ -2616,7 +2914,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           <div className="flex flex-wrap gap-1.5">
             {donnees.personnes.map((p) => (
               <Chip key={p.initials} label={nomAffiche(donnees, p.initials)} on={personne === p.initials}
-                onClick={() => setSelection({ personne: p.initials, objectifs: [], periode })} />
+                onClick={() => setSelection({ ...selection, personne: p.initials, objectifs: [] })} />
             ))}
           </div>
         </div>
@@ -2742,9 +3040,40 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   {l.threshold != null && ` · critère ${l.threshold} % sur ${l.needed} séances`}
                 </div>
 
-                {avecGraphiques && l.points.length > 0 && (
-                  <div className="mb-3"><Graphique points={l.points} style={style} seuil={l.threshold} hauteur={180} /></div>
-                )}
+                {(() => {
+                  const enMesure = !l.points.length && (l.mesures || []).length > 0;
+                  if (!enMesure) {
+                    return avecGraphiques && l.points.length > 0 ? (
+                      <div className="mb-3"><Graphique points={l.points} style={style} seuil={l.threshold} hauteur={180} /></div>
+                    ) : null;
+                  }
+                  const journalieres = moyennesParJour(l.mesures);
+                  const ev = evolutionMoyenne(journalieres);
+                  const moyenne = journalieres.length
+                    ? Math.round((journalieres.reduce((a, j) => a + j.value, 0) / journalieres.length) * 10) / 10 : null;
+                  return (
+                    <>
+                      <div className="text-sm mb-2">
+                        {moyenne != null && (
+                          <>Moyenne : <strong style={{ fontFamily: F_MONO }}>{moyenne} {l.unite}</strong> par jour de relevé
+                          <span style={{ color: INK_SOFT }}> · {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''}</span></>
+                        )}
+                        {ev && ev.pct != null && (
+                          <> · Évolution : <strong style={{ fontFamily: F_MONO }}>{ev.pct > 0 ? '+' : ''}{ev.pct} %</strong>
+                          <span style={{ color: INK_SOFT }}> (de {ev.depart} à {ev.arrivee} {l.unite})</span></>
+                        )}
+                        {ev && ev.pct == null && (
+                          <> · Évolution : <strong style={{ fontFamily: F_MONO }}>{ev.depart} → {ev.arrivee} {l.unite}</strong></>
+                        )}
+                      </div>
+                      {avecGraphiques && journalieres.length > 0 && (
+                        <div className="mb-3">
+                          <Graphique points={journalieres} style={style} seuil={null} hauteur={180} unite={l.unite} />
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 <div className="text-xs mb-1 no-print" style={{ color: INK_SOFT }}>Commentaire</div>
                 <textarea value={commentaire} onChange={(e) => onCommentaire(cle, e.target.value)} rows={3}

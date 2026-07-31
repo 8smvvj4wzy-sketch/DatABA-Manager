@@ -13,3 +13,17 @@
   .rounded-2xl { border: none !important; padding: 0 !important; }
   @page { margin: 18mm 14mm; }
 }
+
+/* Impression ciblée : exporter en PDF ce qui est réglé à l'écran, depuis
+   n'importe quel onglet, sans passer par l'onglet Rapport.
+   À chaque niveau entre le body et la zone, on masque les frères qui ne mènent
+   pas à elle. Masquer par « visibility » aurait été plus simple, mais les
+   éléments cachés gardent alors leur place et l'impression sort suivie de
+   pages blanches ; « display » les retire vraiment du flux.
+   Les ancêtres portent .chemin-impression, la cible .zone-impression : c'est ce
+   qui permet aux enfants de la zone de rester visibles. */
+@media print {
+  body.impression-ciblee .chemin-impression > *:not(.chemin-impression):not(.zone-impression) {
+    display: none !important;
+  }
+}
