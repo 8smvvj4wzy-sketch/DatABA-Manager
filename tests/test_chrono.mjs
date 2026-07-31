@@ -16,12 +16,13 @@ function valeurs(d,c,seg){
     default: return ['Total'];
   }
 }
-function chrono(d,crises,g,seg){
+function chrono(d,crises,g,seg,mesure='nombre'){
   const paquets=new Map(),totaux=new Map();
+  const poids=c=>mesure==='duree'?Math.round((c.durationMs||0)/60000):1;
   crises.forEach(c=>{const k=cleAgregation(c.date,g);
     if(!paquets.has(k))paquets.set(k,{});
-    const b=paquets.get(k);
-    valeurs(d,c,seg).forEach(v=>{b[v]=(b[v]||0)+1;totaux.set(v,(totaux.get(v)||0)+1);});});
+    const b=paquets.get(k);const p=poids(c);
+    valeurs(d,c,seg).forEach(v=>{b[v]=(b[v]||0)+p;totaux.set(v,(totaux.get(v)||0)+p);});});
   const classees=Array.from(totaux.entries()).sort((a,b)=>b[1]-a[1]);
   const gardees=classees.slice(0,SERIES_MAX).map(([v])=>v);
   const regroupe=classees.length>SERIES_MAX;
@@ -35,10 +36,10 @@ function chrono(d,crises,g,seg){
 
 const d={_idVersInitiales:{tabA:{a1:'L.M.',a2:'T.B.'}}};
 const crises=[
-  {date:'2026-07-06',source:'tabA',studentId:'a1',intensite:1,antecedentTags:['Transition']},
-  {date:'2026-07-08',source:'tabA',studentId:'a1',intensite:3,antecedentTags:['Transition','Attente']},
-  {date:'2026-07-14',source:'tabA',studentId:'a2',intensite:1,antecedentTags:['Refus']},
-  {date:'2026-07-15',source:'tabA',studentId:'a1',intensite:3,antecedentTags:[]},
+  {date:'2026-07-06',source:'tabA',studentId:'a1',intensite:1,antecedentTags:['Transition'],durationMs:5*60000},
+  {date:'2026-07-08',source:'tabA',studentId:'a1',intensite:3,antecedentTags:['Transition','Attente'],durationMs:20*60000},
+  {date:'2026-07-14',source:'tabA',studentId:'a2',intensite:1,antecedentTags:['Refus'],durationMs:3*60000},
+  {date:'2026-07-15',source:'tabA',studentId:'a1',intensite:3,antecedentTags:[],durationMs:0},
 ];
 
 /* Segmentation par intensité */
@@ -81,5 +82,29 @@ t('aucune crise perdue', r4.series.reduce((a,s)=>a+r4.donnees[0][s],0), 9);
 const parPersonne=(l,ini)=>l.filter(c=>(d._idVersInitiales[c.source]||{})[c.studentId]===ini);
 t('filtre sur L.M.', parPersonne(crises,'L.M.').length, 3);
 t('filtre sur T.B.', parPersonne(crises,'T.B.').length, 1);
+
+/* Mesure par durée cumulée : une semaine peu fournie mais longue doit peser
+   davantage qu'une semaine à plusieurs crises brèves. */
+const d1=chrono(d,crises,'semaine','aucune','nombre');
+const d2=chrono(d,crises,'semaine','aucune','duree');
+t('en nombre : 2 crises la semaine 1', d1.donnees[0]['Total'], 2);
+t('en durée : 25 min la semaine 1', d2.donnees[0]['Total'], 25);
+t('en nombre : 2 crises la semaine 2', d1.donnees[1]['Total'], 2);
+t('en durée : 3 min la semaine 2', d2.donnees[1]['Total'], 3);
+t('la semaine la plus longue n est pas la plus fournie',
+  d2.donnees[0]['Total'] > d2.donnees[1]['Total'] && d1.donnees[0]['Total'] === d1.donnees[1]['Total'], true);
+
+/* Une crise sans durée (observation ABC) pèse zéro sans disparaître du compte */
+const d3=chrono(d,crises,'mois','intensite','duree');
+t('intensité 3 : 20 min cumulées', d3.donnees[0]['3 · Forte'], 20);
+t('intensité 1 : 8 min cumulées', d3.donnees[0]['1 · Légère'], 8);
+
+/* Durées agrégées telles que les affiche la carte de synthèse */
+const minutes=c=>Math.round((c.durationMs||0)/60000);
+const chronometrees=crises.filter(c=>(c.durationMs||0)>0);
+t('durée cumulée', crises.reduce((a,c)=>a+minutes(c),0), 28);
+t('moyenne sur les seules chronométrées', Math.round(chronometrees.reduce((a,c)=>a+minutes(c),0)/chronometrees.length), 9);
+t('trois enregistrements chronométrés sur quatre', chronometrees.length, 3);
+t('la plus longue', Math.max(...chronometrees.map(minutes)), 20);
 
 console.log(`\n${ok} réussis, ${ko} échecs`);process.exit(ko?1:0);
