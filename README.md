@@ -139,6 +139,53 @@ imprimante, ou « Enregistrer au format PDF » pour Airmes.
 plusieurs personnes vers un autre poste Manager, **purge des données**, et
 réglages de sécurité.
 
+## Exporter ce qui est à l'écran
+
+Deux endroits permettent d'exporter directement le réglage en cours, sans
+passer par l'onglet Rapport.
+
+**Onglet Crises.** Réglez la chronologie — personnes, type, regroupement,
+découpage, nombre ou durée cumulée, barres ou courbes — puis **PNG** pour une
+image, ou **PDF** pour un document. Le document reprend le titre, la période et
+le rappel des réglages : une chronologie sortie de son contexte ne dit ni sur
+qui elle porte, ni ce qu'elle compte.
+
+**Fiche personne, vue Objectifs.** Choisissez le style de courbe, repliez celles
+dont vous n'avez pas besoin, puis **PDF**. Seules les courbes restées visibles
+sortent dans le document — c'est précisément à quoi sert le repli. Chaque courbe
+garde par ailleurs son propre bouton **PNG**.
+
+> Dans la fenêtre d'impression, choisissez votre imprimante, ou « Enregistrer au
+> format PDF ». Les commandes, onglets et en-têtes d'écran ne s'impriment pas.
+
+## Objectifs suivis en mesure
+
+Quatre types de cotation ne produisent pas de pourcentage : **occurrence,
+timer, intervalle, latence**. Ils sont suivis dans leur unité propre —
+occurrences, minutes, secondes, part du niveau cible.
+
+Ces objectifs portent l'état **Suivi en mesure**. Ils n'apparaissent plus comme
+« Non acquis », ce qu'ils n'étaient pas : ils n'avaient simplement pas
+d'échelle en pourcentage à comparer au seuil d'acquisition.
+
+Leur lecture se fait sur deux chiffres :
+
+- la **moyenne par jour** — plusieurs cotations le même jour sont ramenées à une
+  seule valeur, sinon un jour chargé pèserait plus lourd qu'un autre ;
+- l'**évolution en pourcentage** de cette moyenne sur la période, lue sur la
+  droite de tendance et non sur le premier et le dernier jour, pour qu'une
+  journée exceptionnelle ne renverse pas le sens annoncé.
+
+> En dessous de cinq jours de relevé, aucune progression n'est chiffrée : un
+> pourcentage calculé sur trois points donnerait un chiffre à du bruit. La
+> moyenne reste affichée.
+
+> Une moyenne de départ nulle n'a pas de pourcentage — c'est une division par
+> zéro. L'évolution est alors donnée sous la forme « 0 → 4 occurrences ».
+
+Pour la latence, une hausse n'est pas un progrès : la couleur de l'évolution
+suit le sens de l'objectif, pas le signe du pourcentage.
+
 ## Purger les données
 
 Quatre niveaux, dans l'onglet Gestion :
