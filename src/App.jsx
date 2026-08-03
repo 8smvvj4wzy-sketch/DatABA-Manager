@@ -132,7 +132,7 @@ const STORE_KEY = `${PREFIXE}data`;
 const SECU_KEY = `${PREFIXE}securite`;
 
 const VIDE = {
-  personnes: [], seances: [], crises: [], sources: [],
+  personnes: [], seances: [], crises: [], stabilite: [], sources: [],
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -150,6 +150,7 @@ function normaliser(d) {
     ...VIDE,
     ...d,
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
+    stabilite: d.stabilite || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
     rapports: d.rapports || [],
@@ -209,17 +210,32 @@ function fusionnerImport(actuel, backup, nomSource) {
   const nouvellesCrises = (backup.crises || []).filter((c) => !crisesLa.has(c.id));
   const crises = [...actuel.crises, ...nouvellesCrises].map((c) => ({ ...c, source: c.source || nomSource }));
 
+  /* Relevés de stabilité. Attention au champ `source` : côté DatABA il dit
+     d'où vient le relevé (une pastille de suivi), ici il désigne la tablette
+     d'origine, comme pour les séances et les crises. On le renomme donc en
+     `origine` à l'entrée, sinon l'attribution par tablette serait écrasée par
+     la valeur du relevé et le croisement avec les ateliers viserait la mauvaise
+     source. */
+  const actuelleStabilite = actuel.stabilite || [];
+  const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
+  const nouveauxReleves = (backup.stabilite || [])
+    .filter((r) => r && !stabiliteLa.has(r.id))
+    .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
+  const stabilite = [...actuelleStabilite, ...nouveauxReleves];
+
   return {
     ...actuel,
     personnes,
     seances,
     crises,
+    stabilite,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
+    nbNouveauxReleves: nouveauxReleves.length,
   };
 }
 
@@ -3483,7 +3499,11 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
   const nbCrisesAvant = limiteAvant ? donnees.crises.filter((x) => new Date(x.date) < limiteAvant).length : 0;
 
   function integrer(backup, nom) {
-    onImported(fusionnerImport(donnees, backup, nom.replace(/\.json$/i, '')));
+    /* La tablette d'origine est inscrite dans le fichier depuis la version 3 :
+       elle prime sur le nom du fichier, qu'un renommage ou un transfert par
+       messagerie fait facilement perdre. */
+    const source = (backup.appareil || '').trim() || nom.replace(/\.json$/i, '');
+    onImported(fusionnerImport(donnees, backup, source));
     setFichier(null); setEnveloppe(null); setPassphrase('');
   }
 
@@ -3499,6 +3519,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
+        stabilite: (paquet.stabilite || []).filter((r) => r.source === src),
       };
       cumul = fusionnerImport(cumul, backup, src);
     });
@@ -3563,6 +3584,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
     const seances = donnees.seances.filter((s) => !garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid))));
     const crises = donnees.crises.filter((c) => !garder || garder.has(ini(c.source, c.studentId)));
+    const stabilite = (donnees.stabilite || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
     const alias = { personnes: {}, objectifs: {} };
     Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
@@ -3576,7 +3598,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       format: 'aba-manager-export',
       version: 1,
       exportedAt: new Date().toISOString(),
-      personnes, seances, crises,
+      personnes, seances, crises, stabilite,
       sources: donnees.sources,
       _idVersInitiales: donnees._idVersInitiales,
       _ateliers: donnees._ateliers,
@@ -3707,6 +3729,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                     ...d,
                     seances: d.seances.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
                     crises: d.crises.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
+                    stabilite: (d.stabilite || []).filter((x) => new Date(x.timestamp) >= new Date(`${avant}T00:00:00`)),
                   }));
                 }
               }}>
@@ -3734,11 +3757,12 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         delete inter[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
+                        const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
                         const encore = new Set();
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
                         return {
-                          ...d, seances, crises, sources: d.sources.filter((x) => x !== src),
+                          ...d, seances, crises, stabilite, sources: d.sources.filter((x) => x !== src),
                           _idVersInitiales: reste, _ateliers: ate, _intervenants: inter,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
@@ -3777,6 +3801,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         })
                         .filter((se) => (se.studentIds || []).length > 0);
                       const crises = d.crises.filter((c) => ((d._idVersInitiales || {})[c.source] || {})[c.studentId] !== pp.initials);
+                      const stabilite = (d.stabilite || []).filter((r) => ((d._idVersInitiales || {})[r.source] || {})[r.studentId] !== pp.initials);
                       const alias = {
                         personnes: { ...(d.alias.personnes || {}) },
                         objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => k.split('|')[0] !== pp.initials)),
@@ -3788,7 +3813,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, alias, commentaires,
+                        ...d, seances, crises, stabilite, alias, commentaires,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
@@ -4067,7 +4092,7 @@ function ManagerApp() {
   function purger(transformer) {
     setDonnees((d) => {
       const suite = transformer(d);
-      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined };
+      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined };
     });
     notify('Données purgées');
   }
@@ -4075,7 +4100,10 @@ function ManagerApp() {
   function onImported(fusion) {
     setDonnees(fusion);
     if (fusion.nbNouvellesSeances != null) {
-      notify(`${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`);
+      notify(
+        `${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`
+        + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de stabilité` : '')
+      );
     }
     setTab('bord');
   }
