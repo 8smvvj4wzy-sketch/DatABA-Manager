@@ -107,13 +107,21 @@ done
 echo
 echo "── 2 bis. Ordre des hooks ──"
 FAUTIFS=$(awk '
-  /^function [A-Z]/ { split($2, a, "("); fn = a[1]; apresRetour = 0; next }
-  /^}/ { fn = ""; apresRetour = 0; next }
+  /^function [A-Z]/ { split($2, a, "("); fn = a[1]; apresRetour = 0; garde = 0; next }
+  /^}/ { fn = ""; apresRetour = 0; garde = 0; next }
   fn == "" { next }
-  # Un return proche du corps de la fonction : garde sur une ligne
-  # (« if (…) return <Empty/> »), garde sur plusieurs lignes, ou sortie sèche.
+  # Garde de premier niveau ouverte sur plusieurs lignes : « if (…) { » indenté
+  # de deux espaces, refermée par un « } » au même niveau. Seul un return SITUÉ
+  # DEDANS est un retour anticipé. Compter tout return indenté de quatre espaces
+  # attrapait aussi ceux des callbacks — un « return undefined » dans un
+  # useEffect faisait alors passer tout le reste du composant pour fautif, et le
+  # contrôle ne protégeait plus rien.
   # Motifs sans \< ni \> : mawk, l awk par défaut d Ubuntu, ne les connaît pas.
-  /^  if .*return/ || /^  return/ || /^    return/ { apresRetour = 1; next }
+  garde == 0 && /^  if .*\{[ ]*$/ { garde = 1; next }
+  garde == 1 && /^  \}/ { garde = 0; next }
+  garde == 1 && /return/ { apresRetour = 1; next }
+  # Garde tenant sur une seule ligne, ou sortie sèche du corps.
+  /^  if .*return/ || /^  return/ { apresRetour = 1; next }
   apresRetour && /use(State|Effect|Memo|Ref|Reducer|Callback)[ ]*\(/ {
     print "      " fn " ligne " NR " : " $0
   }
