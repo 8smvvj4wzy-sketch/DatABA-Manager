@@ -2611,7 +2611,7 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
    sur les autres), agrandir (une courbe dense est illisible à 220 px), et
    exporter en image (pour coller dans un compte rendu sans passer par une
    capture d'écran). */
-function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surligne, onMasquer, onAgrandir }) {
+function CarteObjectif({ ligne, donnees, personne, style, deplie, pourPdf, agrandi, surligne, onBasculerDeplie, onBasculerPdf, onAgrandir }) {
   const refGraphe = useRef(null);
   const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
   const code = codeEflDe(donnees, ligne.objectif);
@@ -2634,44 +2634,55 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
     : null;
 
   return (
-    /* Repliée, la carte sort aussi de l'export : imprimer un en-tête sans sa
-       courbe n'aurait aucun intérêt, et replier sert précisément à choisir ce
-       qui part dans le document. */
-    <Card className={masque ? 'no-print' : ''} style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <div className="min-w-0">
-          <div className="text-sm font-medium break-words">
-            {code && (
-              <span className="text-xs mr-1.5 px-1.5 py-0.5 rounded"
-                style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
-                {code}
-              </span>
+    /* Repliée par défaut (vue bilan) : seul l'en-tête sort, une ligne par
+       objectif. Ce qui part au document dépend de la case à cocher — pas du
+       dépli, qui ne concerne que l'écran (voir lancerPdf côté
+       PersonnesScreen, qui déplie les objectifs cochés juste avant
+       d'imprimer). */
+    <Card className={pourPdf ? '' : 'no-print'} style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
+      <div className="flex items-start gap-2.5">
+        <button onClick={onBasculerPdf} title={pourPdf ? 'Retirer du PDF' : 'Inclure dans le PDF'}
+          className="w-5 h-5 mt-0.5 rounded border flex items-center justify-center shrink-0 text-xs no-print"
+          style={{ borderColor: pourPdf ? ACCENT : BORDER, backgroundColor: pourPdf ? ACCENT : 'transparent', color: ACCENT_INK }}>
+          {pourPdf ? '✓' : ''}
+        </button>
+        <button onClick={onBasculerDeplie} className="flex-1 min-w-0 flex items-start justify-between gap-3 text-left">
+          <div className="min-w-0">
+            <div className="text-sm font-medium break-words">
+              {code && (
+                <span className="text-xs mr-1.5 px-1.5 py-0.5 rounded"
+                  style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
+                  {code}
+                </span>
+              )}
+              {libelle}
+            </div>
+            {deplie && (
+              <div className="text-xs" style={{ color: INK_SOFT }}>
+                {enMesure ? (
+                  <>
+                    {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''} de relevé
+                    {moyenne != null && ` · ${moyenne} ${ligne.unite} par jour en moyenne`}
+                    {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
+                  </>
+                ) : (
+                  <>
+                    {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
+                    {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
+                  </>
+                )}
+              </div>
             )}
-            {libelle}
           </div>
-          <div className="text-xs" style={{ color: INK_SOFT }}>
-            {enMesure ? (
-              <>
-                {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''} de relevé
-                {moyenne != null && ` · ${moyenne} ${ligne.unite} par jour en moyenne`}
-                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
-              </>
-            ) : (
-              <>
-                {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
-                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
-              </>
-            )}
-          </div>
-        </div>
-        <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
-          style={{ backgroundColor: ETATS[ligne.etat].color, color: texteLisibleSur(ETATS[ligne.etat].color), fontFamily: F_DISPLAY }}>
-          {ETATS[ligne.etat].label}
-        </span>
+          <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
+            style={{ backgroundColor: ETATS[ligne.etat].color, color: texteLisibleSur(ETATS[ligne.etat].color), fontFamily: F_DISPLAY }}>
+            {deplie ? ETATS[ligne.etat].label : ETATS[ligne.etat].court}
+          </span>
+        </button>
       </div>
 
-      {enMesure && (
-        <div className="rounded-xl px-3 py-2 mb-2" style={{ backgroundColor: PAPER }}>
+      {deplie && enMesure && (
+        <div className="rounded-xl px-3 py-2 mt-2 mb-2" style={{ backgroundColor: PAPER }}>
           {evolution ? (
             <>
               <div className="flex flex-wrap items-baseline gap-2">
@@ -2698,24 +2709,26 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
-        <Btn variant="ghost" onClick={onMasquer} className="text-xs py-1">
-          {masque ? 'Afficher la courbe' : 'Replier'}
-        </Btn>
-        {!masque && courbe.length > 0 && (
-          <>
-            <Btn variant="ghost" onClick={onAgrandir} className="text-xs py-1">
-              {agrandi ? 'Réduire' : 'Agrandir'}
-            </Btn>
-            <Btn variant="ghost" className="text-xs py-1"
-              onClick={() => exporterGraphePng(refGraphe.current, `${nomSain(nomAffiche(donnees, personne))}-${nomSain(libelle)}.png`)}>
-              <Download size={13} /> PNG
-            </Btn>
-          </>
-        )}
-      </div>
+      {deplie && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-2 mt-2 no-print">
+          <Btn variant="ghost" onClick={onBasculerDeplie} className="text-xs py-1">
+            Replier
+          </Btn>
+          {courbe.length > 0 && (
+            <>
+              <Btn variant="ghost" onClick={onAgrandir} className="text-xs py-1">
+                {agrandi ? 'Réduire' : 'Agrandir'}
+              </Btn>
+              <Btn variant="ghost" className="text-xs py-1"
+                onClick={() => exporterGraphePng(refGraphe.current, `${nomSain(nomAffiche(donnees, personne))}-${nomSain(libelle)}.png`)}>
+                <Download size={13} /> PNG
+              </Btn>
+            </>
+          )}
+        </div>
+      )}
 
-      {masque ? null : courbe.length ? (
+      {deplie && (courbe.length ? (
         <div ref={refGraphe}>
           {/* Le seuil se trace aussi sur une série de mesures brutes, dès lors
               qu'un critère s'y applique — c'est le cas du comptage
@@ -2727,7 +2740,7 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
         </div>
       ) : (
         <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
-      )}
+      ))}
     </Card>
   );
 }
@@ -2735,31 +2748,66 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
 function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, onRapport, onRapportCrises, onOuvrirCrises }) {
   const [vue, setVue] = useState('objectifs');
   const [style, setStyle] = useState('ligne');
-  /* Objectifs dont on a replié la courbe, et celui qu'on a agrandi. Repérés
+  /* Objectifs dont la courbe est dépliée, et celui qu'on a agrandi. Repérés
      par leur nom : les identifiants d'objectif changent d'une tablette à
-     l'autre, le nom est ce qui reste stable côté consolidation. */
-  const [masques, setMasques] = useState([]);
+     l'autre, le nom est ce qui reste stable côté consolidation. Vue Objectifs
+     et Bilan fusionnées : on arrive replié (une ligne de bilan par objectif),
+     déplier fait apparaître le graphique — c'est l'inverse de l'ancien
+     `masques` (ce qui était replié), gardé nommé dans son sens positif
+     maintenant que c'est le cas par défaut. */
+  const [deplies, setDeplies] = useState([]);
+  /* Sélection pour le PDF, indépendante du dépli à l'écran : cocher décide de
+     ce qui part dans le document, déplier ne concerne que la lecture. Stocke
+     ce qui est EXCLU (comme `masques` avant elle) : par défaut, rien n'est
+     exclu, tout part au document — même défaut que l'ancien bouton PDF
+     unique, qui exportait tout ce qui restait affiché. */
+  const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
   const [classeFiltre, setClasseFiltre] = useState('');
+  /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
+     cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
+     peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
+     des cartes encore vides. Un effet plutôt qu'un appel direct : il ne se
+     déclenche qu'après le rendu qui suit le dépli. */
+  const [impressionEnAttente, setImpressionEnAttente] = useState(false);
   const refObjectifs = useRef(null);
 
-  /* Calculé avant le retour anticipé plus bas : l'effet qui suit doit être
-     appelé à chaque rendu, sans quoi l'ordre des hooks change selon qu'une
-     personne existe ou non. */
+  /* Calculées avant le retour anticipé plus bas : les effets qui suivent
+     doivent être appelés à chaque rendu, sans quoi l'ordre des hooks change
+     selon qu'une personne existe ou non. */
   const personne = (focus && focus.initiales)
     || (donnees.personnes.length ? donnees.personnes[0].initials : null);
+  const objectifOuvert = focus && focus.objectif;
 
-  /* Changer de personne remet les courbes à plat : un objectif replié chez
-     l'une n'a pas de raison de l'être chez l'autre, même s'il porte le même
-     nom. */
+  /* Changer de personne remet la vue à plat : un objectif déplié chez l'une
+     n'a pas de raison de l'être chez l'autre, même s'il porte le même nom.
+     Si on arrive avec un objectif précis en cible (clic depuis le Tableau de
+     bord), il part déplié plutôt que noyé dans le bilan. */
   useEffect(() => {
-    setMasques([]);
+    setDeplies(objectifOuvert ? [objectifOuvert] : []);
     setAgrandi(null);
+    setNonRetenusPdf([]);
   }, [personne]);
 
-  if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour commencer.</Empty>;
+  /* Navigation vers un objectif précis sans changement de personne (rare,
+     mais possible) : le déplier en plus de ce qui l'est déjà, sans toucher au
+     reste — contrairement à l'effet ci-dessus, qui repart de zéro. */
+  useEffect(() => {
+    if (objectifOuvert) setDeplies((cur) => (cur.includes(objectifOuvert) ? cur : [...cur, objectifOuvert]));
+  }, [objectifOuvert]);
 
-  const objectifOuvert = focus && focus.objectif;
+  /* Le clic sur PDF déplie d'abord les objectifs cochés (setDeplies), puis
+     demande l'impression via ce drapeau : l'effet ne se déclenche qu'après
+     le rendu qui suit ce dépli, quand les courbes fraîchement ouvertes ont
+     eu leur premier passage de rendu — window.print() a besoin d'un DOM déjà
+     peint, pas d'un futur commit. */
+  useEffect(() => {
+    if (!impressionEnAttente) return;
+    setImpressionEnAttente(false);
+    imprimerZone(refObjectifs.current);
+  }, [impressionEnAttente, deplies]);
+
+  if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour commencer.</Empty>;
 
   const siennes = lignes
     .filter((l) => l.initials === personne)
@@ -2832,8 +2880,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       <div className="flex-1 min-w-0">
       <div className="flex flex-wrap gap-1.5 mb-3">
         {[
-          { k: 'objectifs', l: 'Objectifs', icone: TrendingUp },
-          { k: 'bilan', l: 'Bilan', icone: Target },
+          { k: 'objectifs', l: 'Bilan des objectifs', icone: TrendingUp },
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
           { k: 'renfo', l: 'Renforcement', icone: Gift },
@@ -2867,35 +2914,58 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
 
       {vue === 'objectifs' && (() => {
-        const visibles = siennes.filter((l) => !masques.includes(l.objectif));
-        const basculerMasque = (nom) => setMasques((cur) => (cur.includes(nom) ? cur.filter((x) => x !== nom) : [...cur, nom]));
+        const retenusPdf = siennes.filter((l) => !nonRetenusPdf.includes(l.objectif));
+        const basculerDeplie = (nom) => setDeplies((cur) => (cur.includes(nom) ? cur.filter((x) => x !== nom) : [...cur, nom]));
+        const basculerPdf = (nom) => setNonRetenusPdf((cur) => (cur.includes(nom) ? cur.filter((x) => x !== nom) : [...cur, nom]));
+        /* Le PDF doit inclure la courbe de chaque objectif coché, même
+           replié à l'écran : la sélection est indépendante du dépli. On
+           déplie donc d'abord les objectifs retenus qui ne le sont pas déjà,
+           puis on imprime — dans un effet, une fois que le rendu qui suit le
+           dépli a eu lieu (voir imprimerZone : window.print() a besoin des
+           courbes déjà peintes dans le DOM). */
+        const lancerPdf = () => {
+          setDeplies((cur) => {
+            const manquants = retenusPdf.map((l) => l.objectif).filter((nom) => !cur.includes(nom));
+            return manquants.length ? [...cur, ...manquants] : cur;
+          });
+          setImpressionEnAttente(true);
+        };
         return (
           <>
+            <div className="flex flex-wrap gap-4 mb-4">
+              {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => (
+                <div key={e} className="min-w-[80px]">
+                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
+                  <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+                </div>
+              ))}
+            </div>
+
             <div className="flex flex-wrap items-center gap-1.5 mb-3 no-print">
               {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
               <Btn variant="outline" className="text-xs py-1.5 ml-auto"
-                onClick={() => imprimerZone(refObjectifs.current)} disabled={!visibles.length}>
-                <Printer size={13} /> PDF
+                onClick={lancerPdf} disabled={!retenusPdf.length}>
+                <Printer size={13} /> PDF ({retenusPdf.length})
               </Btn>
-              {masques.length > 0 && (
-                <Btn variant="ghost" onClick={() => setMasques([])} className="text-xs py-1.5">
-                  Réafficher {masques.length} courbe{masques.length !== 1 ? 's' : ''}
+              {deplies.length > 0 && (
+                <Btn variant="ghost" onClick={() => setDeplies([])} className="text-xs py-1.5">
+                  Tout replier
                 </Btn>
               )}
             </div>
 
             {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
-              /* Zone exportée : seules les courbes laissées visibles en sortent,
-                 dans le style choisi. Ce qui est replié à l'écran n'est pas
-                 imprimé — c'est tout l'intérêt de pouvoir replier. */
+              /* Zone exportée : seuls les objectifs cochés (case à gauche de
+                 chaque carte) en sortent, dans le style choisi — voir
+                 lancerPdf ci-dessus pour la mécanique du dépli avant
+                 impression. */
               <div ref={refObjectifs}>
                 <div className="print-only" style={{ marginBottom: '0.75rem' }}>
                   <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
                     {nomAffiche(donnees, personne)} — {libellePeriode(periode)}
                   </div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>
-                    {visibles.length} objectif{visibles.length !== 1 ? 's' : ''} sur {siennes.length}
-                    {masques.length > 0 && ` · ${masques.length} replié${masques.length !== 1 ? 's' : ''}`}
+                    {retenusPdf.length} objectif{retenusPdf.length !== 1 ? 's' : ''} sur {siennes.length}
                   </div>
                 </div>
 
@@ -2903,46 +2973,20 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   {siennes.map((l) => (
                     <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
                       style={style}
-                      masque={masques.includes(l.objectif)}
+                      deplie={deplies.includes(l.objectif)}
+                      pourPdf={!nonRetenusPdf.includes(l.objectif)}
                       agrandi={agrandi === l.objectif}
                       surligne={objectifOuvert === l.objectif}
-                      onMasquer={() => basculerMasque(l.objectif)}
+                      onBasculerDeplie={() => basculerDeplie(l.objectif)}
+                      onBasculerPdf={() => basculerPdf(l.objectif)}
                       onAgrandir={() => setAgrandi(agrandi === l.objectif ? null : l.objectif)} />
                   ))}
-                  {visibles.length === 0 && (
-                    <p className="text-xs text-center py-4" style={{ color: INK_SOFT }}>
-                      Toutes les courbes sont repliées.
-                    </p>
-                  )}
                 </div>
               </div>
             )}
           </>
         );
       })()}
-
-      {vue === 'bilan' && (
-        <Card>
-          <div className="flex flex-wrap gap-4 mb-4">
-            {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => (
-              <div key={e} className="min-w-[80px]">
-                <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
-                <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
-              </div>
-            ))}
-          </div>
-          <div className="space-y-1.5">
-            {siennes.map((l, i) => (
-              <div key={i} className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2" style={{ backgroundColor: PAPER }}>
-                <span className="text-sm min-w-0 break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</span>
-                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color) }}>
-                  {ETATS[l.etat].court}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
 
       {vue === 'radar' && (
         <Card>
