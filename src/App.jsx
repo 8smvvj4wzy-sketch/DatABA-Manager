@@ -1883,52 +1883,59 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
           </p>
         </Card>
       ) : (
-        <>
-          <div className="space-y-1.5 mb-3">
+        /* Sélection de la paire à gauche, comparaison à droite : le travail
+           est comparatif — choisir une paire, en lire l'accord — même
+           disposition que la fiche personne. */
+        <div className="flex flex-col lg:flex-row gap-4 lg:items-start">
+          <div className="lg:w-72 shrink-0 space-y-1.5">
             {paires.map((p, i) => (
               <button key={i} onClick={() => setChoisie(p)}
                 className="w-full text-left rounded-xl border px-3.5 py-3"
-                style={{ borderColor: choisie === p ? INK : BORDER, backgroundColor: CARD }}>
+                style={{ borderColor: choisie === p ? ACCENT : BORDER, backgroundColor: choisie === p ? ACCENT_WASH : CARD }}>
                 <div className="text-sm font-medium">{p.jour}</div>
                 <div className="text-xs" style={{ color: INK_SOFT }}>{p.a.source} · {p.b.source}</div>
               </button>
             ))}
           </div>
 
-          {res && (
-            <>
-              <Card className="mb-3">
-                <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
-                  {res.pct != null ? `${res.pct} %` : '—'}
-                </div>
-                <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
-                  d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
-                </div>
-                <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                  Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
-                  En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
-                </p>
-              </Card>
-              <div className="space-y-1.5">
-                {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
-                  <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-                    <div className="min-w-0">
-                      <div className="text-sm break-words">
-                        <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
-                      </div>
-                      <div className="text-xs" style={{ color: INK_SOFT }}>
-                        {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
-                      </div>
-                    </div>
-                    <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
-                      {l.pct} %
-                    </span>
+          <div className="flex-1 min-w-0">
+            {!res ? (
+              <Empty>Choisissez une paire pour voir l'accord.</Empty>
+            ) : (
+              <>
+                <Card className="mb-3">
+                  <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
+                    {res.pct != null ? `${res.pct} %` : '—'}
                   </div>
-                ))}
-              </div>
-            </>
-          )}
-        </>
+                  <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
+                    d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
+                  </div>
+                  <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                    Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
+                    En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
+                  </p>
+                </Card>
+                <div className="space-y-1.5">
+                  {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
+                    <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+                      <div className="min-w-0">
+                        <div className="text-sm break-words">
+                          <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
+                        </div>
+                        <div className="text-xs" style={{ color: INK_SOFT }}>
+                          {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
+                        </div>
+                      </div>
+                      <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
+                        {l.pct} %
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
