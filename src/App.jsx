@@ -3,6 +3,7 @@ import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -26,6 +27,9 @@ const BORDER = 'var(--border)';
 const ACCENT = 'var(--accent)';
 const ACCENT_INK = 'var(--accent-ink)';
 const ACCENT_WASH = 'var(--accent-wash)';
+/* Fond de la navigation latérale : un cran plus sombre que la page, pour
+   qu'elle se détache sans devenir un bloc noir sur tout un bord d'écran. */
+const NAV_BG = 'var(--nav-bg)';
 /* Alerte : crises, mais aussi erreurs et actions destructrices — un seul
    token d'alerte réactif au thème, plutôt qu'un rouge générique figé. Même
    convention que CRISIS côté DatABA. */
@@ -832,78 +836,6 @@ function suiviDePersonne(donnees, initiales) {
   return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
-/* ==================== Navigation par balayage ====================
-   Sur mobile, passer d'un onglet à l'autre au doigt. Les zones qui défilent
-   déjà horizontalement — tableaux, graphiques — gardent la priorité, sinon
-   le balayage volerait leur geste. */
-function gereDejaLeGeste(cible) {
-  let n = cible;
-  while (n && n !== document.body) {
-    if (n.dataset && n.dataset.noSwipe !== undefined) return true;
-    const t = n.tagName;
-    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return true;
-    if (n.scrollWidth > n.clientWidth + 4) {
-      const st = window.getComputedStyle(n);
-      if (/(auto|scroll)/.test(st.overflowX)) return true;
-    }
-    n = n.parentElement;
-  }
-  return false;
-}
-
-
-/* Balayage horizontal entre onglets, pour l'usage mobile.
-   Les zones marquées data-no-swipe (tableaux, graphiques) gardent la main :
-   sans cela, faire défiler un tableau large changerait de page. */
-function useBalayage(onGauche, onDroite) {
-  const ref = useRef(null);
-  const etat = useRef({ x: 0, y: 0, actif: false });
-  const [decalage, setDecalage] = useState(0);
-  const [enCours, setEnCours] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return undefined;
-
-    const debut = (e) => {
-      const t = e.touches[0];
-      etat.current = { x: t.clientX, y: t.clientY, actif: !gereDejaLeGeste(e.target) };
-    };
-    const bouge = (e) => {
-      if (!etat.current.actif) return;
-      const t = e.touches[0];
-      const dx = t.clientX - etat.current.x;
-      const dy = t.clientY - etat.current.y;
-      if (Math.abs(dx) < Math.abs(dy)) return; // geste plutôt vertical : on laisse défiler
-      setEnCours(true);
-      setDecalage(Math.max(-60, Math.min(60, dx * 0.35)));
-    };
-    const fin = (e) => {
-      setEnCours(false);
-      setDecalage(0);
-      if (!etat.current.actif) return;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - etat.current.x;
-      const dy = t.clientY - etat.current.y;
-      etat.current.actif = false;
-      // Geste franc et nettement horizontal, sinon on laisse défiler
-      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-      if (dx < 0) onGauche();
-      else onDroite();
-    };
-
-    el.addEventListener('touchstart', debut, { passive: true });
-    el.addEventListener('touchmove', bouge, { passive: true });
-    el.addEventListener('touchend', fin, { passive: true });
-    return () => {
-      el.removeEventListener('touchstart', debut);
-      el.removeEventListener('touchmove', bouge);
-      el.removeEventListener('touchend', fin);
-    };
-  }, [onGauche, onDroite]);
-
-  return { ref, decalage, enCours };
-}
 
 /* ==================== Composants de base ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
@@ -2305,7 +2237,7 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
             <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
           ) : (
             <>
-              <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
+              <div style={{ height: 300 }} ref={refChrono}>
                 <ResponsiveContainer width="100%" height="100%">
                   {config.forme === 'courbes' ? (
                     <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
@@ -2629,7 +2561,7 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
         )}
         <span className="text-xs ml-auto" style={{ color: INK }}>analyser →</span>
       </div>
-      <div style={{ height: 110 }} data-no-swipe>
+      <div style={{ height: 110 }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
             <XAxis dataKey="label" tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
@@ -2757,7 +2689,7 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
       </div>
 
       {masque ? null : courbe.length ? (
-        <div ref={refGraphe} data-no-swipe>
+        <div ref={refGraphe}>
           {/* Le seuil se trace aussi sur une série de mesures brutes, dès lors
               qu'un critère s'y applique — c'est le cas du comptage
               d'occurrences. `ligne.threshold` est déjà nul quand aucun
@@ -3109,7 +3041,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
                 Répartition du temps de séance, séance par séance
               </div>
-              <div style={{ height: 260 }} data-no-swipe>
+              <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
                     <CartesianGrid stroke={BORDER} vertical={false} />
@@ -3319,7 +3251,7 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
         {L.length === 0 ? (
           <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucune donnée pour cette combinaison.</p>
         ) : (
-          <div data-no-swipe style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto' }}>
+          <div style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto' }}>
             <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
               <thead>
                 <tr>
@@ -3863,7 +3795,7 @@ function LecteurExcel() {
             ) : null))}
           </div>
 
-          <div style={{ overflowX: 'auto', maxHeight: 460, overflowY: 'auto' }} data-no-swipe>
+          <div style={{ overflowX: 'auto', maxHeight: 460, overflowY: 'auto' }}>
             <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
               <thead>
                 <tr>
@@ -4395,6 +4327,75 @@ class ErrorBoundary extends React.Component {
 }
 
 /* ==================== Application ==================== */
+/* ==================== Navigation latérale ====================
+   Remplace la rangée d'onglets et le balayage tactile : Manager est un poste
+   assis, les sept destinations tiennent en permanence à l'écran. Repliable en
+   rail d'icônes pour rendre la largeur au contenu (tableaux, graphiques,
+   Explorer) quand elle sert peu. Marquée no-print entièrement : jamais dans
+   un rapport ni dans une impression ciblée. */
+function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donnees, replie, onReplier }) {
+  const largeur = replie ? 64 : 236;
+  return (
+    <aside className="no-print shrink-0 sticky top-0 h-screen flex flex-col border-r overflow-hidden"
+      style={{ width: largeur, borderColor: BORDER, backgroundColor: NAV_BG, transition: 'width .15s ease' }}>
+      <div className="px-3 pt-4 pb-3">
+        {replie ? (
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-sm"
+            style={{ fontFamily: F_DISPLAY, backgroundColor: CARD, color: INK_SOFT }}>DM</div>
+        ) : (
+          <>
+            <img src={`${import.meta.env.BASE_URL}logo-databa.png`} alt="DatABA" className="w-full max-w-[160px] h-auto" />
+            <div className="text-xs font-semibold tracking-wide mt-1" style={{ fontFamily: F_DISPLAY, color: INK_SOFT }}>MANAGER</div>
+          </>
+        )}
+      </div>
+
+      <nav className="flex-1 px-2 space-y-1 overflow-y-auto">
+        {onglets.map((t) => {
+          const Icone = t.icone;
+          const on = tab === t.k;
+          return (
+            <button key={t.k} onClick={() => setTab(t.k)} title={replie ? t.l : undefined}
+              className="w-full rounded-lg px-2.5 py-2.5 text-sm font-medium flex items-center gap-2.5"
+              style={{ fontFamily: F_DISPLAY, backgroundColor: on ? ACCENT_WASH : 'transparent', color: on ? ACCENT : INK_SOFT }}>
+              <Icone size={17} className="shrink-0" />
+              {!replie && <span className="truncate">{t.l}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="px-2 pb-3 pt-2 border-t" style={{ borderColor: BORDER }}>
+        {!replie && (
+          <div className="px-2 pb-2 text-xs" style={{ color: INK_SOFT }}>
+            {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
+          </div>
+        )}
+        <div className="flex items-center gap-1.5 px-0.5">
+          <button
+            onClick={onBasculerTheme}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
+            title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+          <button
+            onClick={() => onReplier((r) => !r)}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={replie ? 'Déplier la navigation' : 'Replier la navigation'}
+            title={replie ? 'Déplier' : 'Replier'}
+          >
+            {replie ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function ManagerApp() {
   /* Thème clair/sombre. Posé une première fois par le script bloquant de
      index.html (attribut data-theme sur <html>, avant le premier rendu) ;
@@ -4421,6 +4422,9 @@ function ManagerApp() {
   const [secuLue, setSecuLue] = useState(false);
   const [verrouille, setVerrouille] = useState(true);
   const [tab, setTab] = useState('bord');
+  /* Navigation latérale repliée en rail d'icônes. Choix de lecture, pas de
+     donnée : jamais persisté, jamais dans le bloc chiffré. */
+  const [railReplie, setRailReplie] = useState(false);
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
@@ -4670,15 +4674,6 @@ function ManagerApp() {
     { k: 'gestion', l: 'Gestion', icone: Settings },
   ];
 
-  /* Balayage entre onglets, pour l'usage sur mobile. */
-  const rangActuel = onglets.findIndex((t) => t.k === tab);
-  const allerA = (n) => {
-    if (n < 0 || n >= onglets.length) return;
-    setTab(onglets[n].k);
-    window.scrollTo({ top: 0 });
-  };
-  const balayage = useBalayage(() => allerA(rangActuel + 1), () => allerA(rangActuel - 1));
-
   if (!secuLue) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   if (!securite.disabled && (verrouille || !securite.pinHash)) {
@@ -4702,47 +4697,11 @@ function ManagerApp() {
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   return (
-    <div ref={balayage.ref} className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
-      <div
-        className="max-w-5xl mx-auto px-6 py-6"
-        style={{
-          transform: balayage.decalage ? `translateX(${balayage.decalage}px)` : 'none',
-          transition: balayage.enCours ? 'none' : 'transform .2s ease-out',
-        }}
-      >
-        <div className="flex items-baseline justify-between gap-4 mb-4 no-print">
-          <h1 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
-          <div className="flex items-center gap-3">
-            <span className="text-xs" style={{ color: INK_SOFT }}>
-              {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
-            </span>
-            <button
-              onClick={basculerTheme}
-              className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
-              style={{ backgroundColor: PAPER, color: INK_SOFT }}
-              aria-label={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
-              title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'}
-            >
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 mb-6 no-print">
-          {onglets.map((t) => {
-            const Icone = t.icone;
-            const on = tab === t.k;
-            return (
-              <button key={t.k} onClick={() => setTab(t.k)}
-                className="flex-1 min-w-[110px] rounded-xl px-3 py-2.5 text-sm font-medium border flex items-center justify-center gap-1.5"
-                style={{ fontFamily: F_DISPLAY, borderColor: on ? ACCENT : BORDER,
-                  backgroundColor: on ? ACCENT : 'transparent', color: on ? ACCENT_INK : INK_SOFT }}>
-                <Icone size={15} /> <span className="hidden sm:inline">{t.l}</span>
-              </button>
-            );
-          })}
-        </div>
-
+    <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
+      <NavigationLaterale onglets={onglets} tab={tab} setTab={setTab}
+        theme={theme} onBasculerTheme={basculerTheme} donnees={donnees}
+        replie={railReplie} onReplier={setRailReplie} />
+      <div className="flex-1 min-w-0 px-6 py-6 lg:px-8">
         <div className="no-print">
           {tab === 'bord' && (
             <>
