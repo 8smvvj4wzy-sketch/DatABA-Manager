@@ -3,7 +3,7 @@ import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Minimize2, Maximize2,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -30,6 +30,9 @@ const ACCENT_WASH = 'var(--accent-wash)';
 /* Fond de la navigation latérale : un cran plus sombre que la page, pour
    qu'elle se détache sans devenir un bloc noir sur tout un bord d'écran. */
 const NAV_BG = 'var(--nav-bg)';
+/* Voile derrière la palette de commande : noir fixe, indépendant du thème —
+   même convention que côté DatABA. */
+const OVERLAY_BACKDROP = 'var(--overlay-backdrop)';
 /* Alerte : crises, mais aussi erreurs et actions destructrices — un seul
    token d'alerte réactif au thème, plutôt qu'un rouge générique figé. Même
    convention que CRISIS côté DatABA. */
@@ -1794,7 +1797,7 @@ function comparerPaire(paire, donnees) {
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
    observateurs. */
-function SeancesScreen({ donnees, onSupprimerSeance }) {
+function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   const [choisie, setChoisie] = useState(null);
   const [ouverte, setOuverte] = useState(null);      // séance dépliée
   const [recherche, setRecherche] = useState('');
@@ -1857,9 +1860,9 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
         {q && ` sur ${seances.length}`} — appuyez pour voir le détail
       </div>
 
-      <div className="space-y-1.5 mb-4">
+      <div className={densite === 'compact' ? 'space-y-1 mb-4' : 'space-y-1.5 mb-4'}>
         {affichees.map((s) => (
-          <DetailSeance key={s.id} seance={s} donnees={donnees}
+          <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
             ouverte={ouverte === s.id}
             onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
             onSupprimer={() => onSupprimerSeance(s)} />
@@ -1944,15 +1947,16 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
 /* Une séance dans la liste, dépliable sur son détail complet.
    Les cotations ne sont pas modifiables ici : la tablette reste la source, et
    un réimport de la même séance rétablirait de toute façon ses valeurs. */
-function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
+function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite }) {
   const table = (donnees._idVersInitiales || {})[seance.source] || {};
   const intervenant = ((donnees._intervenants || {})[seance.source] || {})[seance.intervenantId];
   const dureeMin = seance.endedAt && seance.startedAt
     ? Math.round(Math.max(0, seance.endedAt - seance.startedAt) / 60000) : null;
+  const compact = densite === 'compact';
 
   return (
     <div className="rounded-xl border" style={{ borderColor: ouverte ? INK : BORDER, backgroundColor: CARD }}>
-      <button onClick={onBasculer} className="w-full px-3.5 py-3 flex items-center justify-between gap-3 text-left">
+      <button onClick={onBasculer} className={`w-full flex items-center justify-between gap-3 text-left ${compact ? 'px-3 py-1.5' : 'px-3.5 py-3'}`}>
         <div className="min-w-0">
           <div className="text-sm font-medium">
             {new Date(seance.date).toLocaleDateString('fr-FR')}
@@ -1960,10 +1964,12 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
               <span className="text-xs ml-2 px-1.5 py-0.5 rounded border" style={{ borderColor: BORDER, color: INK_SOFT }}>double cotation</span>
             )}
           </div>
-          <div className="text-xs break-words" style={{ color: INK_SOFT }}>
-            {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
-            {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
-          </div>
+          {!compact && (
+            <div className="text-xs break-words" style={{ color: INK_SOFT }}>
+              {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
+              {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
+            </div>
+          )}
         </div>
         <span className="text-sm shrink-0 flex items-center gap-2" style={{ fontFamily: F_MONO, color: INK }}>
           {seance.cotations}
@@ -4348,7 +4354,66 @@ class ErrorBoundary extends React.Component {
    rail d'icônes pour rendre la largeur au contenu (tableaux, graphiques,
    Explorer) quand elle sert peu. Marquée no-print entièrement : jamais dans
    un rapport ni dans une impression ciblée. */
-function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donnees, replie, onReplier }) {
+/* Les sept destinations, dans l'ordre où elles apparaissent dans la
+   navigation latérale — le même ordre sert aux raccourcis clavier 1-7,
+   d'où la constante commune plutôt qu'une définition locale à chaque. */
+const ONGLETS = [
+  { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
+  { k: 'seances', l: 'Séances', icone: CalendarDays },
+  { k: 'personnes', l: 'Personnes accompagnées', icone: Users },
+  { k: 'crises', l: 'Crises', icone: AlertTriangle },
+  { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
+  { k: 'rapport', l: 'Rapport', icone: FileText },
+  { k: 'gestion', l: 'Gestion', icone: Settings },
+];
+
+/* Palette de commande : ⌘K/Ctrl+K, aller à une personne au clavier. Seule
+   fenêtre modale de Manager — d'où sa gestion à part plutôt qu'un état de
+   plus dans un composant déjà chargé. */
+function PaletteCommande({ donnees, onChoisir, onFermer }) {
+  const [q, setQ] = useState('');
+  const champRef = useRef(null);
+  useEffect(() => { if (champRef.current) champRef.current.focus(); }, []);
+
+  const norm = (s) => String(s || '').toLowerCase();
+  const termes = norm(q);
+  const resultats = donnees.personnes
+    .filter((p) => norm(nomAffiche(donnees, p.initials)).includes(termes) || norm(p.initials).includes(termes))
+    .slice(0, 8);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4 no-print"
+      style={{ backgroundColor: OVERLAY_BACKDROP }} onClick={onFermer}>
+      <div className="w-full max-w-md rounded-2xl border overflow-hidden shadow-lg"
+        style={{ backgroundColor: CARD, borderColor: BORDER }} onClick={(e) => e.stopPropagation()}>
+        <div className="px-3 py-2.5 border-b" style={{ borderColor: BORDER }}>
+          <input ref={champRef} value={q} onChange={(e) => setQ(e.target.value)}
+            placeholder="Aller à une personne…" autoComplete="off"
+            className="w-full bg-transparent text-sm outline-none" style={{ color: INK, fontFamily: F_BODY }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && resultats[0]) onChoisir(resultats[0]); }} />
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1.5">
+          {resultats.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-center" style={{ color: INK_SOFT }}>Aucune personne ne correspond.</div>
+          ) : resultats.map((p) => (
+            <button key={p.initials} onClick={() => onChoisir(p)}
+              className="w-full text-left rounded-lg px-3 py-2 text-sm flex items-center justify-between gap-2">
+              <span style={{ color: INK }}>{nomAffiche(donnees, p.initials)}</span>
+              {nomClasseDe(donnees, p.initials) && (
+                <span className="text-xs shrink-0" style={{ color: INK_SOFT }}>{nomClasseDe(donnees, p.initials)}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="px-3 py-2 border-t text-xs" style={{ borderColor: BORDER, color: INK_SOFT }}>
+          Entrée pour choisir · Échap pour fermer
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donnees, replie, onReplier, densite, onDensite }) {
   const largeur = replie ? 64 : 236;
   return (
     <aside className="no-print shrink-0 sticky top-0 h-screen flex flex-col border-r overflow-hidden"
@@ -4382,9 +4447,16 @@ function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donn
 
       <div className="px-2 pb-3 pt-2 border-t" style={{ borderColor: BORDER }}>
         {!replie && (
-          <div className="px-2 pb-2 text-xs" style={{ color: INK_SOFT }}>
-            {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
-          </div>
+          <>
+            <div className="px-2 text-xs" style={{ color: INK_SOFT }}>
+              {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
+            </div>
+            {/* Raccourcis découvrables plutôt que secrets : la mention reste
+                à l'écran en permanence, pas cachée dans un menu d'aide. */}
+            <div className="px-2 pb-2 text-xs" style={{ color: INK_SOFT, opacity: 0.75 }} title="Ctrl/⌘+K : aller à une personne. 1-7 : changer d'onglet.">
+              ⌘K une personne · 1-7 les onglets
+            </div>
+          </>
         )}
         <div className="flex items-center gap-1.5 px-0.5">
           <button
@@ -4395,6 +4467,15 @@ function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donn
             title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'}
           >
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+          <button
+            onClick={() => onDensite((d) => (d === 'compact' ? 'confort' : 'compact'))}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={densite === 'compact' ? 'Densité confortable' : 'Densité compacte'}
+            title={densite === 'compact' ? 'Affichage confortable' : 'Affichage compact'}
+          >
+            {densite === 'compact' ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
           </button>
           <button
             onClick={() => onReplier((r) => !r)}
@@ -4440,6 +4521,14 @@ function ManagerApp() {
   /* Navigation latérale repliée en rail d'icônes. Choix de lecture, pas de
      donnée : jamais persisté, jamais dans le bloc chiffré. */
   const [railReplie, setRailReplie] = useState(false);
+  /* Palette de commande : ⌘K/Ctrl+K pour aller à une personne sans passer
+     par la souris. Seule fenêtre modale de Manager — Échap la ferme. */
+  const [paletteOuverte, setPaletteOuverte] = useState(false);
+  /* Densité d'affichage : confort (défaut) ou compact. Un cadre balaie des
+     dizaines de séances, il ne cote pas dans l'urgence — le compromis
+     tablette (cibles tactiles larges) ne s'impose pas ici. Choix de
+     lecture, jamais persisté. */
+  const [densite, setDensite] = useState('confort');
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
@@ -4520,6 +4609,31 @@ function ManagerApp() {
       ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.removeEventListener(e, relancer));
     };
   }, [securite.pinHash, securite.disabled, verrouille]);
+
+  /* Raccourcis clavier : 1-7 pour les onglets, ⌘K/Ctrl+K pour aller à une
+     personne, Échap pour fermer la palette. Inactifs pendant une saisie
+     (champ de texte, liste déroulante) — sans quoi taper un commentaire
+     changerait d'onglet à chaque chiffre. */
+  useEffect(() => {
+    const surTouche = (e) => {
+      const cible = e.target;
+      const saisie = cible && (cible.tagName === 'INPUT' || cible.tagName === 'TEXTAREA' || cible.tagName === 'SELECT' || cible.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOuverte(true);
+        return;
+      }
+      if (e.key === 'Escape' && paletteOuverte) {
+        setPaletteOuverte(false);
+        return;
+      }
+      if (saisie || paletteOuverte || e.metaKey || e.ctrlKey || e.altKey) return;
+      const n = Number(e.key);
+      if (n >= 1 && n <= ONGLETS.length) setTab(ONGLETS[n - 1].k);
+    };
+    document.addEventListener('keydown', surTouche);
+    return () => document.removeEventListener('keydown', surTouche);
+  }, [paletteOuverte]);
 
   async function changerMotDePasse(nouveau) {
     const pinSalt = newSalt();
@@ -4679,16 +4793,6 @@ function ManagerApp() {
     setTab('crises');
   }
 
-  const onglets = [
-    { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
-    { k: 'seances', l: 'Séances', icone: CalendarDays },
-    { k: 'personnes', l: 'Personnes accompagnées', icone: Users },
-    { k: 'crises', l: 'Crises', icone: AlertTriangle },
-    { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
-    { k: 'rapport', l: 'Rapport', icone: FileText },
-    { k: 'gestion', l: 'Gestion', icone: Settings },
-  ];
-
   if (!secuLue) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   if (!securite.disabled && (verrouille || !securite.pinHash)) {
@@ -4713,9 +4817,10 @@ function ManagerApp() {
 
   return (
     <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
-      <NavigationLaterale onglets={onglets} tab={tab} setTab={setTab}
+      <NavigationLaterale onglets={ONGLETS} tab={tab} setTab={setTab}
         theme={theme} onBasculerTheme={basculerTheme} donnees={donnees}
-        replie={railReplie} onReplier={setRailReplie} />
+        replie={railReplie} onReplier={setRailReplie}
+        densite={densite} onDensite={setDensite} />
       <div className="flex-1 min-w-0 px-6 py-6 lg:px-8">
         <div className="no-print">
           {tab === 'bord' && (
@@ -4728,7 +4833,7 @@ function ManagerApp() {
           {tab === 'seances' && (
             <>
               <SectionTitle sub="Consulter ce qui a été importé, et vérifier l'accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
-              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} />
+              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite} />
             </>
           )}
           {tab === 'personnes' && (
@@ -4782,6 +4887,12 @@ function ManagerApp() {
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm shadow-lg no-print" style={{ backgroundColor: ACCENT, color: ACCENT_INK }}>
           {toast}
         </div>
+      )}
+
+      {paletteOuverte && (
+        <PaletteCommande donnees={donnees}
+          onChoisir={(p) => { setFocus({ initiales: p.initials, objectif: null }); setTab('personnes'); setPaletteOuverte(false); }}
+          onFermer={() => setPaletteOuverte(false)} />
       )}
     </div>
   );

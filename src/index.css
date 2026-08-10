@@ -46,6 +46,31 @@ body {
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 
+/* Anneau de focus, dérivé de l'accent : DatABA ne le traite pas (écart
+   assumé sur les champs, DESIGN.md), mais un poste PC se pilote aussi au
+   clavier — ce n'est pas optionnel ici. `:focus-visible` plutôt que
+   `:focus` : pas d'anneau après un clic à la souris, seulement après une
+   navigation au clavier (Tab, flèches). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Survol : un signal discret sur tout bouton actionnable, dans le sens du
+   thème (assombrir sur fond clair, éclaircir sur fond sombre — l'inverse
+   n'aurait aucun effet visible sur un fond déjà proche du blanc ou du noir).
+   `:disabled` en est exclu : un bouton inactif ne doit pas donner l'illusion
+   de répondre au survol. */
+button:not(:disabled) {
+  transition: filter 0.1s ease;
+}
+:root[data-theme='light'] button:not(:disabled):hover {
+  filter: brightness(0.96);
+}
+:root[data-theme='dark'] button:not(:disabled):hover {
+  filter: brightness(1.18);
+}
+
 /* Visible seulement à l'impression : les commentaires sont saisis dans un
    champ à l'écran, et rendus en texte simple sur le document. */
 .print-only { display: none; }
