@@ -292,9 +292,98 @@ function objectiveScoreValue(obj, entry) {
   return null;
 }
 
+/* ==================== Critère d'acquisition ====================
+   La référence est `masteryDe` / `masteryStatus` côté DatABA : les deux
+   applications doivent rendre le même verdict sur les mêmes données, sans
+   quoi un bilan contredit la tablette qui l'a produit.
+
+   Deux champs manquaient ici et changeaient le verdict :
+   - `unit` : 'sessions' (défaut) ou 'days'. Un Probe se valide par jours
+     consécutifs — plusieurs probes le même jour ne comptent que pour un point.
+   - `sens` : 'min' (au moins le seuil, le seul sens qui vaille pour un
+     pourcentage de réussite) ou 'max' (au plus le seuil, pour un comptage
+     qu'on cherche à faire baisser — un comportement problème coté à
+     l'occurrence est acquis quand il passe SOUS le seuil). */
+
+/* Types dont le score est un pourcentage, et types admettant un critère.
+   Mêmes listes que PERCENT_TYPES / MASTERY_TYPES côté DatABA. `timer` et
+   `latency` n'y figurent pas : ce sont des modes retirés, conservés en
+   lecture pour les données anciennes. */
+const TYPES_POURCENT = ['trials', 'interval', 'chaining', 'balance', 'probe'];
+const TYPES_CRITERE = [...TYPES_POURCENT, 'occurrence'];
+
+const CRITERE_DEFAUT = { threshold: 80, sessions: 3, unit: 'sessions', sens: 'min' };
+/* Un Probe sans `config.mastery` explicite — modèle ancien, export partiel —
+   ne doit pas retomber sur « 80 % sur 3 séances » : son défaut est
+   « 100 % sur 3 jours ». Même repli que DEFAULT_MASTERY_PROBE côté DatABA. */
+const CRITERE_DEFAUT_PROBE = { threshold: 100, sessions: 3, unit: 'days', sens: 'min' };
+
 function critereDe(obj) {
-  const m = obj.config && obj.config.mastery;
-  return m ? { threshold: m.threshold || 80, needed: m.sessions || 3 } : null;
+  if (!obj || !TYPES_CRITERE.includes(obj.type)) return null;
+  const base = obj.type === 'probe' ? CRITERE_DEFAUT_PROBE : CRITERE_DEFAUT;
+  const m = (obj.config && obj.config.mastery) || {};
+  /* Comparaison de type plutôt que repli sur une valeur fausse : un seuil à 0
+     est légitime en sens 'max' (zéro occurrence), et `m.threshold || 80` le
+     remplaçait silencieusement par 80. */
+  return {
+    threshold: typeof m.threshold === 'number' ? m.threshold : base.threshold,
+    needed: typeof m.sessions === 'number' ? m.sessions : base.sessions,
+    unit: m.unit === 'days' ? 'days' : (m.unit === 'sessions' ? 'sessions' : base.unit),
+    sens: m.sens === 'max' ? 'max' : (m.sens === 'min' ? 'min' : base.sens),
+    pourcent: TYPES_POURCENT.includes(obj.type),
+  };
+}
+
+/* Le seuil est-il tenu ? C'est ici que `sens` entre en jeu, et nulle part
+   ailleurs : toute comparaison écrite en dur ailleurs finirait par diverger. */
+function tientLeSeuil(valeur, crit) {
+  if (!crit || valeur == null) return false;
+  return crit.sens === 'max' ? valeur <= crit.threshold : valeur >= crit.threshold;
+}
+
+/* Écart au seuil, toujours positif quand le seuil n'est pas tenu, quel que
+   soit le sens. Affiché tel quel : « il manque N points » en sens 'min',
+   « N de trop » en sens 'max'. */
+function ecartAuSeuil(valeur, crit) {
+  if (!crit || valeur == null) return null;
+  return crit.sens === 'max' ? valeur - crit.threshold : crit.threshold - valeur;
+}
+
+/* Regroupe les points d'une même journée calendaire en un seul point moyenné,
+   pour un critère exprimé en jours plutôt qu'en séances. Porté de
+   `toDayPoints` côté DatABA ; la date est conservée en plus, elle sert à
+   l'affichage de la série et ne change pas le décompte. */
+function pointsParJour(points) {
+  const parJour = new Map();
+  points.forEach((p) => {
+    if (!p.date) return;
+    const jour = new Date(p.date).toDateString();
+    if (!parJour.has(jour)) parJour.set(jour, { somme: 0, n: 0, date: p.date });
+    const e = parJour.get(jour);
+    e.somme += p.value;
+    e.n += 1;
+  });
+  return Array.from(parJour.values())
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .map((e) => ({ value: Math.round(e.somme / e.n), date: e.date }));
+}
+
+/* Série sur laquelle se compte la suite : les séances, ou les journées quand
+   le critère est exprimé en jours. */
+function serieCritere(points, crit) {
+  return crit && crit.unit === 'days' ? pointsParJour(points) : points;
+}
+
+/* Longueur de la suite en cours, comptée depuis la fin. */
+function suiteAuSeuil(points, crit) {
+  if (!crit) return 0;
+  const serie = serieCritere(points, crit);
+  let suite = 0;
+  for (let i = serie.length - 1; i >= 0; i--) {
+    if (tientLeSeuil(serie[i].value, crit)) suite += 1;
+    else break;
+  }
+  return suite;
 }
 
 function analyserObjectif(seances, tableParSource, obj) {
