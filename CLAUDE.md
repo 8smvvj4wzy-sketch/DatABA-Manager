@@ -37,7 +37,7 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 14 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 15 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
@@ -84,6 +84,27 @@ rouge.
   le thème sombre sans prévenir tant qu'on développe en clair. Les tokens de
   surface (`PAPER`, `INK`, `BORDER`…) sont des `var(--…)`, jamais un hex
   écrit en dur ; la palette `CAT_*` est le seul hex fixe légitime.
+- **Les fonds colorés ne s'impriment pas tout seuls.** Un `backgroundColor`
+  posé en style inline (piste de `BarresCrise`, badge d'état) sort blanc sur
+  blanc à l'impression sans `print-color-adjust: exact` sous `@media print`
+  — comportement par défaut des navigateurs (économie d'encre). Le SVG de
+  Recharts n'est pas concerné (`fill`, pas un fond CSS) : un graphique et une
+  barre du même écran peuvent donc se comporter différemment à l'impression,
+  ce qui égare le diagnostic si on ne sait pas que ce sont deux mécanismes
+  distincts.
+- **Le rail replié a une largeur fixe de 64px avec `overflow-hidden`.**
+  Toute pastille ajoutée au pied de `NavigationLaterale` (thème, densité,
+  déplier…) doit s'empiler verticalement en mode replié — alignées en
+  ligne, trois pastilles de 32px débordent déjà du cadre, et celui qui
+  redéploie le rail peut sortir entièrement de la zone cliquable. Déjà
+  arrivé : le rail devenait alors un cul-de-sac.
+- **Le verrouillage ne doit réagir qu'à une absence prolongée, pas à une
+  perte de focus.** Changer d'onglet ou de fenêtre est un geste normal sur
+  un poste PC — verrouiller instantanément dès `visibilitychange` (hérité de
+  la mise en veille des tablettes DatABA) redemande le mot de passe pour un
+  simple aller-retour. La durée de l'absence se compare à
+  `DELAI_VERROUILLAGE` (`doitVerrouillerAuRetour`), pas la seule perte de
+  focus.
 
 ## Principes produit
 
