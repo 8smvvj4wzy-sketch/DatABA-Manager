@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
-  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3,
+  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -137,6 +137,12 @@ const VIDE = {
      les personnes et les sources — une classe ne dépend pas de la tablette
      qui l'a exportée. */
   classes: [],
+  /* Relevés de suivi continu au format v4 (multi-axes). `stabilite` reste le
+     format v3 (axe unique, `etat`), alimenté par les tablettes pas encore
+     mises à jour — jamais les deux pour le même import, voir
+     fusionnerImport. Les axes sont stockés par source : deux tablettes
+     peuvent avoir des critères différents pour le même identifiant d'axe. */
+  suivi: [], _axesSuivi: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -155,6 +161,8 @@ function normaliser(d) {
     ...d,
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
     stabilite: d.stabilite || [],
+    suivi: d.suivi || [],
+    _axesSuivi: d._axesSuivi || {},
     classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
@@ -244,18 +252,38 @@ function fusionnerImport(actuel, backup, nomSource) {
   const nouvellesCrises = (backup.crises || []).filter((c) => !crisesLa.has(c.id));
   const crises = [...actuel.crises, ...nouvellesCrises].map((c) => ({ ...c, source: c.source || nomSource }));
 
-  /* Relevés de stabilité. Attention au champ `source` : côté DatABA il dit
-     d'où vient le relevé (une pastille de suivi), ici il désigne la tablette
-     d'origine, comme pour les séances et les crises. On le renomme donc en
-     `origine` à l'entrée, sinon l'attribution par tablette serait écrasée par
-     la valeur du relevé et le croisement avec les ateliers viserait la mauvaise
-     source. */
+  /* Relevés de suivi continu. Attention au champ `source` : côté DatABA il
+     dit d'où vient le relevé (une pastille de suivi), ici il désigne la
+     tablette d'origine, comme pour les séances et les crises. On le renomme
+     donc en `origine` à l'entrée, sinon l'attribution par tablette serait
+     écrasée par la valeur du relevé et le croisement avec les ateliers
+     viserait la mauvaise source.
+
+     Un fichier v4 porte les mêmes relevés dans `suivi` (multi-axes) et dans
+     `stabilite` (alias v3, projection appauvrie). Les additionner les
+     dupliquerait : on lit `suivi` s'il est présent — même vide, c'est le
+     signe d'une tablette à jour — et on ne retombe sur `stabilite` que s'il
+     est absent. */
   const actuelleStabilite = actuel.stabilite || [];
-  const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
-  const nouveauxReleves = (backup.stabilite || [])
-    .filter((r) => r && !stabiliteLa.has(r.id))
-    .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
-  const stabilite = [...actuelleStabilite, ...nouveauxReleves];
+  const actuelSuivi = actuel.suivi || [];
+  let stabilite = actuelleStabilite;
+  let suivi = actuelSuivi;
+  let nbNouveauxReleves;
+  if (Array.isArray(backup.suivi)) {
+    const suiviLa = new Set(actuelSuivi.map((r) => r.id));
+    const nouveauxSuivi = backup.suivi
+      .filter((r) => r && !suiviLa.has(r.id))
+      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
+    suivi = [...actuelSuivi, ...nouveauxSuivi];
+    nbNouveauxReleves = nouveauxSuivi.length;
+  } else {
+    const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
+    const nouveauxReleves = (backup.stabilite || [])
+      .filter((r) => r && !stabiliteLa.has(r.id))
+      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
+    stabilite = [...actuelleStabilite, ...nouveauxReleves];
+    nbNouveauxReleves = nouveauxReleves.length;
+  }
 
   return {
     ...actuel,
@@ -264,14 +292,16 @@ function fusionnerImport(actuel, backup, nomSource) {
     seances,
     crises,
     stabilite,
+    suivi,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
     collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
-    nbNouveauxReleves: nouveauxReleves.length,
+    nbNouveauxReleves,
   };
 }
 
@@ -686,6 +716,55 @@ function nomClasseDe(d, initiales) {
   if (!p || !p.classeId) return null;
   const c = (d.classes || []).find((x) => x.id === p.classeId);
   return c ? c.nom : null;
+}
+
+/* ==================== Suivi continu (multi-axes) ====================
+   Repris de DatABA : axeDe / metaCritere / CRITERE_INCONNU. Un critère retiré
+   de la configuration ne ressuscite pas — les relevés passés qui le portaient
+   restent affichés, avec leur clé d'origine entre parenthèses. */
+const CRITERE_INCONNU_SUIVI = { k: null, l: 'Critère retiré', color: INK_SOFT };
+
+function axeDe(axes, suiviId) {
+  return (axes || []).find((a) => a.id === suiviId) || null;
+}
+function metaCritereSuivi(criteres, k) {
+  return (criteres || []).find((c) => c.k === k) || CRITERE_INCONNU_SUIVI;
+}
+/* Les critères historiques de l'axe 'stabilité', pour lire les relevés v3
+   (`stabilite`, champ `etat`) avec les mêmes couleurs que le suivi continu.
+   Mêmes clés que DEFAULT_CRITERES_SUIVI côté DatABA. */
+const CRITERES_STABILITE_V3 = [
+  { k: 'stable', l: 'Stable', color: ACQUIS },
+  { k: 'pre-crise', l: 'Pré-crise', color: EN_COURS },
+  { k: 'crise', l: 'Crise', color: NON_ACQUIS },
+  { k: 'post-crise', l: 'Post-crise', color: '#5B8AC4' },
+];
+
+/* L'axe et les critères d'un relevé, quelle que soit sa provenance : un
+   relevé v4 porte suiviId + critere et se résout dans les axes de sa source ;
+   un relevé v3 (stabilite) n'a qu'un état sur l'axe historique implicite. */
+function axeEtCritereDuReleve(donnees, releve, estV4) {
+  if (estV4) {
+    const axes = (donnees._axesSuivi || {})[releve.source] || [];
+    const axe = axeDe(axes, releve.suiviId);
+    const meta = axe ? metaCritereSuivi(axe.criteres, releve.critere) : CRITERE_INCONNU_SUIVI;
+    return { nomAxe: axe ? axe.nom : 'Suivi retiré', meta, cle: releve.critere };
+  }
+  return { nomAxe: 'Suivi de stabilité', meta: metaCritereSuivi(CRITERES_STABILITE_V3, releve.etat), cle: releve.etat };
+}
+
+/* Relevés de suivi continu d'une personne, v4 et v3 réunis et triés du plus
+   récent au plus ancien. Chaque entrée porte de quoi s'afficher sans
+   redemander l'axe. */
+function suiviDePersonne(donnees, initiales) {
+  const estDeLaPersonne = (r) => ((donnees._idVersInitiales || {})[r.source] || {})[r.studentId] === initiales;
+  const v4 = (donnees.suivi || [])
+    .filter(estDeLaPersonne)
+    .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, true), estV4: true }));
+  const v3 = (donnees.stabilite || [])
+    .filter(estDeLaPersonne)
+    .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, false), estV4: false }));
+  return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
 /* ==================== Navigation par balayage ====================
@@ -2716,6 +2795,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
           { k: 'renfo', l: 'Renforcement', icone: Gift },
+          { k: 'suivi', l: 'Suivi continu', icone: Layers },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
           const Icone = v.icone;
@@ -2859,6 +2939,47 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           </Card>
         )
       )}
+
+      {vue === 'suivi' && (() => {
+        const releves = suiviDePersonne(donnees, personne).filter((r) => dansPeriode(r.timestamp, periode));
+        if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
+        /* Un axe par colonne : le nombre d'axes n'est pas borné côté DatABA,
+           l'affichage ne présume donc de rien de plus qu'une liste. */
+        const parAxe = new Map();
+        releves.forEach((r) => {
+          if (!parAxe.has(r.nomAxe)) parAxe.set(r.nomAxe, []);
+          parAxe.get(r.nomAxe).push(r);
+        });
+        return (
+          <>
+            <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+              Ce que montre ce suivi est un état déclaré par l'équipe à un instant donné, pas une mesure de
+              performance : un axe qui bascule souvent peut refléter un contexte qui change autant qu'une évolution
+              de la personne.
+            </p>
+            <div className="space-y-4">
+              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => (
+                <Card key={nomAxeVal}>
+                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {rs.slice(0, 30).map((r) => (
+                      <div key={r.id} className="rounded-xl px-3 py-2 flex items-center gap-2 text-xs" style={{ backgroundColor: PAPER }}>
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.meta.color }} />
+                        <span style={{ color: INK_SOFT }}>{new Date(r.timestamp).toLocaleString('fr-FR')}</span>
+                        <span className="font-medium">
+                          {r.fin ? '— fin —' : (r.meta === CRITERE_INCONNU_SUIVI ? `${r.meta.l} (${r.cle})` : r.meta.l)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </>
+        );
+      })()}
 
       {vue === 'renfo' && (() => {
         const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
@@ -3725,15 +3846,26 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
      pour que le rapprochement des personnes reste cohérent. */
   function integrerManager(paquet) {
     let cumul = donnees;
+    /* Les personnes du paquet portent déjà leur classeId : on le réinjecte
+       dans `students` pour que fusionnerImport le reprenne comme à un import
+       de tablette, et on transmet la définition des classes en une fois —
+       fusionnerClasses la déduplique par id, la répéter à chaque source ne
+       coûte rien. */
+    const classeIdDe = Object.fromEntries((paquet.personnes || []).map((p) => [p.initials, p.classeId || null]));
     (paquet.sources || []).forEach((src) => {
       const table = (paquet._idVersInitiales || {})[src] || {};
       const backup = {
-        students: Object.entries(table).map(([id, initials]) => ({ id, initials })),
+        students: Object.entries(table).map(([id, initials]) => ({ id, initials, classeId: classeIdDe[initials] || null })),
+        classes: paquet.classes || [],
         ateliers: Object.entries((paquet._ateliers || {})[src] || {}).map(([id, name]) => ({ id, name })),
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
-        stabilite: (paquet.stabilite || []).filter((r) => r.source === src),
+        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite` s'il
+           est présent dans le paquet, pour ne pas dupliquer les mêmes relevés. */
+        ...(Array.isArray(paquet.suivi)
+          ? { suivi: paquet.suivi.filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
+          : { stabilite: (paquet.stabilite || []).filter((r) => r.source === src) }),
       };
       cumul = fusionnerImport(cumul, backup, src);
     });
@@ -3796,9 +3928,15 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     const garder = initialesRetenues.length ? new Set(initialesRetenues) : null;
     const ini = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
     const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
+    /* Les classes retenues sont celles que gardent encore les personnes
+       sélectionnées : envoyer la liste complète enverrait le nom d'une classe
+       qui ne concerne aucune des personnes exportées. */
+    const classesGardees = new Set(personnes.map((p) => p.classeId).filter(Boolean));
+    const classes = (donnees.classes || []).filter((c) => classesGardees.has(c.id));
     const seances = donnees.seances.filter((s) => !garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid))));
     const crises = donnees.crises.filter((c) => !garder || garder.has(ini(c.source, c.studentId)));
     const stabilite = (donnees.stabilite || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
+    const suivi = (donnees.suivi || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
     const alias = { personnes: {}, objectifs: {} };
     Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
@@ -3812,11 +3950,12 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       format: 'aba-manager-export',
       version: 1,
       exportedAt: new Date().toISOString(),
-      personnes, seances, crises, stabilite,
+      personnes, classes, seances, crises, stabilite, suivi,
       sources: donnees.sources,
       _idVersInitiales: donnees._idVersInitiales,
       _ateliers: donnees._ateliers,
       _intervenants: donnees._intervenants,
+      _axesSuivi: donnees._axesSuivi,
       alias, commentaires, codesEfl,
     };
   }
@@ -3944,6 +4083,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                     seances: d.seances.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
                     crises: d.crises.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
                     stabilite: (d.stabilite || []).filter((x) => new Date(x.timestamp) >= new Date(`${avant}T00:00:00`)),
+                    suivi: (d.suivi || []).filter((x) => new Date(x.timestamp) >= new Date(`${avant}T00:00:00`)),
                   }));
                 }
               }}>
@@ -3969,15 +4109,18 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         delete ate[src];
                         const inter = { ...(d._intervenants || {}) };
                         delete inter[src];
+                        const axes = { ...(d._axesSuivi || {}) };
+                        delete axes[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
+                        const suivi = (d.suivi || []).filter((x) => x.source !== src);
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
                         const encore = new Set();
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
                         return {
-                          ...d, seances, crises, stabilite, sources: d.sources.filter((x) => x !== src),
-                          _idVersInitiales: reste, _ateliers: ate, _intervenants: inter,
+                          ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
+                          _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -4016,6 +4159,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         .filter((se) => (se.studentIds || []).length > 0);
                       const crises = d.crises.filter((c) => ((d._idVersInitiales || {})[c.source] || {})[c.studentId] !== pp.initials);
                       const stabilite = (d.stabilite || []).filter((r) => ((d._idVersInitiales || {})[r.source] || {})[r.studentId] !== pp.initials);
+                      const suivi = (d.suivi || []).filter((r) => ((d._idVersInitiales || {})[r.source] || {})[r.studentId] !== pp.initials);
                       const alias = {
                         personnes: { ...(d.alias.personnes || {}) },
                         objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => k.split('|')[0] !== pp.initials)),
@@ -4027,7 +4171,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, stabilite, alias, commentaires,
+                        ...d, seances, crises, stabilite, suivi, alias, commentaires,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
@@ -4316,7 +4460,7 @@ function ManagerApp() {
     if (fusion.nbNouvellesSeances != null) {
       notify(
         `${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`
-        + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de stabilité` : '')
+        + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de suivi continu` : '')
         /* Deux personnes de classes différentes, mêmes initiales : la fusion
            les a réunies en une seule sans pouvoir les distinguer. Signalé
            plutôt que résolu — voir fusionnerImport. */
