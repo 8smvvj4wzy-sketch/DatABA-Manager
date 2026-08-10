@@ -479,7 +479,12 @@ function analyserObjectif(seances, tableParSource, obj) {
     const m = valeurCotation(snap, entry);
     if (!m) return;
     if (m.unite === '%') {
-      points.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
+      /* Le créneau (matin/après-midi) n'existe que pour Probe à deux prises
+         par jour : porté jusqu'au point plutôt qu'ignoré, sinon un probe
+         manqué sur un créneau prévu se lit comme un trou dans les données
+         plutôt que comme l'information de suivi que c'est. */
+      const creneau = snap.type === 'probe' && entry && entry.creneau ? entry.creneau : null;
+      points.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite, creneau });
     } else {
       mesures.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
       unite = m.unite;
@@ -552,6 +557,12 @@ function analyserObjectif(seances, tableParSource, obj) {
   }
   return { ...base, etat: 'en_cours', streak };
 }
+
+/* Créneaux d'un Probe à deux prises par jour : matin avant 13 h, en heure
+   locale — jamais UTC, même clé que côté DatABA. Manager ne fait que lire le
+   créneau posé par la tablette, il ne le recalcule pas. */
+const PROBE_CRENEAUX = { matin: 'Matin', aprem: 'Après-midi' };
+const libelleCreneauProbe = (c) => PROBE_CRENEAUX[c] || null;
 
 /* Libellé du critère tel qu'il s'affiche sous un objectif. Le sens s'y lit :
    « seuil 80 % » d'un côté, « au plus 2 occurrences » de l'autre. Écrire
@@ -676,6 +687,10 @@ function construireFaits(donnees) {
   return { cotations, crises, renforcements };
 }
 
+/* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
+   profit d'Intervalle et de Probe) mais restent ici : Manager ne propose
+   jamais de créer un objectif, seulement d'afficher ceux déjà cotés — une
+   cotation ancienne dans ces deux modes doit encore pouvoir se lire. */
 const TYPES_COTATION = {
   trials: 'Essai par essai', probe: 'Probe', occurrence: 'Par occurrence',
   timer: 'Timer', interval: 'Niveau par intervalle', chaining: 'Chaînage',
@@ -1290,7 +1305,8 @@ const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+
 
 function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
   const donnees = points.map((p) => ({
-    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
+      + (libelleCreneauProbe(p.creneau) ? ` (${libelleCreneauProbe(p.creneau)})` : ''),
     valeur: p.value,
   }));
   /* Un pourcentage se lit toujours sur 0-100 : borner l'axe évite de faire
@@ -2001,6 +2017,15 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
                       <span className="min-w-0 break-words">
                         {ini ? libelleAffiche(donnees, ini, obj.name) : obj.name}
                         <span style={{ color: INK_SOFT }}> · {TYPES_COTATION[obj.type] || obj.type}</span>
+                        {/* Pour Probe, la guidance est une option du formulaire, pas un mode
+                            imposé : la cotation 1/0 reste la voie par défaut. Le dire évite de
+                            lire un score à 0 % comme un échec de guidance qui n'a jamais existé. */}
+                        {obj.type === 'probe' && (
+                          <span style={{ color: INK_SOFT }}> ({obj.config && obj.config.useGuidance ? 'guidance' : '1/0'})</span>
+                        )}
+                        {obj.type === 'probe' && entry && libelleCreneauProbe(entry.creneau) && (
+                          <span style={{ color: INK_SOFT }}> · {libelleCreneauProbe(entry.creneau)}</span>
+                        )}
                       </span>
                       <span className="shrink-0" style={{ fontFamily: F_MONO, color: score == null ? INK_SOFT : INK }}>
                         {score == null ? 'non coté' : `${score} %`}

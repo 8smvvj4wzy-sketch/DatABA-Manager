@@ -217,7 +217,7 @@ t('sans critère : aucune suite', suiteAuSeuil(pbs, null), 0);
 
 const NOMS2 = [
   'objectiveScoreValue', 'parseHM', 'partNiveauCible', 'valeurCotation',
-  'libelleSeuil', 'libelleCritere', 'analyserObjectif',
+  'libelleSeuil', 'libelleCritere', 'analyserObjectif', 'libelleCreneauProbe',
 ];
 const code2 = [
   `const TYPES_POURCENT = ${extraireLigne('TYPES_POURCENT')};`,
@@ -227,13 +227,16 @@ const code2 = [
   `const PLATEAU_MIN_POINTS = ${extraireLigne('PLATEAU_MIN_POINTS')};`,
   `const PLATEAU_ECART_MAX = ${extraireLigne('PLATEAU_ECART_MAX')};`,
   `const DORMANT_JOURS = ${extraireLigne('DORMANT_JOURS')};`,
+  `const PROBE_CRENEAUX = ${extraireLigne('PROBE_CRENEAUX')};`,
   extraire('UNITES_BRUTES'),
   NOMS.map(extraire).join('\n'),
   NOMS2.map(extraire).join('\n'),
   `return { ${NOMS2.join(', ')}, DORMANT_JOURS };`,
 ].join('\n');
 // eslint-disable-next-line no-new-func
-const { valeurCotation, libelleSeuil, libelleCritere, analyserObjectif, DORMANT_JOURS } = new Function(code2)();
+const {
+  valeurCotation, libelleSeuil, libelleCritere, analyserObjectif, libelleCreneauProbe, DORMANT_JOURS,
+} = new Function(code2)();
 
 const jour = (n) => new Date(Date.now() - n * 86400000).toISOString();
 const GUIDANCES = [{ code: 'I', independent: true }, { code: 'P', independent: false }];
@@ -349,6 +352,28 @@ t('un chronomètre reste un suivi en mesure',
   analyser({ name: 'Durée', type: 'timer', config: {} }, [{ j: 3, entry: { elapsedMs: 300000 } }]).etat, 'mesure');
 t('valeurCotation rend bien des minutes',
   valeurCotation({ type: 'timer' }, { elapsedMs: 300000 }).unite, 'min');
+
+/* Créneau d'un Probe à deux prises par jour : porté jusqu'au point plutôt
+   qu'ignoré, sinon un probe manqué sur le créneau prévu se lit comme un trou
+   dans les données plutôt que comme l'information de suivi que c'est. */
+t('matin', libelleCreneauProbe('matin'), 'Matin');
+t('après-midi', libelleCreneauProbe('aprem'), 'Après-midi');
+t('créneau inconnu', libelleCreneauProbe('soir'), null);
+t('absence de créneau (une seule prise par jour)', libelleCreneauProbe(undefined), null);
+
+const analyseCreneau = analyser(objProbe, [probe(jourFixe(3, 9), 1)]);
+// probe() ne pose pas de creneau : on construit l'entrée à la main ici.
+function analyserAvecCreneau(obj, cotations) {
+  const seances = cotations.map((c, i) => ({
+    id: `s${i}`, date: c.j, source: 'T1',
+    objectiveSnapshot: { o1: obj }, selectedObjectives: { p1: ['o1'] },
+    data: { p1: { o1: { value: c.v, creneau: c.creneau } } },
+  }));
+  return analyserObjectif(seances, { T1: 'p1' }, obj);
+}
+t('le créneau du relevé se retrouve sur le point',
+  analyserAvecCreneau(objProbe, [{ j: jourFixe(3, 9), v: 1, creneau: 'matin' }]).points[0].creneau, 'matin');
+t('sans créneau, le point n en porte pas', analyseCreneau.points[0].creneau, null);
 
 console.log(`\n${ok} réussis, ${ko} en échec`);
 process.exit(ko ? 1 : 0);
