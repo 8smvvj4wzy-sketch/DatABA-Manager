@@ -2769,33 +2769,40 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   const listePersonnes = personnesFiltrees.length ? personnesFiltrees : donnees.personnes;
 
   return (
-    <div>
-      {donnees.classes.length > 0 && (
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
-          <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
-            className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-            <option value="">Toutes</option>
-            {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
-          </select>
+    <div className="flex flex-col lg:flex-row gap-4 lg:items-start">
+      {/* Colonne de gauche : liste des personnes, verticale — le travail est
+         comparatif (choisir qui regarder), la fiche de droite fait le reste.
+         Reste en flux normal sous lg : un poste étroit garde la liste au-dessus. */}
+      <div className="lg:w-64 shrink-0 no-print">
+        {donnees.classes.length > 0 && (
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
+            <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
+              className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              <option value="">Toutes</option>
+              {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+            </select>
+          </div>
+        )}
+        <div className="flex lg:flex-col flex-wrap gap-2">
+          {listePersonnes.map((p) => (
+            <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
+              className="rounded-xl px-4 py-2.5 border font-semibold text-sm lg:text-left"
+              style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
+                backgroundColor: personne === p.initials ? ACCENT_WASH : 'transparent', color: personne === p.initials ? ACCENT : INK_SOFT }}>
+              {nomAffiche(donnees, p.initials)}
+              {nomClasseDe(donnees, p.initials) && (
+                <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? ACCENT : INK_SOFT, opacity: 0.75 }}>
+                  · {nomClasseDe(donnees, p.initials)}
+                </span>
+              )}
+            </button>
+          ))}
         </div>
-      )}
-      <div className="flex flex-wrap gap-2 mb-3">
-        {listePersonnes.map((p) => (
-          <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
-            className="rounded-xl px-4 py-2.5 border font-semibold text-sm"
-            style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
-              backgroundColor: personne === p.initials ? ACCENT : 'transparent', color: personne === p.initials ? ACCENT_INK : INK_SOFT }}>
-            {nomAffiche(donnees, p.initials)}
-            {nomClasseDe(donnees, p.initials) && (
-              <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? ACCENT_INK : INK_SOFT, opacity: 0.75 }}>
-                · {nomClasseDe(donnees, p.initials)}
-              </span>
-            )}
-          </button>
-        ))}
       </div>
 
+      {/* Colonne de droite : la fiche de la personne sélectionnée. */}
+      <div className="flex-1 min-w-0">
       <div className="flex flex-wrap gap-1.5 mb-3">
         {[
           { k: 'objectifs', l: 'Objectifs', icone: TrendingUp },
@@ -3086,6 +3093,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           </Card>
         )
       )}
+      </div>
     </div>
   );
 }
