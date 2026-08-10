@@ -65,10 +65,10 @@ const {
 const objTrials = (mastery) => ({ type: 'trials', config: mastery ? { mastery } : {} });
 
 t('défaut : 80 % sur 3 séances, sens min',
-  critereDe(objTrials(null)), { threshold: 80, needed: 3, unit: 'sessions', sens: 'min', pourcent: true });
+  critereDe(objTrials(null)), { threshold: 80, needed: 3, unit: 'sessions', sens: 'min', pourcent: true, explicite: false });
 t('les réglages personnalisés priment',
   critereDe(objTrials({ threshold: 90, sessions: 5 })),
-  { threshold: 90, needed: 5, unit: 'sessions', sens: 'min', pourcent: true });
+  { threshold: 90, needed: 5, unit: 'sessions', sens: 'min', pourcent: true, explicite: true });
 t('unit days est lu', critereDe(objTrials({ unit: 'days' })).unit, 'days');
 t('unit inconnu retombe sur le défaut du type', critereDe(objTrials({ unit: 'lunes' })).unit, 'sessions');
 t('sens max est lu', critereDe(objTrials({ sens: 'max' })).sens, 'max');
@@ -86,7 +86,7 @@ t('un nombre de séances à zéro est conservé',
    3 jours, pas à 80 % sur 3 séances. */
 t('Probe sans réglage : 100 % sur 3 jours',
   critereDe({ type: 'probe', config: {} }),
-  { threshold: 100, needed: 3, unit: 'days', sens: 'min', pourcent: true });
+  { threshold: 100, needed: 3, unit: 'days', sens: 'min', pourcent: true, explicite: false });
 t('le repli Probe est bien celui de DatABA',
   [CRITERE_DEFAUT_PROBE.threshold, CRITERE_DEFAUT_PROBE.sessions, CRITERE_DEFAUT_PROBE.unit, CRITERE_DEFAUT_PROBE.sens],
   [100, 3, 'days', 'min']);
@@ -209,6 +209,146 @@ t('un échec en dernier remet la suite à zéro',
   ], critMin), 0);
 t('série vide : aucune suite', suiteAuSeuil([], critMin), 0);
 t('sans critère : aucune suite', suiteAuSeuil(pbs, null), 0);
+
+/* ==================== Classification d'un objectif ====================
+   `analyserObjectif` est le point où le critère rencontre les cotations.
+   Extrait avec ses dépendances plutôt que reconstitué : c'est cette fonction
+   qui rend le verdict affiché dans les bilans. */
+
+const NOMS2 = [
+  'objectiveScoreValue', 'parseHM', 'partNiveauCible', 'valeurCotation',
+  'libelleSeuil', 'libelleCritere', 'analyserObjectif',
+];
+const code2 = [
+  `const TYPES_POURCENT = ${extraireLigne('TYPES_POURCENT')};`,
+  `const TYPES_CRITERE = ${extraireLigne('TYPES_CRITERE')};`,
+  `const CRITERE_DEFAUT = ${extraireLigne('CRITERE_DEFAUT')};`,
+  `const CRITERE_DEFAUT_PROBE = ${extraireLigne('CRITERE_DEFAUT_PROBE')};`,
+  `const PLATEAU_MIN_POINTS = ${extraireLigne('PLATEAU_MIN_POINTS')};`,
+  `const PLATEAU_ECART_MAX = ${extraireLigne('PLATEAU_ECART_MAX')};`,
+  `const DORMANT_JOURS = ${extraireLigne('DORMANT_JOURS')};`,
+  extraire('UNITES_BRUTES'),
+  NOMS.map(extraire).join('\n'),
+  NOMS2.map(extraire).join('\n'),
+  `return { ${NOMS2.join(', ')}, DORMANT_JOURS };`,
+].join('\n');
+// eslint-disable-next-line no-new-func
+const { valeurCotation, libelleSeuil, libelleCritere, analyserObjectif, DORMANT_JOURS } = new Function(code2)();
+
+const jour = (n) => new Date(Date.now() - n * 86400000).toISOString();
+const GUIDANCES = [{ code: 'I', independent: true }, { code: 'P', independent: false }];
+
+/* Construit une suite de séances cotant un seul objectif. `cotations` est un
+   tableau de { j, entry } : j jours avant aujourd'hui. */
+function analyser(obj, cotations) {
+  const seances = cotations.map((c, i) => ({
+    id: `s${i}`,
+    date: typeof c.j === 'string' ? c.j : jour(c.j),
+    source: 'T1',
+    objectiveSnapshot: { o1: obj },
+    selectedObjectives: { p1: ['o1'] },
+    data: { p1: { o1: c.entry } },
+  }));
+  return analyserObjectif(seances, { T1: 'p1' }, obj);
+}
+
+const essais = (n, codes) => ({ j: n, entry: { trials: codes } });
+const objTrialsStd = {
+  name: 'Désigner les couleurs', type: 'trials',
+  config: { guidanceSet: GUIDANCES, mastery: { threshold: 80, sessions: 3 } },
+};
+
+t('trois séances au seuil : acquis',
+  analyser(objTrialsStd, [essais(5, ['I', 'I']), essais(4, ['I', 'I']), essais(3, ['I', 'I'])]).etat, 'acquis');
+t('deux séances sur trois : bientôt',
+  analyser(objTrialsStd, [essais(5, ['P', 'P']), essais(4, ['I', 'I']), essais(3, ['I', 'I'])]).etat, 'bientot');
+t('aucune cotation : non acquis', analyser(objTrialsStd, []).etat, 'non_acquis');
+t('dernière cotation trop ancienne : dormant',
+  analyser(objTrialsStd, [essais(DORMANT_JOURS + 5, ['I', 'I'])]).etat, 'dormant');
+
+/* Le cas du dossier : un comportement problème compté à l'occurrence, avec un
+   seuil à ne pas dépasser. Avant correction, Manager le classait « suivi en
+   mesure » et n'appliquait jamais le critère — l'objectif atteint n'était
+   jamais reconnu. */
+const objOccMax = {
+  name: 'Cris pendant l atelier', type: 'occurrence',
+  config: { mastery: { threshold: 2, sessions: 3, sens: 'max' } },
+};
+const compte = (n, count) => ({ j: n, entry: { count } });
+
+t('comportement problème sous le seuil trois fois : acquis',
+  analyser(objOccMax, [compte(5, 1), compte(4, 2), compte(3, 0)]).etat, 'acquis');
+t('comportement problème au-dessus du seuil : en cours',
+  analyser(objOccMax, [compte(5, 8), compte(4, 7), compte(3, 9)]).etat, 'en_cours');
+t('une rechute en dernier suffit à défaire l acquisition',
+  analyser(objOccMax, [compte(5, 1), compte(4, 1), compte(3, 9)]).etat, 'en_cours');
+t('le seuil du comportement problème reste lisible',
+  libelleSeuil(analyser(objOccMax, [compte(3, 1)])), 'au plus 2 occurrences');
+
+/* Un comptage sans critère réglé sur la tablette reste un suivi en mesure :
+   on n'invente pas un verdict à partir du repli « 80 sur 3 séances ». */
+const objOccSansCritere = { name: 'Demandes spontanées', type: 'occurrence', config: {} };
+t('comptage sans critère : suivi en mesure',
+  analyser(objOccSansCritere, [compte(5, 3), compte(4, 4), compte(3, 5)]).etat, 'mesure');
+t('comptage sans critère : aucun seuil affiché',
+  libelleSeuil(analyser(objOccSansCritere, [compte(3, 5)])), null);
+
+/* Unité en jours : trois probes réussis le même jour ne valident pas. */
+const objProbe = { name: 'Reconnaît son prénom', type: 'probe', config: {} };
+const probe = (dateIso, v) => ({ j: dateIso, entry: { value: v } });
+const jourFixe = (n, h) => {
+  const d = new Date(Date.now() - n * 86400000);
+  d.setHours(h, 0, 0, 0);
+  return d.toISOString();
+};
+
+t('trois probes réussis le même jour : pas encore acquis',
+  analyser(objProbe, [probe(jourFixe(3, 9), 1), probe(jourFixe(3, 12), 1), probe(jourFixe(3, 16), 1)]).etat, 'en_cours');
+t('trois journées consécutives : acquis',
+  analyser(objProbe, [probe(jourFixe(5, 9), 1), probe(jourFixe(4, 9), 1), probe(jourFixe(3, 9), 1)]).etat, 'acquis');
+t('le critère d un Probe se dit en jours',
+  libelleCritere(analyser(objProbe, [probe(jourFixe(3, 9), 1)])), 'seuil 100 % sur 3 jours');
+
+/* Le mode Intervalle produit bien un pourcentage, mais objectiveScoreValue ne
+   sait pas le calculer : ses cotations n'entraient ni dans les points ni dans
+   les mesures, et l'objectif restait « non acquis » quoi qu'il arrive. */
+const objInterval = {
+  name: 'Temps passé stable', type: 'interval',
+  config: { intervalMinutes: 5, levels: [{ id: 'L1' }, { id: 'L2' }], targetLevelId: 'L1', mastery: { threshold: 80, sessions: 2 } },
+};
+const inter = (n, marks) => ({ j: n, entry: { marks } });
+const analyseInterval = analyser(objInterval, [
+  inter(4, { 1: 'L1', 2: 'L1', 3: 'L1', 4: 'L1' }),
+  inter(3, { 1: 'L1', 2: 'L1', 3: 'L1', 4: 'L2' }),
+]);
+t('les cotations Intervalle entrent dans les points', analyseInterval.points.map((p) => p.value), [100, 75]);
+t('une cotation Intervalle sous le seuil casse la suite', analyseInterval.etat, 'en_cours');
+t('deux cotations Intervalle au seuil : acquis',
+  analyser(objInterval, [
+    inter(4, { 1: 'L1', 2: 'L1', 3: 'L1', 4: 'L1' }),
+    inter(3, { 1: 'L1', 2: 'L1', 3: 'L1', 4: 'L1' }),
+  ]).etat, 'acquis');
+
+/* Plateau : réservé aux critères en pourcentage, et l'écart se calcule dans
+   le sens du critère. */
+const plateauPoints = [70, 65, 72, 68, 70, 66].map((v, i) => ({
+  j: 10 - i, entry: { trials: Array(100).fill(0).map((_, k) => (k < v ? 'I' : 'P')) },
+}));
+t('six cotations juste sous le seuil : plateau', analyser(objTrialsStd, plateauPoints).etat, 'plateau');
+t('un comptage n a pas de plateau',
+  analyser(objOccMax, [compte(10, 5), compte(9, 6), compte(8, 5), compte(7, 6), compte(6, 5), compte(5, 6)]).etat, 'en_cours');
+
+/* Un objectif coté hier en mesure brute n'est pas dormant parce que sa
+   dernière valeur en pourcentage remonte à un mois. */
+const objMixte = { name: 'Mixte', type: 'occurrence', config: {} };
+t('la dormance se lit sur la cotation la plus récente, toutes séries confondues',
+  analyser(objMixte, [compte(DORMANT_JOURS + 10, 3), compte(1, 4)]).etat, 'mesure');
+
+/* Un mode retiré ne reçoit pas de critère : ses cotations restent des mesures. */
+t('un chronomètre reste un suivi en mesure',
+  analyser({ name: 'Durée', type: 'timer', config: {} }, [{ j: 3, entry: { elapsedMs: 300000 } }]).etat, 'mesure');
+t('valeurCotation rend bien des minutes',
+  valeurCotation({ type: 'timer' }, { elapsedMs: 300000 }).unite, 'min');
 
 console.log(`\n${ok} réussis, ${ko} en échec`);
 process.exit(ko ? 1 : 0);

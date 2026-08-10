@@ -331,6 +331,11 @@ function critereDe(obj) {
     unit: m.unit === 'days' ? 'days' : (m.unit === 'sessions' ? 'sessions' : base.unit),
     sens: m.sens === 'max' ? 'max' : (m.sens === 'min' ? 'min' : base.sens),
     pourcent: TYPES_POURCENT.includes(obj.type),
+    /* Le critère a-t-il été réglé sur la tablette, ou vient-il du repli ?
+       La distinction ne sert pas au calcul mais à l'affichage : sur un
+       comptage brut, un seuil hérité du défaut ne veut rien dire et ne doit
+       pas produire de verdict (voir analyserObjectif). */
+    explicite: !!(obj.config && obj.config.mastery),
   };
 }
 
@@ -397,14 +402,19 @@ function analyserObjectif(seances, tableParSource, obj) {
     if (!oid || !((sess.selectedObjectives || {})[sid] || []).includes(oid)) return;
     const entry = (sess.data || {})[sid] && sess.data[sid][oid];
     const snap = sess.objectiveSnapshot[oid];
-    const v = objectiveScoreValue(snap, entry);
-    if (v != null) points.push({ date: sess.date, value: v, favorite: !!snap.favorite });
 
     /* Les mesures brutes vivent à part des points en pourcentage. Les mélanger
        fausserait toutes les moyennes d'autonomie du reste de l'application :
-       un compteur d'occurrences à 12 n'est pas un score de 12 %. */
+       un compteur d'occurrences à 12 n'est pas un score de 12 %. La bascule
+       se fait sur l'unité rendue par valeurCotation, et non sur le type :
+       c'est ce qui fait enfin entrer le mode Intervalle dans les points, lui
+       dont le score est bien un pourcentage mais qu'objectiveScoreValue ne
+       sait pas calculer — ses cotations n'apparaissaient nulle part. */
     const m = valeurCotation(snap, entry);
-    if (m && m.unite !== '%') {
+    if (!m) return;
+    if (m.unite === '%') {
+      points.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
+    } else {
       mesures.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
       unite = m.unite;
     }
@@ -413,46 +423,88 @@ function analyserObjectif(seances, tableParSource, obj) {
   mesures.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const crit = critereDe(obj);
+
+  /* Un seuil ne s'applique pas à n'importe quelle série. Sur un pourcentage,
+     il se lit directement ; sur un comptage d'occurrences, il porte sur le
+     nombre brut — c'est le cas du comportement problème, acquis quand il
+     passe *sous* le seuil. Mais on ne juge un comptage que si le critère a
+     été réglé sur la tablette : le repli « 80 sur 3 séances » n'a aucun sens
+     sur un compteur, et classerait « non acquis » un suivi que personne n'a
+     demandé de juger. */
+  const critere = crit && (crit.pourcent || crit.explicite) ? crit : null;
+  const serie = critere && !critere.pourcent ? mesures : points;
+
   const base = {
     points,
     mesures,
     unite,
-    threshold: crit ? crit.threshold : null,
-    needed: crit ? crit.needed : null,
+    threshold: critere ? critere.threshold : null,
+    needed: critere ? critere.needed : null,
+    unit: critere ? critere.unit : null,
+    sens: critere ? critere.sens : null,
+    critPourcent: critere ? critere.pourcent : null,
     prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
   };
 
-  /* Un objectif suivi en mesure brute — occurrences, minutes, latence — n'a
-     pas de pourcentage à comparer au seuil d'acquisition. Le classer « Non
-     acquis » comme avant était faux : il n'était pas raté, il n'était pas
-     mesuré sur cette échelle. Il garde donc son propre état, et seule
-     l'absence de cotation récente peut encore le rendre dormant. */
-  if (!points.length && mesures.length) {
-    const jours = Math.floor((Date.now() - new Date(mesures[mesures.length - 1].date)) / 86400000);
+  /* Dormance : lue sur la cotation la plus récente, quelle que soit la série
+     qui la porte. Un objectif coté hier en mesure brute n'est pas dormant
+     parce que sa dernière valeur en pourcentage remonte à un mois. */
+  const derniere = [points, mesures]
+    .filter((a) => a.length)
+    .map((a) => a[a.length - 1].date)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  const jours = derniere ? Math.floor((Date.now() - new Date(derniere)) / 86400000) : null;
+
+  /* Un objectif suivi en mesure brute — occurrences, minutes, latence — sans
+     critère applicable n'a rien à comparer à un seuil d'acquisition. Le
+     classer « Non acquis » comme avant était faux : il n'était pas raté, il
+     n'était pas mesuré sur cette échelle. Il garde donc son propre état, et
+     seule l'absence de cotation récente peut encore le rendre dormant. */
+  if (!serie.length) {
+    if (!points.length && !mesures.length) return { ...base, etat: 'non_acquis', streak: 0 };
     if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak: 0, jours };
     return { ...base, etat: 'mesure', streak: 0 };
   }
-  if (!points.length) return { ...base, etat: 'non_acquis', streak: 0 };
 
-  let streak = 0;
-  if (crit) {
-    for (let i = points.length - 1; i >= 0; i--) {
-      if (points[i].value >= crit.threshold) streak += 1;
-      else break;
-    }
-  }
-  const jours = Math.floor((Date.now() - new Date(points[points.length - 1].date)) / 86400000);
+  const streak = suiteAuSeuil(serie, critere);
+  /* La série effectivement jugée : regroupée par journée quand le critère
+     s'exprime en jours. C'est aussi celle que regarde le plateau. */
+  const serieJugee = serieCritere(serie, critere);
 
-  if (crit && streak >= crit.needed) return { ...base, etat: 'acquis', streak };
+  if (critere && streak >= critere.needed) return { ...base, etat: 'acquis', streak };
   if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak, jours };
-  if (crit && crit.needed > 1 && streak >= crit.needed - 1) return { ...base, etat: 'bientot', streak };
-  if (crit && points.length >= PLATEAU_MIN_POINTS) {
-    const cinq = points.slice(-5);
+  if (critere && critere.needed > 1 && streak >= critere.needed - 1) return { ...base, etat: 'bientot', streak };
+  /* Plateau : réservé aux critères en pourcentage. PLATEAU_ECART_MAX vaut
+     20 points de pourcentage — sur un comptage brut, « à 20 près » ne veut
+     rien dire. L'écart passe par ecartAuSeuil, sans quoi il serait calculé à
+     l'envers dès que le sens est 'max'. */
+  if (critere && critere.pourcent && serieJugee.length >= PLATEAU_MIN_POINTS) {
+    const cinq = serieJugee.slice(-5);
     const moyenne = Math.round(cinq.reduce((a, p) => a + p.value, 0) / cinq.length);
-    const ecart = crit.threshold - moyenne;
+    const ecart = ecartAuSeuil(moyenne, critere);
     if (ecart > 0 && ecart <= PLATEAU_ECART_MAX) return { ...base, etat: 'plateau', streak, moyenne };
   }
   return { ...base, etat: 'en_cours', streak };
+}
+
+/* Libellé du critère tel qu'il s'affiche sous un objectif. Le sens s'y lit :
+   « seuil 80 % » d'un côté, « au plus 2 occurrences » de l'autre. Écrire
+   « seuil 2 » sur un comportement problème laissait croire qu'il fallait
+   l'atteindre — c'est l'inverse qui est demandé. */
+function libelleSeuil(ligne) {
+  if (!ligne || ligne.threshold == null) return null;
+  const unite = ligne.critPourcent ? '%' : (ligne.unite || '');
+  const valeur = `${ligne.threshold}${unite ? ` ${unite}` : ''}`;
+  return ligne.sens === 'max' ? `au plus ${valeur}` : `seuil ${valeur}`;
+}
+/* Le critère complet, unité comprise : un Probe se valide sur des jours, pas
+   sur des séances, et l'écrire « sur 3 séances » était faux. */
+function libelleCritere(ligne) {
+  const seuil = libelleSeuil(ligne);
+  if (!seuil) return null;
+  const n = ligne.needed;
+  const pluriel = n > 1 ? 's' : '';
+  return `${seuil} sur ${n} ${ligne.unit === 'days' ? `jour${pluriel}` : `séance${pluriel}`}`;
 }
 
 function construireLignes(donnees) {
@@ -1490,7 +1542,7 @@ function LigneObjectifs({ lignes, donnees, onOuvrir }) {
             </div>
             <div className="text-xs" style={{ color: INK_SOFT }}>
               {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
-              {l.threshold != null && ` · seuil ${l.threshold} %`}
+              {libelleSeuil(l) && ` · ${libelleSeuil(l)}`}
               {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
               {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
             </div>
@@ -2444,11 +2496,12 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
               <>
                 {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''} de relevé
                 {moyenne != null && ` · ${moyenne} ${ligne.unite} par jour en moyenne`}
+                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
               </>
             ) : (
               <>
                 {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
-                {ligne.threshold != null && ` · seuil ${ligne.threshold} %`}
+                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
               </>
             )}
           </div>
@@ -2506,7 +2559,11 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
 
       {masque ? null : courbe.length ? (
         <div ref={refGraphe} data-no-swipe>
-          <Graphique points={courbe} style={style} seuil={enMesure ? null : ligne.threshold}
+          {/* Le seuil se trace aussi sur une série de mesures brutes, dès lors
+              qu'un critère s'y applique — c'est le cas du comptage
+              d'occurrences. `ligne.threshold` est déjà nul quand aucun
+              critère ne vaut pour cette série. */}
+          <Graphique points={courbe} style={style} seuil={ligne.threshold}
             hauteur={agrandi ? 460 : surligne ? 300 : 220}
             unite={enMesure ? ligne.unite : '%'} />
         </div>
@@ -3312,7 +3369,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                 <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
                   {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
-                  {l.threshold != null && ` · critère ${l.threshold} % sur ${l.needed} séances`}
+                  {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
                 </div>
 
                 {(() => {
