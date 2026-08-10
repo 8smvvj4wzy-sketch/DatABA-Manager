@@ -162,10 +162,13 @@ ombre au repos.
 Remplace la barre du bas de DatABA — pas de sens à porter la pilule flottante
 sur un écran large. Fond `nav-bg`, ligne active teintée `--accent-wash` avec
 texte `--accent` (pas un remplissage plein : c'est une liste, pas des
-onglets), repliable en rail d'icônes. Logo DatABA en tête, mention
-« MANAGER » qui distingue les deux applications au premier coup d'œil — le
-rôle que jouait l'accent bleu dans l'ancienne palette beige de Manager,
-abandonnée avec ce chantier.
+onglets), repliable en rail d'icônes. Logo `logo-databamanager.png` en tête —
+il porte déjà la mention « MANAGER » dans le fichier, pas de libellé texte
+en plus dessous. En rail replié, les trois pastilles du pied (thème,
+densité, déplier) s'empilent verticalement plutôt qu'en ligne : à 64px de
+large, une rangée de trois déborde du cadre (`overflow-hidden` sur l'aside)
+et rend le bouton qui déplie inatteignable — piège déjà rencontré, voir
+CLAUDE.md.
 
 ### Palette de commande (`PaletteCommande`)
 Seule fenêtre modale de Manager : `Ctrl`/`⌘+K` l'ouvre, `Échap` la ferme,
@@ -192,6 +195,15 @@ jamais mélanger (voir CLAUDE.md) :
   leurs valeurs claires sous `@media print`, avec `!important` — nécessaire
   puisque `:root[data-theme='dark']` a une spécificité plus élevée qu'un
   simple `:root`.
+- `print-color-adjust: exact` posé sur `*` sous `@media print` : sans lui,
+  les navigateurs n'impriment aucun fond ni couleur posés en style inline
+  (économie d'encre par défaut). Un remplissage `backgroundColor` — piste et
+  barre de `BarresCrise`, fond des badges d'état — sortait blanc sur blanc,
+  alors qu'un graphique Recharts voisin (SVG, `fill`) s'imprimait
+  correctement. Le symptôme (« seuls les nombres sortent, pas les barres »)
+  ne trahit pas la cause si on ne sait pas que les deux mécanismes de
+  couleur — fond CSS et remplissage SVG — ne se comportent pas pareil à
+  l'impression.
 
 ## Do's and Don'ts
 
