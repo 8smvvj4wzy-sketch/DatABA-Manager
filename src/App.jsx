@@ -121,6 +121,20 @@ const PLATEAU_MIN_POINTS = 6;
 const PLATEAU_ECART_MAX = 20;
 const DORMANT_JOURS = 21;
 
+/* Verrouillage automatique : 15 minutes d'inactivité OU d'absence de
+   l'onglet. Une simple perte de focus (bascule vers un autre onglet,
+   consultation d'un mail) ne verrouille plus tout de suite — c'était le
+   comportement hérité de la mise en veille des tablettes, inadapté à un
+   poste de bureau où changer d'onglet est un geste courant. */
+const DELAI_VERROUILLAGE = 15 * 60 * 1000;
+
+/* Décide si le retour sur l'onglet doit verrouiller la session, selon la
+   durée de l'absence. Fonction pure, testée hors du composant : c'est elle
+   qui porte la règle, pas le useEffect qui l'appelle. */
+function doitVerrouillerAuRetour(partiA, maintenant, delai) {
+  return partiA != null && (maintenant - partiA) >= delai;
+}
+
 /* ==================== Chiffrement ====================
    Fonctions identiques à celles de DatABA : même dérivation de clé, même
    schéma, pour lire ses fichiers sans rien adapter côté éducateur. */
@@ -4458,7 +4472,11 @@ function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donn
             </div>
           </>
         )}
-        <div className="flex items-center gap-1.5 px-0.5">
+        {/* Trois pastilles de 32px : à plat elles dépassent les 64px du rail
+            replié (overflow-hidden les coupe, et le bouton qui déplie —
+            le dernier — sort du cadre en entier, rendant le rail inaccessible
+            une fois refermé). Empilées, elles rentrent. */}
+        <div className={replie ? 'flex flex-col items-center gap-1.5' : 'flex items-center gap-1.5 px-0.5'}>
           <button
             onClick={onBasculerTheme}
             className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
@@ -4598,15 +4616,30 @@ function ManagerApp() {
   useEffect(() => {
     if (!securite.pinHash || verrouille || securite.disabled) return undefined;
     let minuteur = null;
-    const relancer = () => { clearTimeout(minuteur); minuteur = setTimeout(() => setVerrouille(true), 15 * 60 * 1000); };
-    const surVisibilite = () => { if (document.visibilityState === 'hidden') setVerrouille(true); };
+    /* Instant du passage en arrière-plan, hors état React : consulté au
+       retour seulement, pas de rendu à provoquer pour une simple bascule
+       d'onglet. */
+    let partiA = null;
+    const relancer = () => { clearTimeout(minuteur); minuteur = setTimeout(() => setVerrouille(true), DELAI_VERROUILLAGE); };
+    const surVisibilite = () => {
+      if (document.visibilityState === 'hidden') {
+        partiA = Date.now();
+        return;
+      }
+      // De retour sur l'onglet : verrouiller seulement si l'absence a dépassé
+      // le délai, sinon la session reprend et le compte à rebours repart.
+      if (doitVerrouillerAuRetour(partiA, Date.now(), DELAI_VERROUILLAGE)) setVerrouille(true);
+      else relancer();
+      partiA = null;
+    };
     document.addEventListener('visibilitychange', surVisibilite);
-    ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.addEventListener(e, relancer));
+    // wheel en plus : lire un long rapport à la molette ne doit pas verrouiller.
+    ['mousedown', 'keydown', 'touchstart', 'wheel'].forEach((e) => document.addEventListener(e, relancer, { passive: true }));
     relancer();
     return () => {
       clearTimeout(minuteur);
       document.removeEventListener('visibilitychange', surVisibilite);
-      ['mousedown', 'keydown', 'touchstart'].forEach((e) => document.removeEventListener(e, relancer));
+      ['mousedown', 'keydown', 'touchstart', 'wheel'].forEach((e) => document.removeEventListener(e, relancer));
     };
   }, [securite.pinHash, securite.disabled, verrouille]);
 
