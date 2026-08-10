@@ -76,6 +76,15 @@ button:not(:disabled) {
 .print-only { display: none; }
 
 @media print {
+  /* Les navigateurs n'impriment pas les fonds ni les couleurs par défaut
+     (économie d'encre) : un remplissage posé par `backgroundColor` en style
+     inline — la piste et la barre de BarresCrise, les badges d'état — sort
+     blanc sur blanc. Le SVG de Recharts n'est pas concerné (fill, pas un
+     fond CSS), d'où un graphique qui s'imprime correctement à côté de barres
+     qui disparaissent : le même écran a deux comportements différents sans
+     cette règle. */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+
   /* Un élément marqué no-print reste masqué — sauf s'il se trouve sur le
      chemin de la zone qu'on imprime. Tous les onglets sont enfermés dans un
      conteneur no-print : sans cette exception, imprimer une zone située à
