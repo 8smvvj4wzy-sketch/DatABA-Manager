@@ -133,6 +133,10 @@ const SECU_KEY = `${PREFIXE}securite`;
 
 const VIDE = {
   personnes: [], seances: [], crises: [], stabilite: [], sources: [],
+  /* Classes (ex-Groupes côté DatABA) : liste plate dédupliquée par id, comme
+     les personnes et les sources — une classe ne dépend pas de la tablette
+     qui l'a exportée. */
+  classes: [],
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -151,6 +155,7 @@ function normaliser(d) {
     ...d,
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
     stabilite: d.stabilite || [],
+    classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
     rapports: d.rapports || [],
@@ -184,17 +189,46 @@ function effacerDonneesManager() {
 }
 
 /* ==================== Import et fusion ==================== */
+/* Classes (alias de compatibilité `groupes`, même contenu, émis par les
+   tablettes pas encore mises à jour). Liste plate dédupliquée par id : une
+   classe ne dépend pas de la tablette qui l'a exportée, et la retrouver
+   d'une source à l'autre est ce qui permet de désambiguïser deux personnes
+   aux mêmes initiales. `suite` (v3, sans stabilite/suivi v4) ne concerne
+   pas ce lot mais suit le même principe de repli sur l'alias. */
+function fusionnerClasses(actuelles, backup) {
+  const brutes = backup.classes || backup.groupes || [];
+  const parId = new Map(actuelles.map((c) => [c.id, c]));
+  brutes.forEach((c) => {
+    if (!c || !c.id) return;
+    parId.set(c.id, { id: c.id, nom: c.name || c.nom || c.id });
+  });
+  return Array.from(parId.values());
+}
+
 function fusionnerImport(actuel, backup, nomSource) {
   const personnes = actuel.personnes.slice();
   const parInitiales = new Map(personnes.map((p) => [p.initials, p]));
+  /* Deux personnes de classes différentes peuvent porter les mêmes
+     initiales : la déduplication par initiales les fusionnerait en une
+     seule. La classe permet de le détecter — pas encore de le résoudre
+     (ça suppose de changer la clé d'identité des personnes dans toute
+     l'application) — donc on compte les collisions et on les signale à
+     l'import plutôt que de les laisser passer en silence. */
+  let collisionsInitiales = 0;
   (backup.students || []).forEach((s) => {
-    if (!parInitiales.has(s.initials)) {
-      const p = { id: s.id, initials: s.initials };
+    const classeId = s.classeId || s.groupeId || null;
+    const existante = parInitiales.get(s.initials);
+    if (!existante) {
+      const p = { id: s.id, initials: s.initials, classeId };
       personnes.push(p);
       parInitiales.set(s.initials, p);
+    } else {
+      if (existante.classeId == null && classeId != null) existante.classeId = classeId;
+      else if (classeId != null && existante.classeId != null && existante.classeId !== classeId) collisionsInitiales += 1;
     }
   });
 
+  const classes = fusionnerClasses(actuel.classes || [], backup);
   const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
   const ateliersSource = Object.fromEntries((backup.ateliers || []).map((a) => [a.id, a.name]));
   const intervenantsSource = Object.fromEntries((backup.intervenants || []).map((i) => [i.id, i.name]));
@@ -226,12 +260,14 @@ function fusionnerImport(actuel, backup, nomSource) {
   return {
     ...actuel,
     personnes,
+    classes,
     seances,
     crises,
     stabilite,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
@@ -643,6 +679,14 @@ const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
 const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
 const codeEflDe = (d, objectif) => ((d.codesEfl || {})[objectif] || '').trim();
+/* Nom de la classe d'une personne, ou null si elle n'en a pas (données
+   d'avant le rattrapage, ou tablette qui n'a pas encore migré Groupe → Classe). */
+function nomClasseDe(d, initiales) {
+  const p = (d.personnes || []).find((x) => x.initials === initiales);
+  if (!p || !p.classeId) return null;
+  const c = (d.classes || []).find((x) => x.id === p.classeId);
+  return c ? c.nom : null;
+}
 
 /* ==================== Navigation par balayage ====================
    Sur mobile, passer d'un onglet à l'autre au doigt. Les zones qui défilent
@@ -2582,6 +2626,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      l'autre, le nom est ce qui reste stable côté consolidation. */
   const [masques, setMasques] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
+  const [classeFiltre, setClasseFiltre] = useState('');
   const refObjectifs = useRef(null);
 
   /* Calculé avant le retour anticipé plus bas : l'effet qui suit doit être
@@ -2628,15 +2673,38 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
 
   const compte = (e) => siennes.filter((l) => l.etat === e).length;
 
+  /* Filtre par classe : la liste de personnes se resserre, mais un choix qui
+     viderait la liste (classe supprimée entre-temps, par exemple) est ignoré
+     plutôt que de laisser l'écran vide sans explication. */
+  const personnesFiltrees = classeFiltre
+    ? donnees.personnes.filter((p) => p.classeId === classeFiltre)
+    : donnees.personnes;
+  const listePersonnes = personnesFiltrees.length ? personnesFiltrees : donnees.personnes;
+
   return (
     <div>
+      {donnees.classes.length > 0 && (
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
+          <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
+            className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+            <option value="">Toutes</option>
+            {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+          </select>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 mb-3">
-        {donnees.personnes.map((p) => (
+        {listePersonnes.map((p) => (
           <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
             className="rounded-xl px-4 py-2.5 border font-semibold text-sm"
             style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? INK : BORDER,
               backgroundColor: personne === p.initials ? INK : 'transparent', color: personne === p.initials ? '#fff' : INK_SOFT }}>
             {nomAffiche(donnees, p.initials)}
+            {nomClasseDe(donnees, p.initials) && (
+              <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? '#fff' : INK_SOFT, opacity: 0.75 }}>
+                · {nomClasseDe(donnees, p.initials)}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -4238,7 +4306,7 @@ function ManagerApp() {
   function purger(transformer) {
     setDonnees((d) => {
       const suite = transformer(d);
-      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined };
+      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined, collisionsInitiales: undefined };
     });
     notify('Données purgées');
   }
@@ -4249,6 +4317,10 @@ function ManagerApp() {
       notify(
         `${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`
         + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de stabilité` : '')
+        /* Deux personnes de classes différentes, mêmes initiales : la fusion
+           les a réunies en une seule sans pouvoir les distinguer. Signalé
+           plutôt que résolu — voir fusionnerImport. */
+        + (fusion.collisionsInitiales ? ` · ⚠ ${fusion.collisionsInitiales} collision(s) d'initiales entre classes, à vérifier` : '')
       );
     }
     setTab('bord');
