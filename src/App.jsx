@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
-  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers,
+  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -4342,6 +4342,25 @@ class ErrorBoundary extends React.Component {
 
 /* ==================== Application ==================== */
 function ManagerApp() {
+  /* Thème clair/sombre. Posé une première fois par le script bloquant de
+     index.html (attribut data-theme sur <html>, avant le premier rendu) ;
+     l'état ici ne fait que le lire et le faire suivre au bouton. Préférence
+     non sensible : clé aba-cadre: en clair, hors du chiffrement — même
+     logique que côté DatABA. */
+  const [theme, setThemeState] = useState(() => {
+    if (typeof document === 'undefined') return 'light';
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  });
+  const basculerTheme = () => {
+    setThemeState((t) => {
+      const suivant = t === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', suivant);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', suivant === 'dark' ? '#0A1120' : '#F3F6FB');
+      try { window.localStorage.setItem(`${PREFIXE}theme`, suivant); } catch (e) {}
+      return suivant;
+    });
+  };
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
@@ -4639,9 +4658,20 @@ function ManagerApp() {
       >
         <div className="flex items-baseline justify-between gap-4 mb-4 no-print">
           <h1 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
-          <span className="text-xs" style={{ color: INK_SOFT }}>
-            {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs" style={{ color: INK_SOFT }}>
+              {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
+            </span>
+            <button
+              onClick={basculerTheme}
+              className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+              style={{ backgroundColor: PAPER, color: INK_SOFT }}
+              aria-label={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
+              title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'}
+            >
+              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap gap-1.5 mb-6 no-print">
