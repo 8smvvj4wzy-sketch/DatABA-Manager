@@ -2,10 +2,18 @@
 # Vérification avant livraison — à lancer depuis la racine d'un dépôt.
 #   usage : ./verifier.sh
 #
-# Trois contrôles, dans l'ordre où ils attrapent le plus de choses :
+# Contrôles, dans l'ordre où ils attrapent le plus de choses. La numérotation
+# suit celle de DatABA (verifier.sh) pour les contrôles communs aux deux
+# dépôts — 2 ter (finalizeSession) n'a pas d'équivalent ici, tabette
+# uniquement, donc pas de trou comblé artificiellement :
 #   1. syntaxe et références (tsc en mode JS permissif — le projet n'est pas
 #      en TypeScript, tsc ne sert ici que de vérificateur)
 #   2. doublons de premier niveau (function, const) ET blocs de rendu dupliqués
+#   2 bis. hooks appelés après un retour anticipé
+#   2 quater. renommages laissés incomplets (vocabulaire résiduel)
+#   2 quinquies. imports dupliqués
+#   2 sexies. couleur hexadécimale hors palette catégorielle
+#   2 septies. localStorage touché sans passer par le préfixe aba-cadre:
 #   3. suite de tests Node autonome
 
 set -u
@@ -132,6 +140,98 @@ if [ -n "$FAUTIFS" ]; then
   ECHECS=$((ECHECS + 1))
 else
   echo "  ✓ hooks appelés inconditionnellement"
+fi
+
+# ── 2 quater. Renommages laissés incomplets ────────────────────────────
+# Un renommage à l'échelle du fichier laisse facilement une trace : un
+# libellé, un commentaire, un nom de fonction oublié pendant qu'un autre a
+# bien été renommé. Registre des renommages déjà vérifiés, avec leurs
+# exceptions légitimes — même principe que côté DatABA.
+echo
+echo "── 2 quater. Renommages laissés incomplets ──"
+RENOMMAGES=0
+
+# Groupe → Classe (lot classes du rattrapage). Seule exception légitime : le
+# commentaire qui documente la migration elle-même sur nomClasseDe.
+RESIDUS_GROUPE=$(grep -n '\bGroupe\b' src/App.jsx | grep -v 'migré Groupe → Classe')
+if [ -n "$RESIDUS_GROUPE" ]; then
+  echo "  ✗ vocabulaire « Groupe » résiduel (Classe attendu) :"
+  echo "$RESIDUS_GROUPE" | sed 's/^/      /' | head -10
+  RENOMMAGES=1
+fi
+
+[ "$RENOMMAGES" -eq 0 ] && echo "  ✓ aucun résidu détecté" || ECHECS=$((ECHECS + 1))
+
+# ── 2 quinquies. Imports dupliqués ─────────────────────────────────────
+# Un identifiant importé deux fois (copier-coller d'une icône déjà présente
+# plus haut dans la liste, le plus souvent) est une erreur de syntaxe pour
+# le bundler (Babel/esbuild refusent la double déclaration), mais tsc en
+# mode noResolve ne la voit pas. Porté de DatABA verifier.sh à l'identique.
+echo
+echo "── 2 quinquies. Imports dupliqués ──"
+TMP_IMPORTS="$(mktemp)"
+awk '
+  /^import / { buf=""; grab=1 }
+  grab { buf = buf " " $0 }
+  grab && /from[ ]+.*;[ ]*$/ { print buf; grab=0 }
+' src/App.jsx > "$TMP_IMPORTS"
+IMPORTS_DOUBLONS=$(sed -E "s/^ *import //; s/from[ ]+'[^']*';?//; s/[{}]//g" "$TMP_IMPORTS" \
+  | tr ',' '\n' \
+  | awk '{
+      line = $0
+      sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+      if (line ~ / as /) { sub(/.* as /, "", line) }
+      gsub(/\*/, "", line)
+      sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+      if (line != "") print line
+    }' \
+  | sort | uniq -d)
+rm -f "$TMP_IMPORTS"
+if [ -n "$IMPORTS_DOUBLONS" ]; then
+  echo "  ✗ identifiant importé plusieurs fois : $(echo "$IMPORTS_DOUBLONS" | tr '\n' ' ')"
+  ECHECS=$((ECHECS + 1))
+else
+  echo "  ✓ aucun import dupliqué"
+fi
+
+# ── 2 sexies. Couleur hexadécimale hors palette catégorielle ───────────
+# C'est la faute qui casse le thème sombre sans prévenir tant qu'on
+# développe en clair : un hex écrit en dur ne suit pas la bascule
+# [data-theme]. Seules exceptions légitimes : le bloc de constantes CAT_*
+# (fixe entre les deux thèmes, par construction) et le hex transmis à
+# `meta.setAttribute('content', …)` dans basculerTheme — un attribut DOM
+# littéral, pas une couleur d'interface, qui ne peut pas passer par un
+# token CSS.
+echo
+echo "── 2 sexies. Couleur hexadécimale hors palette catégorielle ──"
+HEX_HORS_PALETTE=$(grep -n '#[0-9A-Fa-f]\{6\}' src/App.jsx \
+  | grep -v "^[0-9]*:const CAT_" \
+  | grep -v "meta.setAttribute('content'")
+if [ -n "$HEX_HORS_PALETTE" ]; then
+  echo "  ✗ couleur en dur hors palette catégorielle :"
+  echo "$HEX_HORS_PALETTE" | sed 's/^/      /' | head -10
+  ECHECS=$((ECHECS + 1))
+else
+  echo "  ✓ aucune couleur en dur hors palette"
+fi
+
+# ── 2 septies. localStorage sans le préfixe aba-cadre: ─────────────────
+# Les deux applications DatABA partagent le même localStorage sous la même
+# adresse github.io : un localStorage.clear() global ou une clé posée sans
+# le préfixe aba-cadre: a déjà effacé des données de production. Toute
+# clé légitime passe par STORE_KEY, SECU_KEY ou un gabarit `${PREFIXE}…` ;
+# `removeItem(k)` est la seule exception, k venant d'une boucle déjà
+# filtrée sur le préfixe (effacerDonneesManager).
+echo
+echo "── 2 septies. localStorage sans le préfixe aba-cadre: ──"
+LOCALSTORAGE_SANS_PREFIXE=$(grep -n "localStorage\.\(setItem\|getItem\|removeItem\)(" src/App.jsx \
+  | grep -v "STORE_KEY\|SECU_KEY\|PREFIXE\|removeItem(k)")
+if [ -n "$LOCALSTORAGE_SANS_PREFIXE" ]; then
+  echo "  ✗ localStorage touché sans passer par le préfixe aba-cadre: :"
+  echo "$LOCALSTORAGE_SANS_PREFIXE" | sed 's/^/      /' | head -10
+  ECHECS=$((ECHECS + 1))
+else
+  echo "  ✓ tout accès localStorage passe par le préfixe"
 fi
 
 # ── 3. Tests ───────────────────────────────────────────────────────────
