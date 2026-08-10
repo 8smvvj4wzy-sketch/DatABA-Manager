@@ -4437,10 +4437,12 @@ function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donn
           <div className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-sm"
             style={{ fontFamily: F_DISPLAY, backgroundColor: CARD, color: INK_SOFT }}>DM</div>
         ) : (
-          <>
-            <img src={`${import.meta.env.BASE_URL}logo-databa.png`} alt="DatABA" className="w-full max-w-[160px] h-auto" />
-            <div className="text-xs font-semibold tracking-wide mt-1" style={{ fontFamily: F_DISPLAY, color: INK_SOFT }}>MANAGER</div>
-          </>
+          /* Le fichier porte déjà la mention « MANAGER » (bandeau rouge sous
+             le mot-symbole) : pas de libellé texte en plus en dessous, ce
+             serait la répéter. Ratio 2078×930 (≈2.23), plus haut à largeur
+             égale que l'ancien logo DatABA (≈4.5) — largeur resserrée en
+             conséquence pour garder un en-tête de rail raisonnable. */
+          <img src={`${import.meta.env.BASE_URL}logo-databamanager.png`} alt="DatABA Manager" className="w-full max-w-[150px] h-auto" />
         )}
       </div>
 
