@@ -13,31 +13,80 @@ import {
 } from 'recharts';
 
 /* ==================== Identité visuelle ====================
-   Reprise de DatABA, avec le bleu en couleur d'accent pour distinguer les
-   deux applications au premier coup d'œil. */
-const PAPER = '#FAF7F0';
-const CARD = '#FFFFFF';
-const INK = '#1A345C';
-const INK_SOFT = '#6B7280';
-const BORDER = '#E3DDD0';
-const ACQUIS = '#0F8B6C';
-const EN_COURS = '#D69A2D';
-const NON_ACQUIS = '#A8402F';
-const CRISE = '#A8402F';
+   Tokens de src/index.css : ils changent avec le thème choisi (attribut
+   data-theme sur <html>, posé avant le premier rendu par le script de
+   index.html). Reprise de DatABA, bleu en accent — c'est ce qui distingue
+   les deux applications au premier coup d'œil, à la place que jouait le
+   bleu dans l'ancienne palette beige de Manager. */
+const PAPER = 'var(--paper)';
+const CARD = 'var(--card)';
+const INK = 'var(--ink)';
+const INK_SOFT = 'var(--ink-soft)';
+const BORDER = 'var(--border)';
+const ACCENT = 'var(--accent)';
+const ACCENT_INK = 'var(--accent-ink)';
+const ACCENT_WASH = 'var(--accent-wash)';
+/* Alerte : crises, mais aussi erreurs et actions destructrices — un seul
+   token d'alerte réactif au thème, plutôt qu'un rouge générique figé. Même
+   convention que CRISIS côté DatABA. */
+const CRISE = 'var(--crisis)';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
 
+/* ==================== Palette catégorielle ====================
+   Fixe entre les deux thèmes — elle code de l'information, pas une
+   ambiance — choisie pour rester lisible sur clair comme sur sombre.
+   Identique à celle de DatABA (src/App.jsx L17-50). Jamais l'accent : Règle
+   de l'Accent Seul. */
+const CAT_TEAL = '#00A870';
+const CAT_INDIGO = '#3B5BDB';
+const CAT_AMBER = '#FF8A3D';
+const CAT_CORAL = '#FF4D6D';
+const CAT_VIOLET = '#7C5CFF';
+const CAT_CYAN = '#00B8D9';
+const CAT_LILAC = '#A78BFA';
+const CAT_SLATE = '#64748B';
+
+/* Contraste garanti sur un fond de couleur fixe (catégorielle), calculé par
+   luminance relative plutôt que supposé blanc — un badge ambre ou lilas ne
+   se lit pas de la même façon qu'un badge indigo. Porté de texteLisibleSur
+   côté DatABA (src/App.jsx:57). Ne s'applique qu'à un hex réel : jamais à un
+   token `var(--…)`, dont le contraste est déjà résolu par sa propre paire
+   (ex. ACCENT / ACCENT_INK). */
+function texteLisibleSur(hex) {
+  const c = String(hex).replace('#', '');
+  const r = parseInt(c.substring(0, 2), 16) / 255;
+  const g = parseInt(c.substring(2, 4), 16) / 255;
+  const b = parseInt(c.substring(4, 6), 16) / 255;
+  const lin = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const contrasteBlanc = 1.05 / (L + 0.05);
+  const contrasteNoir = (L + 0.05) / 0.05;
+  return contrasteBlanc >= contrasteNoir ? '#fff' : '#000';
+}
+
+/* Réutilisées pour les comparaisons de performance générales (tendances,
+   seuils 60/80 %) en plus des états d'acquisition eux-mêmes : bon/moyen/
+   mauvais partagent la teinte du badge d'état correspondant. */
+const ACQUIS = CAT_TEAL;
+const EN_COURS = CAT_AMBER;
+const NON_ACQUIS = CAT_CORAL;
+
+/* Correspondance état → palette catégorielle proposée par le dossier de
+   passation : acquis/teal, en_cours/indigo, plateau/ambre, non_acquis/
+   corail, dormant/ardoise, mesure/lilas. « bientôt acquis » n'a pas
+   d'équivalent DatABA — cyan, proche du teal sans s'y confondre. */
 const ETATS = {
-  acquis: { label: 'Acquis', court: 'Acquis', color: ACQUIS },
-  bientot: { label: 'Bientôt acquis', court: 'Bientôt', color: '#3F9E7C' },
-  plateau: { label: 'En plateau', court: 'Plateau', color: EN_COURS },
-  en_cours: { label: "En cours d'acquisition", court: 'En cours', color: '#5B8AC4' },
-  dormant: { label: 'Sans cotation récente', court: 'Dormant', color: INK_SOFT },
+  acquis: { label: 'Acquis', court: 'Acquis', color: CAT_TEAL },
+  bientot: { label: 'Bientôt acquis', court: 'Bientôt', color: CAT_CYAN },
+  plateau: { label: 'En plateau', court: 'Plateau', color: CAT_AMBER },
+  en_cours: { label: "En cours d'acquisition", court: 'En cours', color: CAT_INDIGO },
+  dormant: { label: 'Sans cotation récente', court: 'Dormant', color: CAT_SLATE },
   /* Suivi en mesure brute (occurrences, minutes, latence) : aucun seuil
      d'acquisition en pourcentage ne s'y applique. */
-  mesure: { label: 'Suivi en mesure', court: 'Mesure', color: '#7A6FA8' },
-  non_acquis: { label: 'Non acquis', court: 'Non acquis', color: NON_ACQUIS },
+  mesure: { label: 'Suivi en mesure', court: 'Mesure', color: CAT_LILAC },
+  non_acquis: { label: 'Non acquis', court: 'Non acquis', color: CAT_CORAL },
 };
 /* Le rapport transmis ne retient que trois états : les nuances de travail
    interne n'ont pas leur place dans un document officiel. */
@@ -53,11 +102,12 @@ const ETAT_RAPPORT = {
   non_acquis: 'Non acquis',
 };
 
-/* Intensité ressentie, telle que saisie dans DatABA */
+/* Intensité ressentie, telle que saisie dans DatABA — même convention
+   traffic-light que ACQUIS/EN_COURS/NON_ACQUIS. */
 const INTENSITES = {
-  1: { label: 'Légère', color: '#7A9A3A' },
-  2: { label: 'Modérée', color: '#D69A2D' },
-  3: { label: 'Forte', color: '#A8402F' },
+  1: { label: 'Légère', color: CAT_TEAL },
+  2: { label: 'Modérée', color: CAT_AMBER },
+  3: { label: 'Forte', color: CAT_CORAL },
 };
 
 const PLATEAU_MIN_POINTS = 6;
@@ -752,7 +802,7 @@ const CRITERES_STABILITE_V3 = [
   { k: 'stable', l: 'Stable', color: ACQUIS },
   { k: 'pre-crise', l: 'Pré-crise', color: EN_COURS },
   { k: 'crise', l: 'Crise', color: NON_ACQUIS },
-  { k: 'post-crise', l: 'Post-crise', color: '#5B8AC4' },
+  { k: 'post-crise', l: 'Post-crise', color: CAT_INDIGO },
 ];
 
 /* L'axe et les critères d'un relevé, quelle que soit sa provenance : un
@@ -859,7 +909,7 @@ function useBalayage(onGauche, onDroite) {
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
   const base = 'rounded-xl px-4 py-2.5 font-medium text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 disabled:opacity-40';
   const styles = variant === 'solid'
-    ? { backgroundColor: INK, color: '#fff' }
+    ? { backgroundColor: ACCENT, color: ACCENT_INK }
     : variant === 'outline'
     ? { backgroundColor: 'transparent', color: INK, border: `1px solid ${BORDER}` }
     : { backgroundColor: 'transparent', color: INK_SOFT };
@@ -875,7 +925,7 @@ function Card({ children, className = '', style }) {
 function Chip({ label, on, onClick }) {
   return (
     <button onClick={onClick} className="rounded-lg px-3 py-1.5 text-xs border"
-      style={{ borderColor: on ? INK : BORDER, backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
+      style={{ borderColor: on ? ACCENT : BORDER, backgroundColor: on ? ACCENT : 'transparent', color: on ? ACCENT_INK : INK_SOFT }}>
       {label}
     </button>
   );
@@ -1321,7 +1371,7 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
       <YAxis domain={enPourcent ? [0, 100] : [0, 'auto']} allowDecimals={!enPourcent}
         tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
         formatter={(v) => [`${v} ${unite}`, etiquette]} />
       {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
     </>
@@ -1379,7 +1429,7 @@ function RadarObjectifs({ lignes, hauteur = 320 }) {
           <PolarAngleAxis dataKey="objectif" tick={{ fontSize: 10, fill: INK_SOFT }} />
           <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: INK_SOFT }} />
           <Radar name="Dernier résultat" dataKey="niveau" stroke={INK} fill={INK} fillOpacity={0.25} isAnimationActive={false} />
-          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
             formatter={(v, n, p) => [`${v} % · ${p.payload.seances} séances`, 'Dernier résultat']} />
         </RadarChart>
       </ResponsiveContainer>
@@ -1467,7 +1517,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
               le dossier partagé. <strong>DatABA n'est pas touchée.</strong>
             </p>
             <div className="flex gap-2">
-              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
+              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS, color: texteLisibleSur(NON_ACQUIS) }}>
                 Effacer et recommencer
               </Btn>
               <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
@@ -1688,7 +1738,7 @@ function LigneObjectifs({ lignes, donnees, onOuvrir }) {
           </div>
           <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
           <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
-            style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+            style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color), fontFamily: F_DISPLAY }}>
             {ETATS[l.etat].court}
           </span>
         </button>
@@ -1968,7 +2018,7 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
           <div className="text-sm font-medium">
             {new Date(seance.date).toLocaleDateString('fr-FR')}
             {seance.doubleCotation && (
-              <span className="text-xs ml-2 px-1.5 py-0.5 rounded" style={{ backgroundColor: INK, color: '#fff' }}>double cotation</span>
+              <span className="text-xs ml-2 px-1.5 py-0.5 rounded border" style={{ borderColor: BORDER, color: INK_SOFT }}>double cotation</span>
             )}
           </div>
           <div className="text-xs break-words" style={{ color: INK_SOFT }}>
@@ -2057,8 +2107,9 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
    « non renseigné » masquerait le fait qu'il manque de la saisie. */
 const JOURS_SEMAINE = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
 
-/* Palette des séries : assez contrastée pour distinguer six segments empilés */
-const PALETTE_SERIES = ['#1A345C', '#A8402F', '#D69A2D', '#0F8B6C', '#7A6A9A', '#2E6E8E', '#8A8F84'];
+/* Palette des séries : la catégorielle, comme côté DatABA (« les séries
+   prennent la palette catégorielle »). Fixe entre les deux thèmes. */
+const PALETTE_SERIES = [CAT_INDIGO, CAT_CORAL, CAT_AMBER, CAT_TEAL, CAT_VIOLET, CAT_CYAN, CAT_LILAC, CAT_SLATE];
 const SERIES_MAX = 6;   // au-delà, le graphique devient illisible
 
 /* Comment découper les crises en séries. Certaines dimensions admettent
@@ -2261,7 +2312,7 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
                       <CartesianGrid stroke={BORDER} vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                       <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       {chrono.series.map((nom, i) => (
                         <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
@@ -2273,7 +2324,7 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
                       <CartesianGrid stroke={BORDER} vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                       <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       {chrono.series.map((nom, i) => (
                         <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
@@ -2583,7 +2634,7 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
           <ComposedChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
             <XAxis dataKey="label" tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
             <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-            <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+            <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
             <Bar dataKey="Crises" fill={CRISE} radius={[3, 3, 0, 0]} isAnimationActive={false} />
             {tendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
           </ComposedChart>
@@ -2655,7 +2706,7 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
           </div>
         </div>
         <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
-          style={{ backgroundColor: ETATS[ligne.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+          style={{ backgroundColor: ETATS[ligne.etat].color, color: texteLisibleSur(ETATS[ligne.etat].color), fontFamily: F_DISPLAY }}>
           {ETATS[ligne.etat].label}
         </span>
       </div>
@@ -2801,11 +2852,11 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         {listePersonnes.map((p) => (
           <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
             className="rounded-xl px-4 py-2.5 border font-semibold text-sm"
-            style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? INK : BORDER,
-              backgroundColor: personne === p.initials ? INK : 'transparent', color: personne === p.initials ? '#fff' : INK_SOFT }}>
+            style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
+              backgroundColor: personne === p.initials ? ACCENT : 'transparent', color: personne === p.initials ? ACCENT_INK : INK_SOFT }}>
             {nomAffiche(donnees, p.initials)}
             {nomClasseDe(donnees, p.initials) && (
-              <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? '#fff' : INK_SOFT, opacity: 0.75 }}>
+              <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? ACCENT_INK : INK_SOFT, opacity: 0.75 }}>
                 · {nomClasseDe(donnees, p.initials)}
               </span>
             )}
@@ -2827,7 +2878,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           return (
             <button key={v.k} onClick={() => setVue(v.k)}
               className="rounded-lg px-3 py-1.5 text-xs border flex items-center gap-1.5"
-              style={{ borderColor: vue === v.k ? INK : BORDER, backgroundColor: vue === v.k ? INK : 'transparent', color: vue === v.k ? '#fff' : INK_SOFT }}>
+              style={{ borderColor: vue === v.k ? ACCENT : BORDER, backgroundColor: vue === v.k ? ACCENT : 'transparent', color: vue === v.k ? ACCENT_INK : INK_SOFT }}>
               <Icone size={13} /> {v.l}
             </button>
           );
@@ -2918,7 +2969,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
             {siennes.map((l, i) => (
               <div key={i} className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2" style={{ backgroundColor: PAPER }}>
                 <span className="text-sm min-w-0 break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</span>
-                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: '#fff' }}>
+                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color) }}>
                   {ETATS[l.etat].court}
                 </span>
               </div>
@@ -2949,7 +3000,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <div className="text-xs flex items-center gap-2" style={{ color: INK_SOFT }}>
                     <span>{new Date(c.date).toLocaleDateString('fr-FR')} · {Math.round((c.durationMs || 0) / 60000)} min</span>
                     {c.intensite && (
-                      <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: INTENSITES[c.intensite].color, color: '#fff' }}>
+                      <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: INTENSITES[c.intensite].color, color: texteLisibleSur(INTENSITES[c.intensite].color) }}>
                         {c.intensite} · {INTENSITES[c.intensite].label}
                       </span>
                     )}
@@ -3064,7 +3115,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                     <CartesianGrid stroke={BORDER} vertical={false} />
                     <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                     <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <Bar dataKey="Activité" stackId="t" fill={INK} isAnimationActive={false} />
                     <Bar dataKey="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
@@ -3089,7 +3140,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                   <YAxis yAxisId="g" domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
                   <YAxis yAxisId="d" orientation="right" allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={30} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Bar yAxisId="d" dataKey="crises" name="Crises" fill={CRISE} radius={[4, 4, 0, 0]} isAnimationActive={false} />
                   <Line yAxisId="g" type="monotone" dataKey="autonomie" name="Autonomie (%)" stroke={ACQUIS} strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
@@ -3301,7 +3352,10 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
                       return (
                         <td key={c} className="px-2 py-1.5 text-right whitespace-nowrap"
                           style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO,
-                            backgroundColor: v == null ? 'transparent' : `rgba(26, 52, 92, ${0.05 + intensite * 0.25})` }}>
+                            /* Teinte neutre (l'encre du thème, pas l'accent — une intensité de
+                               données n'est pas une sélection) à opacité variable : color-mix plutôt
+                               qu'un hex + alpha concaténé, invalide sur un token `var(--…)`. */
+                            backgroundColor: v == null ? 'transparent' : `color-mix(in srgb, ${INK} ${Math.round((0.05 + intensite * 0.25) * 100)}%, transparent)` }}>
                           {v == null ? '' : `${v}${mesure.suffixe || ''}`}
                         </td>
                       );
@@ -3478,7 +3532,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                 <div key={l.objectif} className="flex items-center gap-2 rounded-lg px-2.5 py-2" style={{ backgroundColor: PAPER }}>
                   <button onClick={() => basculer(l.objectif)}
                     className="w-5 h-5 rounded border flex items-center justify-center shrink-0 text-xs"
-                    style={{ borderColor: coche ? INK : BORDER, backgroundColor: coche ? INK : 'transparent', color: '#fff' }}>
+                    style={{ borderColor: coche ? ACCENT : BORDER, backgroundColor: coche ? ACCENT : 'transparent', color: ACCENT_INK }}>
                     {coche ? '✓' : ''}
                   </button>
                   <input value={(donnees.codesEfl || {})[l.objectif] || ''}
@@ -3765,7 +3819,7 @@ function LecteurExcel() {
       </p>
       <input type="file" accept=".xlsx,.xls" onChange={(e) => ouvrir(e.target.files && e.target.files[0])}
         className="w-full text-sm mb-2" />
-      {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+      {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
 
       {classeur && (
         <>
@@ -4041,7 +4095,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
             </Btn>
           </>
         )}
-        {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+        {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
         {donnees.sources.length > 0 && (
           <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
         )}
@@ -4681,8 +4735,8 @@ function ManagerApp() {
             return (
               <button key={t.k} onClick={() => setTab(t.k)}
                 className="flex-1 min-w-[110px] rounded-xl px-3 py-2.5 text-sm font-medium border flex items-center justify-center gap-1.5"
-                style={{ fontFamily: F_DISPLAY, borderColor: on ? INK : BORDER,
-                  backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
+                style={{ fontFamily: F_DISPLAY, borderColor: on ? ACCENT : BORDER,
+                  backgroundColor: on ? ACCENT : 'transparent', color: on ? ACCENT_INK : INK_SOFT }}>
                 <Icone size={15} /> <span className="hidden sm:inline">{t.l}</span>
               </button>
             );
@@ -4751,7 +4805,7 @@ function ManagerApp() {
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm text-white shadow-lg no-print" style={{ backgroundColor: INK }}>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm shadow-lg no-print" style={{ backgroundColor: ACCENT, color: ACCENT_INK }}>
           {toast}
         </div>
       )}

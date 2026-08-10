@@ -40,7 +40,7 @@ const NOMS = [
   'axeDe', 'metaCritereSuivi', 'axeEtCritereDuReleve', 'suiviDePersonne',
 ];
 const code = [
-  `const ACQUIS = '#0F8B6C'; const EN_COURS = '#D69A2D'; const NON_ACQUIS = '#A8402F'; const INK_SOFT = '#6B7280';`,
+  `const ACQUIS = '#0F8B6C'; const EN_COURS = '#D69A2D'; const NON_ACQUIS = '#A8402F'; const INK_SOFT = '#6B7280'; const CAT_INDIGO = '#3B5BDB';`,
   `const CRITERE_INCONNU_SUIVI = ${extraireLigne('CRITERE_INCONNU_SUIVI')};`,
   extraire('VIDE'),
   extraire('CRITERES_STABILITE_V3'),
