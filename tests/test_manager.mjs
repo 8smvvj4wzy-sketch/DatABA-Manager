@@ -1,33 +1,10 @@
 let ok=0,ko=0;const t=(n,a,e)=>{const p=JSON.stringify(a)===JSON.stringify(e);console.log(`${p?'OK  ':'ECHEC'} ${n}`+(p?'':` → ${JSON.stringify(a)}`));p?ok++:ko++;};
 
-/* --- Classification à six états --- */
-const PLATEAU_MIN=6, PLATEAU_ECART=20, DORMANT=21;
-function classer(points, crit){
-  if(!points.length) return 'non_acquis';
-  let streak=0;
-  if(crit){for(let i=points.length-1;i>=0;i--){if(points[i].value>=crit.threshold)streak++;else break;}}
-  const jours=Math.floor((Date.now()-new Date(points[points.length-1].date))/86400000);
-  if(crit&&streak>=crit.needed)return 'acquis';
-  if(jours>=DORMANT)return 'dormant';
-  if(crit&&crit.needed>1&&streak>=crit.needed-1)return 'bientot';
-  if(crit&&points.length>=PLATEAU_MIN){
-    const c=points.slice(-5);const moy=Math.round(c.reduce((a,p)=>a+p.value,0)/c.length);
-    const ecart=crit.threshold-moy;if(ecart>0&&ecart<=PLATEAU_ECART)return 'plateau';}
-  return 'en_cours';
-}
-const j=n=>new Date(Date.now()-n*86400000).toISOString();
-const crit={threshold:80,needed:3};
-
-t('acquis', classer([{date:j(3),value:85},{date:j(2),value:90},{date:j(1),value:82}],crit), 'acquis');
-t('bientôt acquis', classer([{date:j(3),value:40},{date:j(2),value:90},{date:j(1),value:82}],crit), 'bientot');
-t('plateau juste sous le seuil',
-  classer([{date:j(6),value:70},{date:j(5),value:65},{date:j(4),value:72},{date:j(3),value:68},{date:j(2),value:70},{date:j(1),value:66}],crit), 'plateau');
-t('loin du seuil : en cours',
-  classer([{date:j(6),value:20},{date:j(5),value:25},{date:j(4),value:22},{date:j(3),value:18},{date:j(2),value:20},{date:j(1),value:26}],crit), 'en_cours');
-t('dormant', classer([{date:j(40),value:90},{date:j(35),value:85}],crit), 'dormant');
-t('aucune donnée', classer([],crit), 'non_acquis');
-t('la priorité de dormant sur bientôt est respectée',
-  classer([{date:j(40),value:90},{date:j(38),value:95}],crit), 'dormant');
+/* La classification à six états vivait ici sous forme d'une copie de
+   `analyserObjectif`. Cette copie a divergé le jour où le critère a appris le
+   sens et l'unité : elle validait encore un code que Manager n'exécute plus.
+   Elle est partie, et la classification est désormais testée dans
+   tests/test_acquisition.mjs, sur la fonction extraite de src/App.jsx. */
 
 /* Le rapport ne retient que trois états */
 const ETAT_RAPPORT={acquis:'Acquis',bientot:"En cours d'acquisition",plateau:"En cours d'acquisition",

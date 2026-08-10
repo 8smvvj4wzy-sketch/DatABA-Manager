@@ -14,16 +14,28 @@ const base={
     {id:'c1',date:'2026-05-11',source:'tabA',studentId:'a1'},
     {id:'c2',date:'2026-07-11',source:'tabA',studentId:'a2'},
   ],
+  /* Suivi continu : un relevé par source, un par personne, pour vérifier que
+     la purge par date, par source et par personne les atteint tous les
+     trois — c'est le tableau que le rattrapage a ajouté, et « un tableau
+     oublié laisse des données d'usager derrière une purge qu'on croit
+     complète » est le piège nommé dans CLAUDE.md. */
+  suivi:[
+    {id:'v1',studentId:'a1',timestamp:'2026-05-12',source:'tabA',suiviId:'principal',critere:'stable'},
+    {id:'v2',studentId:'a2',timestamp:'2026-07-12',source:'tabA',suiviId:'principal',critere:'crise'},
+    {id:'v3',studentId:'b1',timestamp:'2026-07-21',source:'tabB',suiviId:'principal',critere:'stable'},
+  ],
   alias:{personnes:{'L.M.':'Lucas M.'},objectifs:{'L.M.|o1':'Couleurs'}},
   commentaires:{'L.M.|o1':'à revoir'},
 };
 
 /* Purge par date */
 function purgerAvant(d,iso){const lim=new Date(iso);
-  return {...d, seances:d.seances.filter(x=>new Date(x.date)>=lim), crises:d.crises.filter(x=>new Date(x.date)>=lim)};}
+  return {...d, seances:d.seances.filter(x=>new Date(x.date)>=lim), crises:d.crises.filter(x=>new Date(x.date)>=lim),
+    suivi:(d.suivi||[]).filter(x=>new Date(x.timestamp)>=lim)};}
 const r1=purgerAvant(base,'2026-07-01T00:00:00');
 t('séances anciennes retirées', r1.seances.map(s=>s.id), ['s2','s3']);
 t('crises anciennes retirées', r1.crises.map(c=>c.id), ['c2']);
+t('relevés de suivi anciens retirés', r1.suivi.map(v=>v.id), ['v2','v3']);
 t('les personnes ne sont pas touchées', r1.personnes.length, 2);
 
 /* Purge d une source */
@@ -32,11 +44,13 @@ function purgerSource(d,src){
   const ate={...d._ateliers};delete ate[src];
   const encore=new Set();Object.values(idv).forEach(tb=>Object.values(tb).forEach(i=>encore.add(i)));
   return {...d, seances:d.seances.filter(x=>x.source!==src), crises:d.crises.filter(x=>x.source!==src),
+    suivi:(d.suivi||[]).filter(x=>x.source!==src),
     sources:d.sources.filter(x=>x!==src), _idVersInitiales:idv, _ateliers:ate,
     personnes:d.personnes.filter(p=>encore.has(p.initials))};
 }
 const r2=purgerSource(base,'tabA');
 t('séances de la source retirées', r2.seances.map(s=>s.id), ['s3']);
+t('relevés de suivi de la source retirés', r2.suivi.map(v=>v.id), ['v3']);
 t('source retirée de la liste', r2.sources, ['tabB']);
 t('T.B. disparaît, plus présente ailleurs', r2.personnes.map(p=>p.initials), ['L.M.']);
 t('L.M. reste, encore présente sur tabB', r2.personnes.length, 1);
@@ -54,13 +68,14 @@ function purgerPersonne(d,ini){
     return {...se,studentIds,selectedObjectives:sel,data};
   }).filter(se=>(se.studentIds||[]).length>0);
   const crises=d.crises.filter(c=>(d._idVersInitiales[c.source]||{})[c.studentId]!==ini);
+  const suivi=(d.suivi||[]).filter(v=>(d._idVersInitiales[v.source]||{})[v.studentId]!==ini);
   const alias={personnes:{...d.alias.personnes},
     objectifs:Object.fromEntries(Object.entries(d.alias.objectifs).filter(([k])=>k.split('|')[0]!==ini))};
   delete alias.personnes[ini];
   const commentaires=Object.fromEntries(Object.entries(d.commentaires).filter(([k])=>k.split('|')[0]!==ini));
   const idv={};Object.entries(d._idVersInitiales).forEach(([src,tb])=>{
     idv[src]=Object.fromEntries(Object.entries(tb).filter(([,i])=>i!==ini));});
-  return {...d,seances,crises,alias,commentaires,_idVersInitiales:idv,
+  return {...d,seances,crises,suivi,alias,commentaires,_idVersInitiales:idv,
     personnes:d.personnes.filter(p=>p.initials!==ini)};
 }
 const r3=purgerPersonne(base,'L.M.');
@@ -69,6 +84,7 @@ t('POINT CLÉ : la séance partagée survit sans elle', r3.seances.find(s=>s.id=
 t('ses cotations sont retirées de la séance partagée', Object.keys(r3.seances.find(s=>s.id==='s1').data), ['a2']);
 t('les séances où elle était seule disparaissent', r3.seances.map(s=>s.id), ['s1']);
 t('ses crises partent', r3.crises.map(c=>c.id), ['c2']);
+t('ses relevés de suivi continu partent, sur les deux tablettes', r3.suivi.map(v=>v.id), ['v2']);
 t('ses libellés partent', r3.alias.personnes, {});
 t('ses commentaires partent', r3.commentaires, {});
 t("l'autre personne garde ses données", r3.seances.find(s=>s.id==='s1').selectedObjectives.a2, ['o2']);

@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
-  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3,
+  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
+  ChevronLeft, ChevronRight, Minimize2, Maximize2,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -13,31 +14,86 @@ import {
 } from 'recharts';
 
 /* ==================== Identité visuelle ====================
-   Reprise de DatABA, avec le bleu en couleur d'accent pour distinguer les
-   deux applications au premier coup d'œil. */
-const PAPER = '#FAF7F0';
-const CARD = '#FFFFFF';
-const INK = '#1A345C';
-const INK_SOFT = '#6B7280';
-const BORDER = '#E3DDD0';
-const ACQUIS = '#0F8B6C';
-const EN_COURS = '#D69A2D';
-const NON_ACQUIS = '#A8402F';
-const CRISE = '#A8402F';
+   Tokens de src/index.css : ils changent avec le thème choisi (attribut
+   data-theme sur <html>, posé avant le premier rendu par le script de
+   index.html). Reprise de DatABA, bleu en accent — c'est ce qui distingue
+   les deux applications au premier coup d'œil, à la place que jouait le
+   bleu dans l'ancienne palette beige de Manager. */
+const PAPER = 'var(--paper)';
+const CARD = 'var(--card)';
+const INK = 'var(--ink)';
+const INK_SOFT = 'var(--ink-soft)';
+const BORDER = 'var(--border)';
+const ACCENT = 'var(--accent)';
+const ACCENT_INK = 'var(--accent-ink)';
+const ACCENT_WASH = 'var(--accent-wash)';
+/* Fond de la navigation latérale : un cran plus sombre que la page, pour
+   qu'elle se détache sans devenir un bloc noir sur tout un bord d'écran. */
+const NAV_BG = 'var(--nav-bg)';
+/* Voile derrière la palette de commande : noir fixe, indépendant du thème —
+   même convention que côté DatABA. */
+const OVERLAY_BACKDROP = 'var(--overlay-backdrop)';
+/* Alerte : crises, mais aussi erreurs et actions destructrices — un seul
+   token d'alerte réactif au thème, plutôt qu'un rouge générique figé. Même
+   convention que CRISIS côté DatABA. */
+const CRISE = 'var(--crisis)';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
 
+/* ==================== Palette catégorielle ====================
+   Fixe entre les deux thèmes — elle code de l'information, pas une
+   ambiance — choisie pour rester lisible sur clair comme sur sombre.
+   Identique à celle de DatABA (src/App.jsx L17-50). Jamais l'accent : Règle
+   de l'Accent Seul. */
+const CAT_TEAL = '#00A870';
+const CAT_INDIGO = '#3B5BDB';
+const CAT_AMBER = '#FF8A3D';
+const CAT_CORAL = '#FF4D6D';
+const CAT_VIOLET = '#7C5CFF';
+const CAT_CYAN = '#00B8D9';
+const CAT_LILAC = '#A78BFA';
+const CAT_SLATE = '#64748B';
+
+/* Contraste garanti sur un fond de couleur fixe (catégorielle), calculé par
+   luminance relative plutôt que supposé blanc — un badge ambre ou lilas ne
+   se lit pas de la même façon qu'un badge indigo. Porté de texteLisibleSur
+   côté DatABA (src/App.jsx:57). Ne s'applique qu'à un hex réel : jamais à un
+   token `var(--…)`, dont le contraste est déjà résolu par sa propre paire
+   (ex. ACCENT / ACCENT_INK). */
+function texteLisibleSur(hex) {
+  const c = String(hex).replace('#', '');
+  const r = parseInt(c.substring(0, 2), 16) / 255;
+  const g = parseInt(c.substring(2, 4), 16) / 255;
+  const b = parseInt(c.substring(4, 6), 16) / 255;
+  const lin = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const contrasteBlanc = 1.05 / (L + 0.05);
+  const contrasteNoir = (L + 0.05) / 0.05;
+  return contrasteBlanc >= contrasteNoir ? '#fff' : '#000';
+}
+
+/* Réutilisées pour les comparaisons de performance générales (tendances,
+   seuils 60/80 %) en plus des états d'acquisition eux-mêmes : bon/moyen/
+   mauvais partagent la teinte du badge d'état correspondant. */
+const ACQUIS = CAT_TEAL;
+const EN_COURS = CAT_AMBER;
+const NON_ACQUIS = CAT_CORAL;
+
+/* Correspondance état → palette catégorielle proposée par le dossier de
+   passation : acquis/teal, en_cours/indigo, plateau/ambre, non_acquis/
+   corail, dormant/ardoise, mesure/lilas. « bientôt acquis » n'a pas
+   d'équivalent DatABA — cyan, proche du teal sans s'y confondre. */
 const ETATS = {
-  acquis: { label: 'Acquis', court: 'Acquis', color: ACQUIS },
-  bientot: { label: 'Bientôt acquis', court: 'Bientôt', color: '#3F9E7C' },
-  plateau: { label: 'En plateau', court: 'Plateau', color: EN_COURS },
-  en_cours: { label: "En cours d'acquisition", court: 'En cours', color: '#5B8AC4' },
-  dormant: { label: 'Sans cotation récente', court: 'Dormant', color: INK_SOFT },
+  acquis: { label: 'Acquis', court: 'Acquis', color: CAT_TEAL },
+  bientot: { label: 'Bientôt acquis', court: 'Bientôt', color: CAT_CYAN },
+  plateau: { label: 'En plateau', court: 'Plateau', color: CAT_AMBER },
+  en_cours: { label: "En cours d'acquisition", court: 'En cours', color: CAT_INDIGO },
+  dormant: { label: 'Sans cotation récente', court: 'Dormant', color: CAT_SLATE },
   /* Suivi en mesure brute (occurrences, minutes, latence) : aucun seuil
      d'acquisition en pourcentage ne s'y applique. */
-  mesure: { label: 'Suivi en mesure', court: 'Mesure', color: '#7A6FA8' },
-  non_acquis: { label: 'Non acquis', court: 'Non acquis', color: NON_ACQUIS },
+  mesure: { label: 'Suivi en mesure', court: 'Mesure', color: CAT_LILAC },
+  non_acquis: { label: 'Non acquis', court: 'Non acquis', color: CAT_CORAL },
 };
 /* Le rapport transmis ne retient que trois états : les nuances de travail
    interne n'ont pas leur place dans un document officiel. */
@@ -53,11 +109,12 @@ const ETAT_RAPPORT = {
   non_acquis: 'Non acquis',
 };
 
-/* Intensité ressentie, telle que saisie dans DatABA */
+/* Intensité ressentie, telle que saisie dans DatABA — même convention
+   traffic-light que ACQUIS/EN_COURS/NON_ACQUIS. */
 const INTENSITES = {
-  1: { label: 'Légère', color: '#7A9A3A' },
-  2: { label: 'Modérée', color: '#D69A2D' },
-  3: { label: 'Forte', color: '#A8402F' },
+  1: { label: 'Légère', color: CAT_TEAL },
+  2: { label: 'Modérée', color: CAT_AMBER },
+  3: { label: 'Forte', color: CAT_CORAL },
 };
 
 const PLATEAU_MIN_POINTS = 6;
@@ -133,6 +190,16 @@ const SECU_KEY = `${PREFIXE}securite`;
 
 const VIDE = {
   personnes: [], seances: [], crises: [], stabilite: [], sources: [],
+  /* Classes (ex-Groupes côté DatABA) : liste plate dédupliquée par id, comme
+     les personnes et les sources — une classe ne dépend pas de la tablette
+     qui l'a exportée. */
+  classes: [],
+  /* Relevés de suivi continu au format v4 (multi-axes). `stabilite` reste le
+     format v3 (axe unique, `etat`), alimenté par les tablettes pas encore
+     mises à jour — jamais les deux pour le même import, voir
+     fusionnerImport. Les axes sont stockés par source : deux tablettes
+     peuvent avoir des critères différents pour le même identifiant d'axe. */
+  suivi: [], _axesSuivi: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -151,6 +218,9 @@ function normaliser(d) {
     ...d,
     alias: { personnes: {}, objectifs: {}, ...(d.alias || {}) },
     stabilite: d.stabilite || [],
+    suivi: d.suivi || [],
+    _axesSuivi: d._axesSuivi || {},
+    classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
     rapports: d.rapports || [],
@@ -184,17 +254,46 @@ function effacerDonneesManager() {
 }
 
 /* ==================== Import et fusion ==================== */
+/* Classes (alias de compatibilité `groupes`, même contenu, émis par les
+   tablettes pas encore mises à jour). Liste plate dédupliquée par id : une
+   classe ne dépend pas de la tablette qui l'a exportée, et la retrouver
+   d'une source à l'autre est ce qui permet de désambiguïser deux personnes
+   aux mêmes initiales. `suite` (v3, sans stabilite/suivi v4) ne concerne
+   pas ce lot mais suit le même principe de repli sur l'alias. */
+function fusionnerClasses(actuelles, backup) {
+  const brutes = backup.classes || backup.groupes || [];
+  const parId = new Map(actuelles.map((c) => [c.id, c]));
+  brutes.forEach((c) => {
+    if (!c || !c.id) return;
+    parId.set(c.id, { id: c.id, nom: c.name || c.nom || c.id });
+  });
+  return Array.from(parId.values());
+}
+
 function fusionnerImport(actuel, backup, nomSource) {
   const personnes = actuel.personnes.slice();
   const parInitiales = new Map(personnes.map((p) => [p.initials, p]));
+  /* Deux personnes de classes différentes peuvent porter les mêmes
+     initiales : la déduplication par initiales les fusionnerait en une
+     seule. La classe permet de le détecter — pas encore de le résoudre
+     (ça suppose de changer la clé d'identité des personnes dans toute
+     l'application) — donc on compte les collisions et on les signale à
+     l'import plutôt que de les laisser passer en silence. */
+  let collisionsInitiales = 0;
   (backup.students || []).forEach((s) => {
-    if (!parInitiales.has(s.initials)) {
-      const p = { id: s.id, initials: s.initials };
+    const classeId = s.classeId || s.groupeId || null;
+    const existante = parInitiales.get(s.initials);
+    if (!existante) {
+      const p = { id: s.id, initials: s.initials, classeId };
       personnes.push(p);
       parInitiales.set(s.initials, p);
+    } else {
+      if (existante.classeId == null && classeId != null) existante.classeId = classeId;
+      else if (classeId != null && existante.classeId != null && existante.classeId !== classeId) collisionsInitiales += 1;
     }
   });
 
+  const classes = fusionnerClasses(actuel.classes || [], backup);
   const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
   const ateliersSource = Object.fromEntries((backup.ateliers || []).map((a) => [a.id, a.name]));
   const intervenantsSource = Object.fromEntries((backup.intervenants || []).map((i) => [i.id, i.name]));
@@ -210,32 +309,56 @@ function fusionnerImport(actuel, backup, nomSource) {
   const nouvellesCrises = (backup.crises || []).filter((c) => !crisesLa.has(c.id));
   const crises = [...actuel.crises, ...nouvellesCrises].map((c) => ({ ...c, source: c.source || nomSource }));
 
-  /* Relevés de stabilité. Attention au champ `source` : côté DatABA il dit
-     d'où vient le relevé (une pastille de suivi), ici il désigne la tablette
-     d'origine, comme pour les séances et les crises. On le renomme donc en
-     `origine` à l'entrée, sinon l'attribution par tablette serait écrasée par
-     la valeur du relevé et le croisement avec les ateliers viserait la mauvaise
-     source. */
+  /* Relevés de suivi continu. Attention au champ `source` : côté DatABA il
+     dit d'où vient le relevé (une pastille de suivi), ici il désigne la
+     tablette d'origine, comme pour les séances et les crises. On le renomme
+     donc en `origine` à l'entrée, sinon l'attribution par tablette serait
+     écrasée par la valeur du relevé et le croisement avec les ateliers
+     viserait la mauvaise source.
+
+     Un fichier v4 porte les mêmes relevés dans `suivi` (multi-axes) et dans
+     `stabilite` (alias v3, projection appauvrie). Les additionner les
+     dupliquerait : on lit `suivi` s'il est présent — même vide, c'est le
+     signe d'une tablette à jour — et on ne retombe sur `stabilite` que s'il
+     est absent. */
   const actuelleStabilite = actuel.stabilite || [];
-  const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
-  const nouveauxReleves = (backup.stabilite || [])
-    .filter((r) => r && !stabiliteLa.has(r.id))
-    .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
-  const stabilite = [...actuelleStabilite, ...nouveauxReleves];
+  const actuelSuivi = actuel.suivi || [];
+  let stabilite = actuelleStabilite;
+  let suivi = actuelSuivi;
+  let nbNouveauxReleves;
+  if (Array.isArray(backup.suivi)) {
+    const suiviLa = new Set(actuelSuivi.map((r) => r.id));
+    const nouveauxSuivi = backup.suivi
+      .filter((r) => r && !suiviLa.has(r.id))
+      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
+    suivi = [...actuelSuivi, ...nouveauxSuivi];
+    nbNouveauxReleves = nouveauxSuivi.length;
+  } else {
+    const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
+    const nouveauxReleves = (backup.stabilite || [])
+      .filter((r) => r && !stabiliteLa.has(r.id))
+      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
+    stabilite = [...actuelleStabilite, ...nouveauxReleves];
+    nbNouveauxReleves = nouveauxReleves.length;
+  }
 
   return {
     ...actuel,
     personnes,
+    classes,
     seances,
     crises,
     stabilite,
+    suivi,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
+    collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
-    nbNouveauxReleves: nouveauxReleves.length,
+    nbNouveauxReleves,
   };
 }
 
@@ -292,9 +415,103 @@ function objectiveScoreValue(obj, entry) {
   return null;
 }
 
+/* ==================== Critère d'acquisition ====================
+   La référence est `masteryDe` / `masteryStatus` côté DatABA : les deux
+   applications doivent rendre le même verdict sur les mêmes données, sans
+   quoi un bilan contredit la tablette qui l'a produit.
+
+   Deux champs manquaient ici et changeaient le verdict :
+   - `unit` : 'sessions' (défaut) ou 'days'. Un Probe se valide par jours
+     consécutifs — plusieurs probes le même jour ne comptent que pour un point.
+   - `sens` : 'min' (au moins le seuil, le seul sens qui vaille pour un
+     pourcentage de réussite) ou 'max' (au plus le seuil, pour un comptage
+     qu'on cherche à faire baisser — un comportement problème coté à
+     l'occurrence est acquis quand il passe SOUS le seuil). */
+
+/* Types dont le score est un pourcentage, et types admettant un critère.
+   Mêmes listes que PERCENT_TYPES / MASTERY_TYPES côté DatABA. `timer` et
+   `latency` n'y figurent pas : ce sont des modes retirés, conservés en
+   lecture pour les données anciennes. */
+const TYPES_POURCENT = ['trials', 'interval', 'chaining', 'balance', 'probe'];
+const TYPES_CRITERE = [...TYPES_POURCENT, 'occurrence'];
+
+const CRITERE_DEFAUT = { threshold: 80, sessions: 3, unit: 'sessions', sens: 'min' };
+/* Un Probe sans `config.mastery` explicite — modèle ancien, export partiel —
+   ne doit pas retomber sur « 80 % sur 3 séances » : son défaut est
+   « 100 % sur 3 jours ». Même repli que DEFAULT_MASTERY_PROBE côté DatABA. */
+const CRITERE_DEFAUT_PROBE = { threshold: 100, sessions: 3, unit: 'days', sens: 'min' };
+
 function critereDe(obj) {
-  const m = obj.config && obj.config.mastery;
-  return m ? { threshold: m.threshold || 80, needed: m.sessions || 3 } : null;
+  if (!obj || !TYPES_CRITERE.includes(obj.type)) return null;
+  const base = obj.type === 'probe' ? CRITERE_DEFAUT_PROBE : CRITERE_DEFAUT;
+  const m = (obj.config && obj.config.mastery) || {};
+  /* Comparaison de type plutôt que repli sur une valeur fausse : un seuil à 0
+     est légitime en sens 'max' (zéro occurrence), et `m.threshold || 80` le
+     remplaçait silencieusement par 80. */
+  return {
+    threshold: typeof m.threshold === 'number' ? m.threshold : base.threshold,
+    needed: typeof m.sessions === 'number' ? m.sessions : base.sessions,
+    unit: m.unit === 'days' ? 'days' : (m.unit === 'sessions' ? 'sessions' : base.unit),
+    sens: m.sens === 'max' ? 'max' : (m.sens === 'min' ? 'min' : base.sens),
+    pourcent: TYPES_POURCENT.includes(obj.type),
+    /* Le critère a-t-il été réglé sur la tablette, ou vient-il du repli ?
+       La distinction ne sert pas au calcul mais à l'affichage : sur un
+       comptage brut, un seuil hérité du défaut ne veut rien dire et ne doit
+       pas produire de verdict (voir analyserObjectif). */
+    explicite: !!(obj.config && obj.config.mastery),
+  };
+}
+
+/* Le seuil est-il tenu ? C'est ici que `sens` entre en jeu, et nulle part
+   ailleurs : toute comparaison écrite en dur ailleurs finirait par diverger. */
+function tientLeSeuil(valeur, crit) {
+  if (!crit || valeur == null) return false;
+  return crit.sens === 'max' ? valeur <= crit.threshold : valeur >= crit.threshold;
+}
+
+/* Écart au seuil, toujours positif quand le seuil n'est pas tenu, quel que
+   soit le sens. Affiché tel quel : « il manque N points » en sens 'min',
+   « N de trop » en sens 'max'. */
+function ecartAuSeuil(valeur, crit) {
+  if (!crit || valeur == null) return null;
+  return crit.sens === 'max' ? valeur - crit.threshold : crit.threshold - valeur;
+}
+
+/* Regroupe les points d'une même journée calendaire en un seul point moyenné,
+   pour un critère exprimé en jours plutôt qu'en séances. Porté de
+   `toDayPoints` côté DatABA ; la date est conservée en plus, elle sert à
+   l'affichage de la série et ne change pas le décompte. */
+function pointsParJour(points) {
+  const parJour = new Map();
+  points.forEach((p) => {
+    if (!p.date) return;
+    const jour = new Date(p.date).toDateString();
+    if (!parJour.has(jour)) parJour.set(jour, { somme: 0, n: 0, date: p.date });
+    const e = parJour.get(jour);
+    e.somme += p.value;
+    e.n += 1;
+  });
+  return Array.from(parJour.values())
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .map((e) => ({ value: Math.round(e.somme / e.n), date: e.date }));
+}
+
+/* Série sur laquelle se compte la suite : les séances, ou les journées quand
+   le critère est exprimé en jours. */
+function serieCritere(points, crit) {
+  return crit && crit.unit === 'days' ? pointsParJour(points) : points;
+}
+
+/* Longueur de la suite en cours, comptée depuis la fin. */
+function suiteAuSeuil(points, crit) {
+  if (!crit) return 0;
+  const serie = serieCritere(points, crit);
+  let suite = 0;
+  for (let i = serie.length - 1; i >= 0; i--) {
+    if (tientLeSeuil(serie[i].value, crit)) suite += 1;
+    else break;
+  }
+  return suite;
 }
 
 function analyserObjectif(seances, tableParSource, obj) {
@@ -308,14 +525,24 @@ function analyserObjectif(seances, tableParSource, obj) {
     if (!oid || !((sess.selectedObjectives || {})[sid] || []).includes(oid)) return;
     const entry = (sess.data || {})[sid] && sess.data[sid][oid];
     const snap = sess.objectiveSnapshot[oid];
-    const v = objectiveScoreValue(snap, entry);
-    if (v != null) points.push({ date: sess.date, value: v, favorite: !!snap.favorite });
 
     /* Les mesures brutes vivent à part des points en pourcentage. Les mélanger
        fausserait toutes les moyennes d'autonomie du reste de l'application :
-       un compteur d'occurrences à 12 n'est pas un score de 12 %. */
+       un compteur d'occurrences à 12 n'est pas un score de 12 %. La bascule
+       se fait sur l'unité rendue par valeurCotation, et non sur le type :
+       c'est ce qui fait enfin entrer le mode Intervalle dans les points, lui
+       dont le score est bien un pourcentage mais qu'objectiveScoreValue ne
+       sait pas calculer — ses cotations n'apparaissaient nulle part. */
     const m = valeurCotation(snap, entry);
-    if (m && m.unite !== '%') {
+    if (!m) return;
+    if (m.unite === '%') {
+      /* Le créneau (matin/après-midi) n'existe que pour Probe à deux prises
+         par jour : porté jusqu'au point plutôt qu'ignoré, sinon un probe
+         manqué sur un créneau prévu se lit comme un trou dans les données
+         plutôt que comme l'information de suivi que c'est. */
+      const creneau = snap.type === 'probe' && entry && entry.creneau ? entry.creneau : null;
+      points.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite, creneau });
+    } else {
       mesures.push({ date: sess.date, value: m.valeur, favorite: !!snap.favorite });
       unite = m.unite;
     }
@@ -324,46 +551,94 @@ function analyserObjectif(seances, tableParSource, obj) {
   mesures.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const crit = critereDe(obj);
+
+  /* Un seuil ne s'applique pas à n'importe quelle série. Sur un pourcentage,
+     il se lit directement ; sur un comptage d'occurrences, il porte sur le
+     nombre brut — c'est le cas du comportement problème, acquis quand il
+     passe *sous* le seuil. Mais on ne juge un comptage que si le critère a
+     été réglé sur la tablette : le repli « 80 sur 3 séances » n'a aucun sens
+     sur un compteur, et classerait « non acquis » un suivi que personne n'a
+     demandé de juger. */
+  const critere = crit && (crit.pourcent || crit.explicite) ? crit : null;
+  const serie = critere && !critere.pourcent ? mesures : points;
+
   const base = {
     points,
     mesures,
     unite,
-    threshold: crit ? crit.threshold : null,
-    needed: crit ? crit.needed : null,
+    threshold: critere ? critere.threshold : null,
+    needed: critere ? critere.needed : null,
+    unit: critere ? critere.unit : null,
+    sens: critere ? critere.sens : null,
+    critPourcent: critere ? critere.pourcent : null,
     prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
   };
 
-  /* Un objectif suivi en mesure brute — occurrences, minutes, latence — n'a
-     pas de pourcentage à comparer au seuil d'acquisition. Le classer « Non
-     acquis » comme avant était faux : il n'était pas raté, il n'était pas
-     mesuré sur cette échelle. Il garde donc son propre état, et seule
-     l'absence de cotation récente peut encore le rendre dormant. */
-  if (!points.length && mesures.length) {
-    const jours = Math.floor((Date.now() - new Date(mesures[mesures.length - 1].date)) / 86400000);
+  /* Dormance : lue sur la cotation la plus récente, quelle que soit la série
+     qui la porte. Un objectif coté hier en mesure brute n'est pas dormant
+     parce que sa dernière valeur en pourcentage remonte à un mois. */
+  const derniere = [points, mesures]
+    .filter((a) => a.length)
+    .map((a) => a[a.length - 1].date)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  const jours = derniere ? Math.floor((Date.now() - new Date(derniere)) / 86400000) : null;
+
+  /* Un objectif suivi en mesure brute — occurrences, minutes, latence — sans
+     critère applicable n'a rien à comparer à un seuil d'acquisition. Le
+     classer « Non acquis » comme avant était faux : il n'était pas raté, il
+     n'était pas mesuré sur cette échelle. Il garde donc son propre état, et
+     seule l'absence de cotation récente peut encore le rendre dormant. */
+  if (!serie.length) {
+    if (!points.length && !mesures.length) return { ...base, etat: 'non_acquis', streak: 0 };
     if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak: 0, jours };
     return { ...base, etat: 'mesure', streak: 0 };
   }
-  if (!points.length) return { ...base, etat: 'non_acquis', streak: 0 };
 
-  let streak = 0;
-  if (crit) {
-    for (let i = points.length - 1; i >= 0; i--) {
-      if (points[i].value >= crit.threshold) streak += 1;
-      else break;
-    }
-  }
-  const jours = Math.floor((Date.now() - new Date(points[points.length - 1].date)) / 86400000);
+  const streak = suiteAuSeuil(serie, critere);
+  /* La série effectivement jugée : regroupée par journée quand le critère
+     s'exprime en jours. C'est aussi celle que regarde le plateau. */
+  const serieJugee = serieCritere(serie, critere);
 
-  if (crit && streak >= crit.needed) return { ...base, etat: 'acquis', streak };
+  if (critere && streak >= critere.needed) return { ...base, etat: 'acquis', streak };
   if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak, jours };
-  if (crit && crit.needed > 1 && streak >= crit.needed - 1) return { ...base, etat: 'bientot', streak };
-  if (crit && points.length >= PLATEAU_MIN_POINTS) {
-    const cinq = points.slice(-5);
+  if (critere && critere.needed > 1 && streak >= critere.needed - 1) return { ...base, etat: 'bientot', streak };
+  /* Plateau : réservé aux critères en pourcentage. PLATEAU_ECART_MAX vaut
+     20 points de pourcentage — sur un comptage brut, « à 20 près » ne veut
+     rien dire. L'écart passe par ecartAuSeuil, sans quoi il serait calculé à
+     l'envers dès que le sens est 'max'. */
+  if (critere && critere.pourcent && serieJugee.length >= PLATEAU_MIN_POINTS) {
+    const cinq = serieJugee.slice(-5);
     const moyenne = Math.round(cinq.reduce((a, p) => a + p.value, 0) / cinq.length);
-    const ecart = crit.threshold - moyenne;
+    const ecart = ecartAuSeuil(moyenne, critere);
     if (ecart > 0 && ecart <= PLATEAU_ECART_MAX) return { ...base, etat: 'plateau', streak, moyenne };
   }
   return { ...base, etat: 'en_cours', streak };
+}
+
+/* Créneaux d'un Probe à deux prises par jour : matin avant 13 h, en heure
+   locale — jamais UTC, même clé que côté DatABA. Manager ne fait que lire le
+   créneau posé par la tablette, il ne le recalcule pas. */
+const PROBE_CRENEAUX = { matin: 'Matin', aprem: 'Après-midi' };
+const libelleCreneauProbe = (c) => PROBE_CRENEAUX[c] || null;
+
+/* Libellé du critère tel qu'il s'affiche sous un objectif. Le sens s'y lit :
+   « seuil 80 % » d'un côté, « au plus 2 occurrences » de l'autre. Écrire
+   « seuil 2 » sur un comportement problème laissait croire qu'il fallait
+   l'atteindre — c'est l'inverse qui est demandé. */
+function libelleSeuil(ligne) {
+  if (!ligne || ligne.threshold == null) return null;
+  const unite = ligne.critPourcent ? '%' : (ligne.unite || '');
+  const valeur = `${ligne.threshold}${unite ? ` ${unite}` : ''}`;
+  return ligne.sens === 'max' ? `au plus ${valeur}` : `seuil ${valeur}`;
+}
+/* Le critère complet, unité comprise : un Probe se valide sur des jours, pas
+   sur des séances, et l'écrire « sur 3 séances » était faux. */
+function libelleCritere(ligne) {
+  const seuil = libelleSeuil(ligne);
+  if (!seuil) return null;
+  const n = ligne.needed;
+  const pluriel = n > 1 ? 's' : '';
+  return `${seuil} sur ${n} ${ligne.unit === 'days' ? `jour${pluriel}` : `séance${pluriel}`}`;
 }
 
 function construireLignes(donnees) {
@@ -469,6 +744,10 @@ function construireFaits(donnees) {
   return { cotations, crises, renforcements };
 }
 
+/* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
+   profit d'Intervalle et de Probe) mais restent ici : Manager ne propose
+   jamais de créer un objectif, seulement d'afficher ceux déjà cotés — une
+   cotation ancienne dans ces deux modes doit encore pouvoir se lire. */
 const TYPES_COTATION = {
   trials: 'Essai par essai', probe: 'Probe', occurrence: 'Par occurrence',
   timer: 'Timer', interval: 'Niveau par intervalle', chaining: 'Chaînage',
@@ -502,85 +781,70 @@ const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
 const libelleAffiche = (d, initiales, objectif) => (d.alias.objectifs || {})[cleAlias(initiales, objectif)] || objectif;
 const codeEflDe = (d, objectif) => ((d.codesEfl || {})[objectif] || '').trim();
+/* Nom de la classe d'une personne, ou null si elle n'en a pas (données
+   d'avant le rattrapage, ou tablette qui n'a pas encore migré Groupe → Classe). */
+function nomClasseDe(d, initiales) {
+  const p = (d.personnes || []).find((x) => x.initials === initiales);
+  if (!p || !p.classeId) return null;
+  const c = (d.classes || []).find((x) => x.id === p.classeId);
+  return c ? c.nom : null;
+}
 
-/* ==================== Navigation par balayage ====================
-   Sur mobile, passer d'un onglet à l'autre au doigt. Les zones qui défilent
-   déjà horizontalement — tableaux, graphiques — gardent la priorité, sinon
-   le balayage volerait leur geste. */
-function gereDejaLeGeste(cible) {
-  let n = cible;
-  while (n && n !== document.body) {
-    if (n.dataset && n.dataset.noSwipe !== undefined) return true;
-    const t = n.tagName;
-    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return true;
-    if (n.scrollWidth > n.clientWidth + 4) {
-      const st = window.getComputedStyle(n);
-      if (/(auto|scroll)/.test(st.overflowX)) return true;
-    }
-    n = n.parentElement;
+/* ==================== Suivi continu (multi-axes) ====================
+   Repris de DatABA : axeDe / metaCritere / CRITERE_INCONNU. Un critère retiré
+   de la configuration ne ressuscite pas — les relevés passés qui le portaient
+   restent affichés, avec leur clé d'origine entre parenthèses. */
+const CRITERE_INCONNU_SUIVI = { k: null, l: 'Critère retiré', color: INK_SOFT };
+
+function axeDe(axes, suiviId) {
+  return (axes || []).find((a) => a.id === suiviId) || null;
+}
+function metaCritereSuivi(criteres, k) {
+  return (criteres || []).find((c) => c.k === k) || CRITERE_INCONNU_SUIVI;
+}
+/* Les critères historiques de l'axe 'stabilité', pour lire les relevés v3
+   (`stabilite`, champ `etat`) avec les mêmes couleurs que le suivi continu.
+   Mêmes clés que DEFAULT_CRITERES_SUIVI côté DatABA. */
+const CRITERES_STABILITE_V3 = [
+  { k: 'stable', l: 'Stable', color: ACQUIS },
+  { k: 'pre-crise', l: 'Pré-crise', color: EN_COURS },
+  { k: 'crise', l: 'Crise', color: NON_ACQUIS },
+  { k: 'post-crise', l: 'Post-crise', color: CAT_INDIGO },
+];
+
+/* L'axe et les critères d'un relevé, quelle que soit sa provenance : un
+   relevé v4 porte suiviId + critere et se résout dans les axes de sa source ;
+   un relevé v3 (stabilite) n'a qu'un état sur l'axe historique implicite. */
+function axeEtCritereDuReleve(donnees, releve, estV4) {
+  if (estV4) {
+    const axes = (donnees._axesSuivi || {})[releve.source] || [];
+    const axe = axeDe(axes, releve.suiviId);
+    const meta = axe ? metaCritereSuivi(axe.criteres, releve.critere) : CRITERE_INCONNU_SUIVI;
+    return { nomAxe: axe ? axe.nom : 'Suivi retiré', meta, cle: releve.critere };
   }
-  return false;
+  return { nomAxe: 'Suivi de stabilité', meta: metaCritereSuivi(CRITERES_STABILITE_V3, releve.etat), cle: releve.etat };
 }
 
-
-/* Balayage horizontal entre onglets, pour l'usage mobile.
-   Les zones marquées data-no-swipe (tableaux, graphiques) gardent la main :
-   sans cela, faire défiler un tableau large changerait de page. */
-function useBalayage(onGauche, onDroite) {
-  const ref = useRef(null);
-  const etat = useRef({ x: 0, y: 0, actif: false });
-  const [decalage, setDecalage] = useState(0);
-  const [enCours, setEnCours] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return undefined;
-
-    const debut = (e) => {
-      const t = e.touches[0];
-      etat.current = { x: t.clientX, y: t.clientY, actif: !gereDejaLeGeste(e.target) };
-    };
-    const bouge = (e) => {
-      if (!etat.current.actif) return;
-      const t = e.touches[0];
-      const dx = t.clientX - etat.current.x;
-      const dy = t.clientY - etat.current.y;
-      if (Math.abs(dx) < Math.abs(dy)) return; // geste plutôt vertical : on laisse défiler
-      setEnCours(true);
-      setDecalage(Math.max(-60, Math.min(60, dx * 0.35)));
-    };
-    const fin = (e) => {
-      setEnCours(false);
-      setDecalage(0);
-      if (!etat.current.actif) return;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - etat.current.x;
-      const dy = t.clientY - etat.current.y;
-      etat.current.actif = false;
-      // Geste franc et nettement horizontal, sinon on laisse défiler
-      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-      if (dx < 0) onGauche();
-      else onDroite();
-    };
-
-    el.addEventListener('touchstart', debut, { passive: true });
-    el.addEventListener('touchmove', bouge, { passive: true });
-    el.addEventListener('touchend', fin, { passive: true });
-    return () => {
-      el.removeEventListener('touchstart', debut);
-      el.removeEventListener('touchmove', bouge);
-      el.removeEventListener('touchend', fin);
-    };
-  }, [onGauche, onDroite]);
-
-  return { ref, decalage, enCours };
+/* Relevés de suivi continu d'une personne, v4 et v3 réunis et triés du plus
+   récent au plus ancien. Chaque entrée porte de quoi s'afficher sans
+   redemander l'axe. */
+function suiviDePersonne(donnees, initiales) {
+  const estDeLaPersonne = (r) => ((donnees._idVersInitiales || {})[r.source] || {})[r.studentId] === initiales;
+  const v4 = (donnees.suivi || [])
+    .filter(estDeLaPersonne)
+    .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, true), estV4: true }));
+  const v3 = (donnees.stabilite || [])
+    .filter(estDeLaPersonne)
+    .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, false), estV4: false }));
+  return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
+
 
 /* ==================== Composants de base ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
   const base = 'rounded-xl px-4 py-2.5 font-medium text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 disabled:opacity-40';
   const styles = variant === 'solid'
-    ? { backgroundColor: INK, color: '#fff' }
+    ? { backgroundColor: ACCENT, color: ACCENT_INK }
     : variant === 'outline'
     ? { backgroundColor: 'transparent', color: INK, border: `1px solid ${BORDER}` }
     : { backgroundColor: 'transparent', color: INK_SOFT };
@@ -596,7 +860,7 @@ function Card({ children, className = '', style }) {
 function Chip({ label, on, onClick }) {
   return (
     <button onClick={onClick} className="rounded-lg px-3 py-1.5 text-xs border"
-      style={{ borderColor: on ? INK : BORDER, backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
+      style={{ borderColor: on ? ACCENT : BORDER, backgroundColor: on ? ACCENT : 'transparent', color: on ? ACCENT_INK : INK_SOFT }}>
       {label}
     </button>
   );
@@ -1026,7 +1290,8 @@ const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+
 
 function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
   const donnees = points.map((p) => ({
-    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+    label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
+      + (libelleCreneauProbe(p.creneau) ? ` (${libelleCreneauProbe(p.creneau)})` : ''),
     valeur: p.value,
   }));
   /* Un pourcentage se lit toujours sur 0-100 : borner l'axe évite de faire
@@ -1041,7 +1306,7 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
       <YAxis domain={enPourcent ? [0, 100] : [0, 'auto']} allowDecimals={!enPourcent}
         tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
         formatter={(v) => [`${v} ${unite}`, etiquette]} />
       {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
     </>
@@ -1099,7 +1364,7 @@ function RadarObjectifs({ lignes, hauteur = 320 }) {
           <PolarAngleAxis dataKey="objectif" tick={{ fontSize: 10, fill: INK_SOFT }} />
           <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: INK_SOFT }} />
           <Radar name="Dernier résultat" dataKey="niveau" stroke={INK} fill={INK} fillOpacity={0.25} isAnimationActive={false} />
-          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }}
+          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
             formatter={(v, n, p) => [`${v} % · ${p.payload.seances} séances`, 'Dernier résultat']} />
         </RadarChart>
       </ResponsiveContainer>
@@ -1187,7 +1452,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
               le dossier partagé. <strong>DatABA n'est pas touchée.</strong>
             </p>
             <div className="flex gap-2">
-              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS }}>
+              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS, color: texteLisibleSur(NON_ACQUIS) }}>
                 Effacer et recommencer
               </Btn>
               <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
@@ -1401,14 +1666,14 @@ function LigneObjectifs({ lignes, donnees, onOuvrir }) {
             </div>
             <div className="text-xs" style={{ color: INK_SOFT }}>
               {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
-              {l.threshold != null && ` · seuil ${l.threshold} %`}
+              {libelleSeuil(l) && ` · ${libelleSeuil(l)}`}
               {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
               {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
             </div>
           </div>
           <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
           <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
-            style={{ backgroundColor: ETATS[l.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+            style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color), fontFamily: F_DISPLAY }}>
             {ETATS[l.etat].court}
           </span>
         </button>
@@ -1532,7 +1797,7 @@ function comparerPaire(paire, donnees) {
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
    observateurs. */
-function SeancesScreen({ donnees, onSupprimerSeance }) {
+function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   const [choisie, setChoisie] = useState(null);
   const [ouverte, setOuverte] = useState(null);      // séance dépliée
   const [recherche, setRecherche] = useState('');
@@ -1595,9 +1860,9 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
         {q && ` sur ${seances.length}`} — appuyez pour voir le détail
       </div>
 
-      <div className="space-y-1.5 mb-4">
+      <div className={densite === 'compact' ? 'space-y-1 mb-4' : 'space-y-1.5 mb-4'}>
         {affichees.map((s) => (
-          <DetailSeance key={s.id} seance={s} donnees={donnees}
+          <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
             ouverte={ouverte === s.id}
             onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
             onSupprimer={() => onSupprimerSeance(s)} />
@@ -1621,52 +1886,59 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
           </p>
         </Card>
       ) : (
-        <>
-          <div className="space-y-1.5 mb-3">
+        /* Sélection de la paire à gauche, comparaison à droite : le travail
+           est comparatif — choisir une paire, en lire l'accord — même
+           disposition que la fiche personne. */
+        <div className="flex flex-col lg:flex-row gap-4 lg:items-start">
+          <div className="lg:w-72 shrink-0 space-y-1.5">
             {paires.map((p, i) => (
               <button key={i} onClick={() => setChoisie(p)}
                 className="w-full text-left rounded-xl border px-3.5 py-3"
-                style={{ borderColor: choisie === p ? INK : BORDER, backgroundColor: CARD }}>
+                style={{ borderColor: choisie === p ? ACCENT : BORDER, backgroundColor: choisie === p ? ACCENT_WASH : CARD }}>
                 <div className="text-sm font-medium">{p.jour}</div>
                 <div className="text-xs" style={{ color: INK_SOFT }}>{p.a.source} · {p.b.source}</div>
               </button>
             ))}
           </div>
 
-          {res && (
-            <>
-              <Card className="mb-3">
-                <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
-                  {res.pct != null ? `${res.pct} %` : '—'}
-                </div>
-                <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
-                  d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
-                </div>
-                <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                  Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
-                  En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
-                </p>
-              </Card>
-              <div className="space-y-1.5">
-                {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
-                  <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
-                    <div className="min-w-0">
-                      <div className="text-sm break-words">
-                        <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
-                      </div>
-                      <div className="text-xs" style={{ color: INK_SOFT }}>
-                        {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
-                      </div>
-                    </div>
-                    <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
-                      {l.pct} %
-                    </span>
+          <div className="flex-1 min-w-0">
+            {!res ? (
+              <Empty>Choisissez une paire pour voir l'accord.</Empty>
+            ) : (
+              <>
+                <Card className="mb-3">
+                  <div className="text-4xl font-semibold" style={{ fontFamily: F_MONO, color: couleur }}>
+                    {res.pct != null ? `${res.pct} %` : '—'}
                   </div>
-                ))}
-              </div>
-            </>
-          )}
-        </>
+                  <div className="text-sm mt-1" style={{ color: INK_SOFT }}>
+                    d'accord sur <span style={{ fontFamily: F_MONO }}>{res.points}</span> point{res.points !== 1 ? 's' : ''} comparé{res.points !== 1 ? 's' : ''}
+                  </div>
+                  <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                    Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
+                    En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
+                  </p>
+                </Card>
+                <div className="space-y-1.5">
+                  {res.lignes.slice().sort((a, b) => a.pct - b.pct).map((l, i) => (
+                    <div key={i} className="rounded-xl border px-3 py-2.5 flex items-center justify-between gap-2" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+                      <div className="min-w-0">
+                        <div className="text-sm break-words">
+                          <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{l.initials}</span> · {l.objectif}
+                        </div>
+                        <div className="text-xs" style={{ color: INK_SOFT }}>
+                          {l.proportionnel ? 'accord proportionnel' : `${Math.round(l.accords)}/${l.points}`}
+                        </div>
+                      </div>
+                      <span className="text-sm font-semibold shrink-0" style={{ fontFamily: F_MONO, color: l.pct >= 80 ? ACQUIS : l.pct >= 60 ? EN_COURS : NON_ACQUIS }}>
+                        {l.pct} %
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1675,26 +1947,29 @@ function SeancesScreen({ donnees, onSupprimerSeance }) {
 /* Une séance dans la liste, dépliable sur son détail complet.
    Les cotations ne sont pas modifiables ici : la tablette reste la source, et
    un réimport de la même séance rétablirait de toute façon ses valeurs. */
-function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
+function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite }) {
   const table = (donnees._idVersInitiales || {})[seance.source] || {};
   const intervenant = ((donnees._intervenants || {})[seance.source] || {})[seance.intervenantId];
   const dureeMin = seance.endedAt && seance.startedAt
     ? Math.round(Math.max(0, seance.endedAt - seance.startedAt) / 60000) : null;
+  const compact = densite === 'compact';
 
   return (
     <div className="rounded-xl border" style={{ borderColor: ouverte ? INK : BORDER, backgroundColor: CARD }}>
-      <button onClick={onBasculer} className="w-full px-3.5 py-3 flex items-center justify-between gap-3 text-left">
+      <button onClick={onBasculer} className={`w-full flex items-center justify-between gap-3 text-left ${compact ? 'px-3 py-1.5' : 'px-3.5 py-3'}`}>
         <div className="min-w-0">
           <div className="text-sm font-medium">
             {new Date(seance.date).toLocaleDateString('fr-FR')}
             {seance.doubleCotation && (
-              <span className="text-xs ml-2 px-1.5 py-0.5 rounded" style={{ backgroundColor: INK, color: '#fff' }}>double cotation</span>
+              <span className="text-xs ml-2 px-1.5 py-0.5 rounded border" style={{ borderColor: BORDER, color: INK_SOFT }}>double cotation</span>
             )}
           </div>
-          <div className="text-xs break-words" style={{ color: INK_SOFT }}>
-            {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
-            {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
-          </div>
+          {!compact && (
+            <div className="text-xs break-words" style={{ color: INK_SOFT }}>
+              {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
+              {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
+            </div>
+          )}
         </div>
         <span className="text-sm shrink-0 flex items-center gap-2" style={{ fontFamily: F_MONO, color: INK }}>
           {seance.cotations}
@@ -1737,6 +2012,15 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
                       <span className="min-w-0 break-words">
                         {ini ? libelleAffiche(donnees, ini, obj.name) : obj.name}
                         <span style={{ color: INK_SOFT }}> · {TYPES_COTATION[obj.type] || obj.type}</span>
+                        {/* Pour Probe, la guidance est une option du formulaire, pas un mode
+                            imposé : la cotation 1/0 reste la voie par défaut. Le dire évite de
+                            lire un score à 0 % comme un échec de guidance qui n'a jamais existé. */}
+                        {obj.type === 'probe' && (
+                          <span style={{ color: INK_SOFT }}> ({obj.config && obj.config.useGuidance ? 'guidance' : '1/0'})</span>
+                        )}
+                        {obj.type === 'probe' && entry && libelleCreneauProbe(entry.creneau) && (
+                          <span style={{ color: INK_SOFT }}> · {libelleCreneauProbe(entry.creneau)}</span>
+                        )}
                       </span>
                       <span className="shrink-0" style={{ fontFamily: F_MONO, color: score == null ? INK_SOFT : INK }}>
                         {score == null ? 'non coté' : `${score} %`}
@@ -1768,8 +2052,9 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer }) {
    « non renseigné » masquerait le fait qu'il manque de la saisie. */
 const JOURS_SEMAINE = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
 
-/* Palette des séries : assez contrastée pour distinguer six segments empilés */
-const PALETTE_SERIES = ['#1A345C', '#A8402F', '#D69A2D', '#0F8B6C', '#7A6A9A', '#2E6E8E', '#8A8F84'];
+/* Palette des séries : la catégorielle, comme côté DatABA (« les séries
+   prennent la palette catégorielle »). Fixe entre les deux thèmes. */
+const PALETTE_SERIES = [CAT_INDIGO, CAT_CORAL, CAT_AMBER, CAT_TEAL, CAT_VIOLET, CAT_CYAN, CAT_LILAC, CAT_SLATE];
 const SERIES_MAX = 6;   // au-delà, le graphique devient illisible
 
 /* Comment découper les crises en séries. Certaines dimensions admettent
@@ -1965,14 +2250,14 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
             <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
           ) : (
             <>
-              <div style={{ height: 300 }} ref={refChrono} data-no-swipe>
+              <div style={{ height: 300 }} ref={refChrono}>
                 <ResponsiveContainer width="100%" height="100%">
                   {config.forme === 'courbes' ? (
                     <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
                       <CartesianGrid stroke={BORDER} vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                       <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       {chrono.series.map((nom, i) => (
                         <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
@@ -1984,7 +2269,7 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
                       <CartesianGrid stroke={BORDER} vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                       <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       {chrono.series.map((nom, i) => (
                         <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
@@ -2289,12 +2574,12 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
         )}
         <span className="text-xs ml-auto" style={{ color: INK }}>analyser →</span>
       </div>
-      <div style={{ height: 110 }} data-no-swipe>
+      <div style={{ height: 110 }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
             <XAxis dataKey="label" tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
             <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-            <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} />
+            <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
             <Bar dataKey="Crises" fill={CRISE} radius={[3, 3, 0, 0]} isAnimationActive={false} />
             {tendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
           </ComposedChart>
@@ -2355,17 +2640,18 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
               <>
                 {journalieres.length} jour{journalieres.length !== 1 ? 's' : ''} de relevé
                 {moyenne != null && ` · ${moyenne} ${ligne.unite} par jour en moyenne`}
+                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
               </>
             ) : (
               <>
                 {ligne.points.length} séance{ligne.points.length !== 1 ? 's' : ''}
-                {ligne.threshold != null && ` · seuil ${ligne.threshold} %`}
+                {libelleSeuil(ligne) && ` · ${libelleSeuil(ligne)}`}
               </>
             )}
           </div>
         </div>
         <span className="text-xs font-medium px-2.5 py-1 rounded-lg shrink-0"
-          style={{ backgroundColor: ETATS[ligne.etat].color, color: '#fff', fontFamily: F_DISPLAY }}>
+          style={{ backgroundColor: ETATS[ligne.etat].color, color: texteLisibleSur(ETATS[ligne.etat].color), fontFamily: F_DISPLAY }}>
           {ETATS[ligne.etat].label}
         </span>
       </div>
@@ -2416,8 +2702,12 @@ function CarteObjectif({ ligne, donnees, personne, style, masque, agrandi, surli
       </div>
 
       {masque ? null : courbe.length ? (
-        <div ref={refGraphe} data-no-swipe>
-          <Graphique points={courbe} style={style} seuil={enMesure ? null : ligne.threshold}
+        <div ref={refGraphe}>
+          {/* Le seuil se trace aussi sur une série de mesures brutes, dès lors
+              qu'un critère s'y applique — c'est le cas du comptage
+              d'occurrences. `ligne.threshold` est déjà nul quand aucun
+              critère ne vaut pour cette série. */}
+          <Graphique points={courbe} style={style} seuil={ligne.threshold}
             hauteur={agrandi ? 460 : surligne ? 300 : 220}
             unite={enMesure ? ligne.unite : '%'} />
         </div>
@@ -2436,6 +2726,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      l'autre, le nom est ce qui reste stable côté consolidation. */
   const [masques, setMasques] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
+  const [classeFiltre, setClasseFiltre] = useState('');
   const refObjectifs = useRef(null);
 
   /* Calculé avant le retour anticipé plus bas : l'effet qui suit doit être
@@ -2482,19 +2773,49 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
 
   const compte = (e) => siennes.filter((l) => l.etat === e).length;
 
+  /* Filtre par classe : la liste de personnes se resserre, mais un choix qui
+     viderait la liste (classe supprimée entre-temps, par exemple) est ignoré
+     plutôt que de laisser l'écran vide sans explication. */
+  const personnesFiltrees = classeFiltre
+    ? donnees.personnes.filter((p) => p.classeId === classeFiltre)
+    : donnees.personnes;
+  const listePersonnes = personnesFiltrees.length ? personnesFiltrees : donnees.personnes;
+
   return (
-    <div>
-      <div className="flex flex-wrap gap-2 mb-3">
-        {donnees.personnes.map((p) => (
-          <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
-            className="rounded-xl px-4 py-2.5 border font-semibold text-sm"
-            style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? INK : BORDER,
-              backgroundColor: personne === p.initials ? INK : 'transparent', color: personne === p.initials ? '#fff' : INK_SOFT }}>
-            {nomAffiche(donnees, p.initials)}
-          </button>
-        ))}
+    <div className="flex flex-col lg:flex-row gap-4 lg:items-start">
+      {/* Colonne de gauche : liste des personnes, verticale — le travail est
+         comparatif (choisir qui regarder), la fiche de droite fait le reste.
+         Reste en flux normal sous lg : un poste étroit garde la liste au-dessus. */}
+      <div className="lg:w-64 shrink-0 no-print">
+        {donnees.classes.length > 0 && (
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
+            <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
+              className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              <option value="">Toutes</option>
+              {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+            </select>
+          </div>
+        )}
+        <div className="flex lg:flex-col flex-wrap gap-2">
+          {listePersonnes.map((p) => (
+            <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
+              className="rounded-xl px-4 py-2.5 border font-semibold text-sm lg:text-left"
+              style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
+                backgroundColor: personne === p.initials ? ACCENT_WASH : 'transparent', color: personne === p.initials ? ACCENT : INK_SOFT }}>
+              {nomAffiche(donnees, p.initials)}
+              {nomClasseDe(donnees, p.initials) && (
+                <span className="ml-1.5 font-normal" style={{ color: personne === p.initials ? ACCENT : INK_SOFT, opacity: 0.75 }}>
+                  · {nomClasseDe(donnees, p.initials)}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {/* Colonne de droite : la fiche de la personne sélectionnée. */}
+      <div className="flex-1 min-w-0">
       <div className="flex flex-wrap gap-1.5 mb-3">
         {[
           { k: 'objectifs', l: 'Objectifs', icone: TrendingUp },
@@ -2502,13 +2823,14 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
           { k: 'renfo', l: 'Renforcement', icone: Gift },
+          { k: 'suivi', l: 'Suivi continu', icone: Layers },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
           const Icone = v.icone;
           return (
             <button key={v.k} onClick={() => setVue(v.k)}
               className="rounded-lg px-3 py-1.5 text-xs border flex items-center gap-1.5"
-              style={{ borderColor: vue === v.k ? INK : BORDER, backgroundColor: vue === v.k ? INK : 'transparent', color: vue === v.k ? '#fff' : INK_SOFT }}>
+              style={{ borderColor: vue === v.k ? ACCENT : BORDER, backgroundColor: vue === v.k ? ACCENT : 'transparent', color: vue === v.k ? ACCENT_INK : INK_SOFT }}>
               <Icone size={13} /> {v.l}
             </button>
           );
@@ -2599,7 +2921,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
             {siennes.map((l, i) => (
               <div key={i} className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2" style={{ backgroundColor: PAPER }}>
                 <span className="text-sm min-w-0 break-words">{libelleAffiche(donnees, l.initials, l.objectif)}</span>
-                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: '#fff' }}>
+                <span className="text-xs shrink-0 px-2 py-0.5 rounded" style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color) }}>
                   {ETATS[l.etat].court}
                 </span>
               </div>
@@ -2630,7 +2952,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <div className="text-xs flex items-center gap-2" style={{ color: INK_SOFT }}>
                     <span>{new Date(c.date).toLocaleDateString('fr-FR')} · {Math.round((c.durationMs || 0) / 60000)} min</span>
                     {c.intensite && (
-                      <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: INTENSITES[c.intensite].color, color: '#fff' }}>
+                      <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: INTENSITES[c.intensite].color, color: texteLisibleSur(INTENSITES[c.intensite].color) }}>
                         {c.intensite} · {INTENSITES[c.intensite].label}
                       </span>
                     )}
@@ -2645,6 +2967,47 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           </Card>
         )
       )}
+
+      {vue === 'suivi' && (() => {
+        const releves = suiviDePersonne(donnees, personne).filter((r) => dansPeriode(r.timestamp, periode));
+        if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
+        /* Un axe par colonne : le nombre d'axes n'est pas borné côté DatABA,
+           l'affichage ne présume donc de rien de plus qu'une liste. */
+        const parAxe = new Map();
+        releves.forEach((r) => {
+          if (!parAxe.has(r.nomAxe)) parAxe.set(r.nomAxe, []);
+          parAxe.get(r.nomAxe).push(r);
+        });
+        return (
+          <>
+            <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+              Ce que montre ce suivi est un état déclaré par l'équipe à un instant donné, pas une mesure de
+              performance : un axe qui bascule souvent peut refléter un contexte qui change autant qu'une évolution
+              de la personne.
+            </p>
+            <div className="space-y-4">
+              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => (
+                <Card key={nomAxeVal}>
+                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {rs.slice(0, 30).map((r) => (
+                      <div key={r.id} className="rounded-xl px-3 py-2 flex items-center gap-2 text-xs" style={{ backgroundColor: PAPER }}>
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.meta.color }} />
+                        <span style={{ color: INK_SOFT }}>{new Date(r.timestamp).toLocaleString('fr-FR')}</span>
+                        <span className="font-medium">
+                          {r.fin ? '— fin —' : (r.meta === CRITERE_INCONNU_SUIVI ? `${r.meta.l} (${r.cle})` : r.meta.l)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </>
+        );
+      })()}
 
       {vue === 'renfo' && (() => {
         const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
@@ -2698,13 +3061,13 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
                 Répartition du temps de séance, séance par séance
               </div>
-              <div style={{ height: 260 }} data-no-swipe>
+              <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
                     <CartesianGrid stroke={BORDER} vertical={false} />
                     <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                     <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <Bar dataKey="Activité" stackId="t" fill={INK} isAnimationActive={false} />
                     <Bar dataKey="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
@@ -2729,7 +3092,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
                   <YAxis yAxisId="g" domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
                   <YAxis yAxisId="d" orientation="right" allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={30} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Bar yAxisId="d" dataKey="crises" name="Crises" fill={CRISE} radius={[4, 4, 0, 0]} isAnimationActive={false} />
                   <Line yAxisId="g" type="monotone" dataKey="autonomie" name="Autonomie (%)" stroke={ACQUIS} strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
@@ -2743,6 +3106,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           </Card>
         )
       )}
+      </div>
     </div>
   );
 }
@@ -2908,7 +3272,7 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
         {L.length === 0 ? (
           <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucune donnée pour cette combinaison.</p>
         ) : (
-          <div data-no-swipe style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto' }}>
+          <div style={{ overflowX: 'auto', maxHeight: 520, overflowY: 'auto' }}>
             <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
               <thead>
                 <tr>
@@ -2941,7 +3305,10 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
                       return (
                         <td key={c} className="px-2 py-1.5 text-right whitespace-nowrap"
                           style={{ borderBottom: `1px solid ${BORDER}`, fontFamily: F_MONO,
-                            backgroundColor: v == null ? 'transparent' : `rgba(26, 52, 92, ${0.05 + intensite * 0.25})` }}>
+                            /* Teinte neutre (l'encre du thème, pas l'accent — une intensité de
+                               données n'est pas une sélection) à opacité variable : color-mix plutôt
+                               qu'un hex + alpha concaténé, invalide sur un token `var(--…)`. */
+                            backgroundColor: v == null ? 'transparent' : `color-mix(in srgb, ${INK} ${Math.round((0.05 + intensite * 0.25) * 100)}%, transparent)` }}>
                           {v == null ? '' : `${v}${mesure.suffixe || ''}`}
                         </td>
                       );
@@ -3118,7 +3485,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                 <div key={l.objectif} className="flex items-center gap-2 rounded-lg px-2.5 py-2" style={{ backgroundColor: PAPER }}>
                   <button onClick={() => basculer(l.objectif)}
                     className="w-5 h-5 rounded border flex items-center justify-center shrink-0 text-xs"
-                    style={{ borderColor: coche ? INK : BORDER, backgroundColor: coche ? INK : 'transparent', color: '#fff' }}>
+                    style={{ borderColor: coche ? ACCENT : BORDER, backgroundColor: coche ? ACCENT : 'transparent', color: ACCENT_INK }}>
                     {coche ? '✓' : ''}
                   </button>
                   <input value={(donnees.codesEfl || {})[l.objectif] || ''}
@@ -3223,7 +3590,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                 <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
                   {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
-                  {l.threshold != null && ` · critère ${l.threshold} % sur ${l.needed} séances`}
+                  {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
                 </div>
 
                 {(() => {
@@ -3405,7 +3772,7 @@ function LecteurExcel() {
       </p>
       <input type="file" accept=".xlsx,.xls" onChange={(e) => ouvrir(e.target.files && e.target.files[0])}
         className="w-full text-sm mb-2" />
-      {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+      {erreur && <p className="text-xs rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
 
       {classeur && (
         <>
@@ -3449,7 +3816,7 @@ function LecteurExcel() {
             ) : null))}
           </div>
 
-          <div style={{ overflowX: 'auto', maxHeight: 460, overflowY: 'auto' }} data-no-swipe>
+          <div style={{ overflowX: 'auto', maxHeight: 460, overflowY: 'auto' }}>
             <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
               <thead>
                 <tr>
@@ -3511,15 +3878,26 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
      pour que le rapprochement des personnes reste cohérent. */
   function integrerManager(paquet) {
     let cumul = donnees;
+    /* Les personnes du paquet portent déjà leur classeId : on le réinjecte
+       dans `students` pour que fusionnerImport le reprenne comme à un import
+       de tablette, et on transmet la définition des classes en une fois —
+       fusionnerClasses la déduplique par id, la répéter à chaque source ne
+       coûte rien. */
+    const classeIdDe = Object.fromEntries((paquet.personnes || []).map((p) => [p.initials, p.classeId || null]));
     (paquet.sources || []).forEach((src) => {
       const table = (paquet._idVersInitiales || {})[src] || {};
       const backup = {
-        students: Object.entries(table).map(([id, initials]) => ({ id, initials })),
+        students: Object.entries(table).map(([id, initials]) => ({ id, initials, classeId: classeIdDe[initials] || null })),
+        classes: paquet.classes || [],
         ateliers: Object.entries((paquet._ateliers || {})[src] || {}).map(([id, name]) => ({ id, name })),
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
-        stabilite: (paquet.stabilite || []).filter((r) => r.source === src),
+        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite` s'il
+           est présent dans le paquet, pour ne pas dupliquer les mêmes relevés. */
+        ...(Array.isArray(paquet.suivi)
+          ? { suivi: paquet.suivi.filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
+          : { stabilite: (paquet.stabilite || []).filter((r) => r.source === src) }),
       };
       cumul = fusionnerImport(cumul, backup, src);
     });
@@ -3582,9 +3960,15 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     const garder = initialesRetenues.length ? new Set(initialesRetenues) : null;
     const ini = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
     const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
+    /* Les classes retenues sont celles que gardent encore les personnes
+       sélectionnées : envoyer la liste complète enverrait le nom d'une classe
+       qui ne concerne aucune des personnes exportées. */
+    const classesGardees = new Set(personnes.map((p) => p.classeId).filter(Boolean));
+    const classes = (donnees.classes || []).filter((c) => classesGardees.has(c.id));
     const seances = donnees.seances.filter((s) => !garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid))));
     const crises = donnees.crises.filter((c) => !garder || garder.has(ini(c.source, c.studentId)));
     const stabilite = (donnees.stabilite || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
+    const suivi = (donnees.suivi || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
     const alias = { personnes: {}, objectifs: {} };
     Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
@@ -3598,11 +3982,12 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
       format: 'aba-manager-export',
       version: 1,
       exportedAt: new Date().toISOString(),
-      personnes, seances, crises, stabilite,
+      personnes, classes, seances, crises, stabilite, suivi,
       sources: donnees.sources,
       _idVersInitiales: donnees._idVersInitiales,
       _ateliers: donnees._ateliers,
       _intervenants: donnees._intervenants,
+      _axesSuivi: donnees._axesSuivi,
       alias, commentaires, codesEfl,
     };
   }
@@ -3663,7 +4048,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
             </Btn>
           </>
         )}
-        {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: '#fff', backgroundColor: NON_ACQUIS }}>{erreur}</p>}
+        {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
         {donnees.sources.length > 0 && (
           <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
         )}
@@ -3730,6 +4115,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                     seances: d.seances.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
                     crises: d.crises.filter((x) => new Date(x.date) >= new Date(`${avant}T00:00:00`)),
                     stabilite: (d.stabilite || []).filter((x) => new Date(x.timestamp) >= new Date(`${avant}T00:00:00`)),
+                    suivi: (d.suivi || []).filter((x) => new Date(x.timestamp) >= new Date(`${avant}T00:00:00`)),
                   }));
                 }
               }}>
@@ -3755,15 +4141,18 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         delete ate[src];
                         const inter = { ...(d._intervenants || {}) };
                         delete inter[src];
+                        const axes = { ...(d._axesSuivi || {}) };
+                        delete axes[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
+                        const suivi = (d.suivi || []).filter((x) => x.source !== src);
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
                         const encore = new Set();
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
                         return {
-                          ...d, seances, crises, stabilite, sources: d.sources.filter((x) => x !== src),
-                          _idVersInitiales: reste, _ateliers: ate, _intervenants: inter,
+                          ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
+                          _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -3802,6 +4191,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         .filter((se) => (se.studentIds || []).length > 0);
                       const crises = d.crises.filter((c) => ((d._idVersInitiales || {})[c.source] || {})[c.studentId] !== pp.initials);
                       const stabilite = (d.stabilite || []).filter((r) => ((d._idVersInitiales || {})[r.source] || {})[r.studentId] !== pp.initials);
+                      const suivi = (d.suivi || []).filter((r) => ((d._idVersInitiales || {})[r.source] || {})[r.studentId] !== pp.initials);
                       const alias = {
                         personnes: { ...(d.alias.personnes || {}) },
                         objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => k.split('|')[0] !== pp.initials)),
@@ -3813,7 +4203,7 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, stabilite, alias, commentaires,
+                        ...d, seances, crises, stabilite, suivi, alias, commentaires,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
@@ -3958,13 +4348,187 @@ class ErrorBoundary extends React.Component {
 }
 
 /* ==================== Application ==================== */
+/* ==================== Navigation latérale ====================
+   Remplace la rangée d'onglets et le balayage tactile : Manager est un poste
+   assis, les sept destinations tiennent en permanence à l'écran. Repliable en
+   rail d'icônes pour rendre la largeur au contenu (tableaux, graphiques,
+   Explorer) quand elle sert peu. Marquée no-print entièrement : jamais dans
+   un rapport ni dans une impression ciblée. */
+/* Les sept destinations, dans l'ordre où elles apparaissent dans la
+   navigation latérale — le même ordre sert aux raccourcis clavier 1-7,
+   d'où la constante commune plutôt qu'une définition locale à chaque. */
+const ONGLETS = [
+  { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
+  { k: 'seances', l: 'Séances', icone: CalendarDays },
+  { k: 'personnes', l: 'Personnes accompagnées', icone: Users },
+  { k: 'crises', l: 'Crises', icone: AlertTriangle },
+  { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
+  { k: 'rapport', l: 'Rapport', icone: FileText },
+  { k: 'gestion', l: 'Gestion', icone: Settings },
+];
+
+/* Palette de commande : ⌘K/Ctrl+K, aller à une personne au clavier. Seule
+   fenêtre modale de Manager — d'où sa gestion à part plutôt qu'un état de
+   plus dans un composant déjà chargé. */
+function PaletteCommande({ donnees, onChoisir, onFermer }) {
+  const [q, setQ] = useState('');
+  const champRef = useRef(null);
+  useEffect(() => { if (champRef.current) champRef.current.focus(); }, []);
+
+  const norm = (s) => String(s || '').toLowerCase();
+  const termes = norm(q);
+  const resultats = donnees.personnes
+    .filter((p) => norm(nomAffiche(donnees, p.initials)).includes(termes) || norm(p.initials).includes(termes))
+    .slice(0, 8);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4 no-print"
+      style={{ backgroundColor: OVERLAY_BACKDROP }} onClick={onFermer}>
+      <div className="w-full max-w-md rounded-2xl border overflow-hidden shadow-lg"
+        style={{ backgroundColor: CARD, borderColor: BORDER }} onClick={(e) => e.stopPropagation()}>
+        <div className="px-3 py-2.5 border-b" style={{ borderColor: BORDER }}>
+          <input ref={champRef} value={q} onChange={(e) => setQ(e.target.value)}
+            placeholder="Aller à une personne…" autoComplete="off"
+            className="w-full bg-transparent text-sm outline-none" style={{ color: INK, fontFamily: F_BODY }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && resultats[0]) onChoisir(resultats[0]); }} />
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1.5">
+          {resultats.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-center" style={{ color: INK_SOFT }}>Aucune personne ne correspond.</div>
+          ) : resultats.map((p) => (
+            <button key={p.initials} onClick={() => onChoisir(p)}
+              className="w-full text-left rounded-lg px-3 py-2 text-sm flex items-center justify-between gap-2">
+              <span style={{ color: INK }}>{nomAffiche(donnees, p.initials)}</span>
+              {nomClasseDe(donnees, p.initials) && (
+                <span className="text-xs shrink-0" style={{ color: INK_SOFT }}>{nomClasseDe(donnees, p.initials)}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="px-3 py-2 border-t text-xs" style={{ borderColor: BORDER, color: INK_SOFT }}>
+          Entrée pour choisir · Échap pour fermer
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NavigationLaterale({ onglets, tab, setTab, theme, onBasculerTheme, donnees, replie, onReplier, densite, onDensite }) {
+  const largeur = replie ? 64 : 236;
+  return (
+    <aside className="no-print shrink-0 sticky top-0 h-screen flex flex-col border-r overflow-hidden"
+      style={{ width: largeur, borderColor: BORDER, backgroundColor: NAV_BG, transition: 'width .15s ease' }}>
+      <div className="px-3 pt-4 pb-3">
+        {replie ? (
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-sm"
+            style={{ fontFamily: F_DISPLAY, backgroundColor: CARD, color: INK_SOFT }}>DM</div>
+        ) : (
+          <>
+            <img src={`${import.meta.env.BASE_URL}logo-databa.png`} alt="DatABA" className="w-full max-w-[160px] h-auto" />
+            <div className="text-xs font-semibold tracking-wide mt-1" style={{ fontFamily: F_DISPLAY, color: INK_SOFT }}>MANAGER</div>
+          </>
+        )}
+      </div>
+
+      <nav className="flex-1 px-2 space-y-1 overflow-y-auto">
+        {onglets.map((t) => {
+          const Icone = t.icone;
+          const on = tab === t.k;
+          return (
+            <button key={t.k} onClick={() => setTab(t.k)} title={replie ? t.l : undefined}
+              className="w-full rounded-lg px-2.5 py-2.5 text-sm font-medium flex items-center gap-2.5"
+              style={{ fontFamily: F_DISPLAY, backgroundColor: on ? ACCENT_WASH : 'transparent', color: on ? ACCENT : INK_SOFT }}>
+              <Icone size={17} className="shrink-0" />
+              {!replie && <span className="truncate">{t.l}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="px-2 pb-3 pt-2 border-t" style={{ borderColor: BORDER }}>
+        {!replie && (
+          <>
+            <div className="px-2 text-xs" style={{ color: INK_SOFT }}>
+              {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
+            </div>
+            {/* Raccourcis découvrables plutôt que secrets : la mention reste
+                à l'écran en permanence, pas cachée dans un menu d'aide. */}
+            <div className="px-2 pb-2 text-xs" style={{ color: INK_SOFT, opacity: 0.75 }} title="Ctrl/⌘+K : aller à une personne. 1-7 : changer d'onglet.">
+              ⌘K une personne · 1-7 les onglets
+            </div>
+          </>
+        )}
+        <div className="flex items-center gap-1.5 px-0.5">
+          <button
+            onClick={onBasculerTheme}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
+            title={theme === 'dark' ? 'Thème clair' : 'Thème sombre'}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+          <button
+            onClick={() => onDensite((d) => (d === 'compact' ? 'confort' : 'compact'))}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={densite === 'compact' ? 'Densité confortable' : 'Densité compacte'}
+            title={densite === 'compact' ? 'Affichage confortable' : 'Affichage compact'}
+          >
+            {densite === 'compact' ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+          </button>
+          <button
+            onClick={() => onReplier((r) => !r)}
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: CARD, color: INK_SOFT }}
+            aria-label={replie ? 'Déplier la navigation' : 'Replier la navigation'}
+            title={replie ? 'Déplier' : 'Replier'}
+          >
+            {replie ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function ManagerApp() {
+  /* Thème clair/sombre. Posé une première fois par le script bloquant de
+     index.html (attribut data-theme sur <html>, avant le premier rendu) ;
+     l'état ici ne fait que le lire et le faire suivre au bouton. Préférence
+     non sensible : clé aba-cadre: en clair, hors du chiffrement — même
+     logique que côté DatABA. */
+  const [theme, setThemeState] = useState(() => {
+    if (typeof document === 'undefined') return 'light';
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  });
+  const basculerTheme = () => {
+    setThemeState((t) => {
+      const suivant = t === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', suivant);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', suivant === 'dark' ? '#0A1120' : '#F3F6FB');
+      try { window.localStorage.setItem(`${PREFIXE}theme`, suivant); } catch (e) {}
+      return suivant;
+    });
+  };
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
   const [secuLue, setSecuLue] = useState(false);
   const [verrouille, setVerrouille] = useState(true);
   const [tab, setTab] = useState('bord');
+  /* Navigation latérale repliée en rail d'icônes. Choix de lecture, pas de
+     donnée : jamais persisté, jamais dans le bloc chiffré. */
+  const [railReplie, setRailReplie] = useState(false);
+  /* Palette de commande : ⌘K/Ctrl+K pour aller à une personne sans passer
+     par la souris. Seule fenêtre modale de Manager — Échap la ferme. */
+  const [paletteOuverte, setPaletteOuverte] = useState(false);
+  /* Densité d'affichage : confort (défaut) ou compact. Un cadre balaie des
+     dizaines de séances, il ne cote pas dans l'urgence — le compromis
+     tablette (cibles tactiles larges) ne s'impose pas ici. Choix de
+     lecture, jamais persisté. */
+  const [densite, setDensite] = useState('confort');
   const [toast, setToast] = useState('');
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
@@ -4046,6 +4610,31 @@ function ManagerApp() {
     };
   }, [securite.pinHash, securite.disabled, verrouille]);
 
+  /* Raccourcis clavier : 1-7 pour les onglets, ⌘K/Ctrl+K pour aller à une
+     personne, Échap pour fermer la palette. Inactifs pendant une saisie
+     (champ de texte, liste déroulante) — sans quoi taper un commentaire
+     changerait d'onglet à chaque chiffre. */
+  useEffect(() => {
+    const surTouche = (e) => {
+      const cible = e.target;
+      const saisie = cible && (cible.tagName === 'INPUT' || cible.tagName === 'TEXTAREA' || cible.tagName === 'SELECT' || cible.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOuverte(true);
+        return;
+      }
+      if (e.key === 'Escape' && paletteOuverte) {
+        setPaletteOuverte(false);
+        return;
+      }
+      if (saisie || paletteOuverte || e.metaKey || e.ctrlKey || e.altKey) return;
+      const n = Number(e.key);
+      if (n >= 1 && n <= ONGLETS.length) setTab(ONGLETS[n - 1].k);
+    };
+    document.addEventListener('keydown', surTouche);
+    return () => document.removeEventListener('keydown', surTouche);
+  }, [paletteOuverte]);
+
   async function changerMotDePasse(nouveau) {
     const pinSalt = newSalt();
     const dataSalt = newSalt();
@@ -4092,7 +4681,7 @@ function ManagerApp() {
   function purger(transformer) {
     setDonnees((d) => {
       const suite = transformer(d);
-      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined };
+      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined, collisionsInitiales: undefined };
     });
     notify('Données purgées');
   }
@@ -4102,7 +4691,11 @@ function ManagerApp() {
     if (fusion.nbNouvellesSeances != null) {
       notify(
         `${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`
-        + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de stabilité` : '')
+        + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de suivi continu` : '')
+        /* Deux personnes de classes différentes, mêmes initiales : la fusion
+           les a réunies en une seule sans pouvoir les distinguer. Signalé
+           plutôt que résolu — voir fusionnerImport. */
+        + (fusion.collisionsInitiales ? ` · ⚠ ${fusion.collisionsInitiales} collision(s) d'initiales entre classes, à vérifier` : '')
       );
     }
     setTab('bord');
@@ -4200,25 +4793,6 @@ function ManagerApp() {
     setTab('crises');
   }
 
-  const onglets = [
-    { k: 'bord', l: 'Tableau de bord', icone: LayoutDashboard },
-    { k: 'seances', l: 'Séances', icone: CalendarDays },
-    { k: 'personnes', l: 'Personnes accompagnées', icone: Users },
-    { k: 'crises', l: 'Crises', icone: AlertTriangle },
-    { k: 'explorer', l: 'Explorer', icone: Grid3x3 },
-    { k: 'rapport', l: 'Rapport', icone: FileText },
-    { k: 'gestion', l: 'Gestion', icone: Settings },
-  ];
-
-  /* Balayage entre onglets, pour l'usage sur mobile. */
-  const rangActuel = onglets.findIndex((t) => t.k === tab);
-  const allerA = (n) => {
-    if (n < 0 || n >= onglets.length) return;
-    setTab(onglets[n].k);
-    window.scrollTo({ top: 0 });
-  };
-  const balayage = useBalayage(() => allerA(rangActuel + 1), () => allerA(rangActuel - 1));
-
   if (!secuLue) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   if (!securite.disabled && (verrouille || !securite.pinHash)) {
@@ -4242,36 +4816,12 @@ function ManagerApp() {
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
   return (
-    <div ref={balayage.ref} className="min-h-screen" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
-      <div
-        className="max-w-5xl mx-auto px-6 py-6"
-        style={{
-          transform: balayage.decalage ? `translateX(${balayage.decalage}px)` : 'none',
-          transition: balayage.enCours ? 'none' : 'transform .2s ease-out',
-        }}
-      >
-        <div className="flex items-baseline justify-between gap-4 mb-4 no-print">
-          <h1 className="text-xl font-semibold" style={{ fontFamily: F_DISPLAY }}>DatABA Manager</h1>
-          <span className="text-xs" style={{ color: INK_SOFT }}>
-            {donnees.personnes.length} personne{donnees.personnes.length !== 1 ? 's' : ''} · {donnees.seances.length} séance{donnees.seances.length !== 1 ? 's' : ''}
-          </span>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 mb-6 no-print">
-          {onglets.map((t) => {
-            const Icone = t.icone;
-            const on = tab === t.k;
-            return (
-              <button key={t.k} onClick={() => setTab(t.k)}
-                className="flex-1 min-w-[110px] rounded-xl px-3 py-2.5 text-sm font-medium border flex items-center justify-center gap-1.5"
-                style={{ fontFamily: F_DISPLAY, borderColor: on ? INK : BORDER,
-                  backgroundColor: on ? INK : 'transparent', color: on ? '#fff' : INK_SOFT }}>
-                <Icone size={15} /> <span className="hidden sm:inline">{t.l}</span>
-              </button>
-            );
-          })}
-        </div>
-
+    <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
+      <NavigationLaterale onglets={ONGLETS} tab={tab} setTab={setTab}
+        theme={theme} onBasculerTheme={basculerTheme} donnees={donnees}
+        replie={railReplie} onReplier={setRailReplie}
+        densite={densite} onDensite={setDensite} />
+      <div className="flex-1 min-w-0 px-6 py-6 lg:px-8">
         <div className="no-print">
           {tab === 'bord' && (
             <>
@@ -4283,7 +4833,7 @@ function ManagerApp() {
           {tab === 'seances' && (
             <>
               <SectionTitle sub="Consulter ce qui a été importé, et vérifier l'accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
-              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} />
+              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite} />
             </>
           )}
           {tab === 'personnes' && (
@@ -4334,9 +4884,15 @@ function ManagerApp() {
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm text-white shadow-lg no-print" style={{ backgroundColor: INK }}>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm shadow-lg no-print" style={{ backgroundColor: ACCENT, color: ACCENT_INK }}>
           {toast}
         </div>
+      )}
+
+      {paletteOuverte && (
+        <PaletteCommande donnees={donnees}
+          onChoisir={(p) => { setFocus({ initiales: p.initials, objectif: null }); setTab('personnes'); setPaletteOuverte(false); }}
+          onFermer={() => setPaletteOuverte(false)} />
       )}
     </div>
   );

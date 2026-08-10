@@ -6,9 +6,29 @@
     <title>DatABA Manager</title>
     <meta name="description" content="Consolidation et bilan des cotations DatABA, pour les cadres pédagogiques" />
 
+    <!-- Thème clair/sombre choisi avant le premier rendu : évite le flash d'un
+         thème puis l'autre. Préférence explicite sinon système ; clé
+         aba-cadre: en clair, ce n'est pas une donnée sensible — même script
+         que côté DatABA, avec le préfixe de Manager. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('aba-cadre:theme');
+          if (t !== 'light' && t !== 'dark') {
+            t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+          document.addEventListener('DOMContentLoaded', function () {
+            var m = document.querySelector('meta[name="theme-color"]');
+            if (m) m.setAttribute('content', t === 'dark' ? '#0A1120' : '#F3F6FB');
+          });
+        } catch (e) {}
+      })();
+    </script>
+
     <!-- Manifeste : c'est lui, avec le service worker, qui rend l'app installable -->
     <link rel="manifest" href="./manifest.webmanifest" />
-    <meta name="theme-color" content="#20291F" />
+    <meta name="theme-color" content="#F3F6FB" />
     <link rel="icon" type="image/png" href="./icon-192.png" />
     <link rel="apple-touch-icon" href="./icon-192.png" />
     <meta name="apple-mobile-web-app-title" content="DatABA Manager" />

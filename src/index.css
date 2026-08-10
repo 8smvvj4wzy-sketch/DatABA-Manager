@@ -2,6 +2,75 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Tokens de surface, repris de DatABA (src/index.css) avec le bleu en couleur
+   d'accent : c'est ce qui distingue les deux applications au premier coup
+   d'œil, à la place que jouait le bleu dans l'ancienne palette beige de
+   Manager. Posés avant le premier rendu par le script anti-flash de
+   index.html. La palette catégorielle (états d'acquisition, séries) ne fait
+   pas partie de ces variables : elle reste fixe entre les deux thèmes. */
+:root {
+  --paper: #F3F6FB;
+  --card: #FFFFFF;
+  --border: #D7E0EE;
+  --ink: #0E1B33;
+  --ink-soft: #52627A;
+  --accent: #4A4A4A;
+  --accent-ink: #FFFFFF;
+  --nav-bg: #E4E9F5;
+  --crisis: #D7263D;
+  --accent-wash: rgba(74, 74, 74, 0.08);
+  --overlay-backdrop: rgba(0, 0, 0, 0.5);
+  --color-abc: #4A4A4A;
+}
+/* Pas de repli CSS sur prefers-color-scheme : le script anti-flash de
+   index.html tranche toujours avant le premier rendu (préférence enregistrée
+   sinon détection système) et pose data-theme explicitement, donc cet
+   attribut est toujours présent — même logique que côté DatABA. */
+:root[data-theme='dark'] {
+  --paper: #0A1120;
+  --card: #121A2E;
+  --border: #24304A;
+  --ink: #E7ECF7;
+  --ink-soft: #93A2C0;
+  --accent: #5B8CFF;
+  --accent-ink: #071021;
+  --nav-bg: #0F1830;
+  --crisis: #FF5470;
+  --accent-wash: rgba(91, 140, 255, 0.14);
+  --color-abc: #7C5CFF;
+}
+
+body {
+  margin: 0;
+  background-color: var(--paper);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Anneau de focus, dérivé de l'accent : DatABA ne le traite pas (écart
+   assumé sur les champs, DESIGN.md), mais un poste PC se pilote aussi au
+   clavier — ce n'est pas optionnel ici. `:focus-visible` plutôt que
+   `:focus` : pas d'anneau après un clic à la souris, seulement après une
+   navigation au clavier (Tab, flèches). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Survol : un signal discret sur tout bouton actionnable, dans le sens du
+   thème (assombrir sur fond clair, éclaircir sur fond sombre — l'inverse
+   n'aurait aucun effet visible sur un fond déjà proche du blanc ou du noir).
+   `:disabled` en est exclu : un bouton inactif ne doit pas donner l'illusion
+   de répondre au survol. */
+button:not(:disabled) {
+  transition: filter 0.1s ease;
+}
+:root[data-theme='light'] button:not(:disabled):hover {
+  filter: brightness(0.96);
+}
+:root[data-theme='dark'] button:not(:disabled):hover {
+  filter: brightness(1.18);
+}
+
 /* Visible seulement à l'impression : les commentaires sont saisis dans un
    champ à l'écran, et rendus en texte simple sur le document. */
 .print-only { display: none; }
@@ -13,6 +82,22 @@
      l'intérieur ne sortait que des pages blanches. */
   .no-print:not(.chemin-impression) { display: none !important; }
   .print-only { display: block !important; }
+  /* Le thème sombre ne part jamais à l'imprimante, quel que soit le réglage
+     à l'écran. `!important` est nécessaire ici : `:root[data-theme='dark']`
+     a une spécificité plus élevée qu'un simple `:root`, l'ordre de
+     déclaration seul ne suffirait pas à le faire céder sous ce media query. */
+  :root {
+    --paper: #F3F6FB !important;
+    --card: #FFFFFF !important;
+    --border: #D7E0EE !important;
+    --ink: #0E1B33 !important;
+    --ink-soft: #52627A !important;
+    --accent: #4A4A4A !important;
+    --accent-ink: #FFFFFF !important;
+    --nav-bg: #E4E9F5 !important;
+    --crisis: #D7263D !important;
+    --color-abc: #4A4A4A !important;
+  }
   body { background: #fff !important; }
   .rounded-2xl { border: none !important; padding: 0 !important; }
   @page { margin: 18mm 14mm; }
