@@ -94,8 +94,8 @@ for f in src/App.jsx; do
 
   # Blocs de rendu conditionnels dupliqués : {vue === 'x' && …} écrit deux fois
   # dans le même composant produit deux affichages superposés. Le grep de
-  # premier niveau ne les voit pas — c'est ce qui a laissé passer le doublon de
-  # la vue Renforcement.
+  # premier niveau ne les voit pas — c'est ce qui a laissé passer un doublon de
+  # sous-vue dans la fiche personne.
   # La garde doit être seule — « {vue === 'x' && ( » en début de ligne. Sans
   # cette exigence, deux conditions différentes qui commencent pareil
   # ({mode === 'export' && (} et {mode === 'export' && p1.length > 0 && (})

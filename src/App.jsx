@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
-  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
+  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, Minimize2, Maximize2,
 } from 'lucide-react';
@@ -691,12 +691,11 @@ function construireLignes(donnees) {
 }
 
 /* ==================== Table de faits ====================
-   Une ligne par cotation, par crise et par renforcement, avec toutes les
-   dimensions résolues. C'est ce qui permet de croiser librement deux axes
-   sans avoir prévu la combinaison à l'avance. */
+   Une ligne par cotation, par crise et par segment de suivi continu, avec
+   toutes les dimensions résolues. C'est ce qui permet de croiser librement
+   deux axes sans avoir prévu la combinaison à l'avance. */
 function construireFaits(donnees) {
   const cotations = [];
-  const renforcements = [];
   const nomIntervenant = (source, id) => {
     const t = (donnees._intervenants || {})[source] || {};
     return t[id] || 'Non renseigné';
@@ -728,18 +727,6 @@ function construireFaits(donnees) {
           score,
         });
       });
-
-      const r = (sess.reinforcement || {})[sid];
-      if (r && r.totalMs) {
-        renforcements.push({
-          seanceId: sess.id,
-          date: sess.date,
-          personne: initiales,
-          atelier,
-          intervenant,
-          minutes: Math.round(r.totalMs / 60000),
-        });
-      }
     });
   });
 
@@ -755,7 +742,7 @@ function construireFaits(donnees) {
     };
   });
 
-  return { cotations, crises, renforcements };
+  return { cotations, crises };
 }
 
 /* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
@@ -769,27 +756,6 @@ const TYPES_COTATION = {
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
-/* --- Temps de renforcement ---
-   Relevé par personne et par séance. Le temps d'activité est déduit de la
-   durée réelle de la séance, pauses comprises. */
-function renforcementsDe(donnees, initiales) {
-  const releves = [];
-  donnees.seances.forEach((se) => {
-    const sid = idPourSource(donnees, se.source, initiales);
-    if (!sid || !(se.studentIds || []).includes(sid)) return;
-    const r = (se.reinforcement || {})[sid];
-    const renfoMs = (r && r.totalMs) || 0;
-    const dureeMs = se.endedAt && se.startedAt ? Math.max(0, se.endedAt - se.startedAt) : 0;
-    releves.push({
-      date: se.date,
-      renfoMin: Math.round(renfoMs / 60000),
-      dureeMin: Math.round(dureeMs / 60000),
-      activiteMin: Math.max(0, Math.round((dureeMs - renfoMs) / 60000)),
-      part: dureeMs ? Math.round((renfoMs / dureeMs) * 100) : 0,
-    });
-  });
-  return releves.sort((a, b) => new Date(a.date) - new Date(b.date));
-}
 
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
@@ -894,9 +860,11 @@ function SectionTitle({ children, sub, icone: Icone }) {
 }
 
 /* Sélecteur de période, partagé par tous les écrans */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite }) {
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
+  const cmp = p.comparer;
+  const majCmp = (champs) => maj({ comparer: { ...(cmp || { mode: 'precedente', debut: '', fin: '' }), ...champs } });
 
   return (
     <Card className="mb-4">
@@ -950,7 +918,60 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite }) {
           {GRANULARITES.map((g) => <Chip key={g.k} label={g.label} on={p.granularite === g.k} onClick={() => maj({ granularite: g.k })} />)}
         </div>
       )}
+
+      {avecComparaison && (
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Comparer à</span>
+            <Chip label="Rien" on={!cmp} onClick={() => maj({ comparer: null })} />
+            <Chip label="Période précédente" on={!!cmp && cmp.mode === 'precedente'} onClick={() => majCmp({ mode: 'precedente' })} />
+            <Chip label="Dates précises" on={!!cmp && cmp.mode === 'dates'} onClick={() => majCmp({ mode: 'dates' })} />
+            {libelleComparaison(p) && (
+              <span className="text-xs ml-auto self-center" style={{ color: INK_SOFT }}>{libelleComparaison(p)}</span>
+            )}
+          </div>
+          {cmp && cmp.mode === 'dates' && (
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <span className="text-xs" style={{ color: INK_SOFT }}>du</span>
+              <input type="date" value={cmp.debut || ''} onChange={(e) => majCmp({ debut: e.target.value })}
+                className="rounded-lg border px-2 py-1.5 text-sm" style={{ borderColor: BORDER, color: INK, backgroundColor: CARD }} />
+              <span className="text-xs" style={{ color: INK_SOFT }}>au</span>
+              <input type="date" value={cmp.fin || ''} onChange={(e) => majCmp({ fin: e.target.value })}
+                className="rounded-lg border px-2 py-1.5 text-sm" style={{ borderColor: BORDER, color: INK, backgroundColor: CARD }} />
+            </div>
+          )}
+          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+            Un écart entre deux périodes montre ce qui a bougé, pas ce qui l'a fait bouger : un
+            changement de rythme, d'intervenant ou de saison se lit dans le même chiffre qu'un effet
+            de l'accompagnement.
+          </p>
+        </div>
+      )}
     </Card>
+  );
+}
+
+/* Écart avec la période de référence, dit seulement s'il est net.
+   Même double condition que `sensTendance` : un écart absolu et un écart
+   relatif. Sans elle, passer de 1 crise à 2 s'annoncerait « +100 % », et
+   l'écran crierait sur du bruit. En dessous du seuil on affiche « stable »,
+   pas rien : l'absence de mouvement est une réponse, le silence n'en est pas
+   une. `—` est réservé au cas où la référence n'existe pas. */
+function Ecart({ valeur, reference, unite = '', hausseFavorable = true, className = '' }) {
+  if (valeur == null || reference == null) {
+    return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>—</span>;
+  }
+  const delta = valeur - reference;
+  const net = Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
+  if (!net) {
+    return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>stable</span>;
+  }
+  const arrondi = Math.round(delta * 10) / 10;
+  const couleur = (delta > 0) === hausseFavorable ? ACQUIS : NON_ACQUIS;
+  return (
+    <span className={`text-xs ${className}`} style={{ color: couleur, fontFamily: F_MONO }}>
+      {arrondi > 0 ? '+' : '−'}{Math.abs(arrondi)}{unite}
+    </span>
   );
 }
 
@@ -989,7 +1010,12 @@ const GRANULARITES = [
   { k: 'mois', label: 'Mois' },
 ];
 
-const periodeVide = () => ({ mode: 'raccourci', jours: 30, debut: '', fin: '', moisDebut: '', moisFin: '', granularite: 'jour' });
+/* `comparer` : la période de référence à laquelle on oppose celle-ci, ou null.
+   Deux modes — 'precedente' (même durée, juste avant) et 'dates' (une plage
+   choisie, pour comparer à un trimestre précis plutôt qu'à ce qui précède).
+   Elle vit dans l'objet période plutôt qu'à côté : tout ce qui reçoit déjà
+   `periode` reçoit donc la comparaison sans changer de signature. */
+const periodeVide = () => ({ mode: 'raccourci', jours: 30, debut: '', fin: '', moisDebut: '', moisFin: '', granularite: 'jour', comparer: null });
 
 /* Bornes effectives, en millisecondes. null = pas de borne. */
 function bornesDe(p) {
@@ -1029,6 +1055,44 @@ function libellePeriode(p) {
     return `de ${f(p.moisDebut)} à ${f(p.moisFin)}`;
   }
   return (RACCOURCIS.find((r) => r.k === p.jours) || { label: 'Tout' }).label;
+}
+
+/* ==================== Période de comparaison ====================
+   « Est-ce que ce qu'on met en place porte ses fruits ? » ne se lit pas sur un
+   état, seulement sur un écart. D'où une seconde période, réglée une fois dans
+   le sélecteur et relue partout.
+
+   `periodeComparee` renvoie un objet période ordinaire : tout ce qui sait déjà
+   filtrer avec `dansPeriode` sait donc filtrer la référence, sans code de
+   filtrage en double. */
+function periodeComparee(p) {
+  const c = p && p.comparer;
+  if (!c) return null;
+  if (c.mode === 'dates') {
+    if (!c.debut && !c.fin) return null;
+    return { ...periodeVide(), mode: 'dates', debut: c.debut || '', fin: c.fin || '', granularite: p.granularite };
+  }
+  /* Période précédente de même durée. Une période ouverte d'un côté n'a pas de
+     durée : sans borne basse on retombe sur 30 jours, sans borne haute c'est
+     maintenant — mêmes replis que la tendance des crises, qui faisait déjà ce
+     calcul dans son coin avant d'être ramenée ici. */
+  const { min, max } = bornesDe(p);
+  const fin = max || Date.now();
+  const debut = min || (fin - 30 * 86400000);
+  const duree = fin - debut;
+  if (duree <= 0) return null;
+  const iso = (t) => {
+    const d = new Date(t);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  return { ...periodeVide(), mode: 'dates', debut: iso(debut - duree), fin: iso(debut - 1), granularite: p.granularite };
+}
+function libelleComparaison(p) {
+  const ref = periodeComparee(p);
+  if (!ref) return null;
+  if (p.comparer.mode === 'dates') return libellePeriode(ref);
+  return `période précédente (${libellePeriode(ref)})`;
 }
 
 /* Clé d'agrégation selon la granularité choisie */
@@ -1479,8 +1543,10 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 }
 
 /* ==================== Tableau de bord ==================== */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne, onOuvrirCrises }) {
-  const [unite, setUnite] = useState('nombre');
+/* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
+   montés conditionnellement, un état local d'écran ne survit pas à un
+   aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -1503,15 +1569,11 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
   const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
   const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
 
-  /* Période précédente de même durée, pour situer la tendance */
-  const { min, max } = bornesDe(periode);
-  const finRef = max || Date.now();
-  const debutRef = min || (finRef - 30 * 86400000);
-  const duree = finRef - debutRef;
-  const precedentes = crises.filter((c) => {
-    const t = new Date(c.date).getTime();
-    return t >= debutRef - duree && t < debutRef;
-  });
+  /* Période de référence : celle réglée dans le sélecteur si elle l'est, sinon
+     la précédente de même durée — le repli d'origine, désormais calculé par
+     periodeComparee plutôt qu'ici en double. */
+  const reference = periodeComparee(periode) || periodeComparee({ ...periode, comparer: { mode: 'precedente' } });
+  const precedentes = reference ? crises.filter((c) => dansPeriode(c.date, reference)) : [];
   const tendance = precedentes.length
     ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
     : null;
@@ -1535,7 +1597,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
 
   return (
     <div>
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
 
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
@@ -1601,7 +1663,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
             <span className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{recentesCrises.length}</span>
             {tendance != null && (
               <span className="text-xs" style={{ color: tendance > 0 ? NON_ACQUIS : tendance < 0 ? ACQUIS : INK_SOFT }}>
-                {tendance > 0 ? '+' : ''}{tendance} % vs période précédente
+                {tendance > 0 ? '+' : ''}{tendance} % vs {libelleComparaison(periode) || 'période précédente'}
               </span>
             )}
           </div>
@@ -2003,16 +2065,10 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
             const ini = table[sid];
             const objectifs = (seance.selectedObjectives || {})[sid] || [];
             const note = (seance.notes || {})[sid];
-            const renfo = (seance.reinforcement || {})[sid];
             return (
               <div key={sid} className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
                 <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>
                   {ini ? nomAffiche(donnees, ini) : 'Personne inconnue'}
-                  {renfo && renfo.totalMs > 0 && (
-                    <span className="text-xs font-normal ml-2" style={{ color: INK_SOFT }}>
-                      renforcement {Math.round(renfo.totalMs / 60000)} min
-                    </span>
-                  )}
                 </div>
                 {objectifs.length === 0 ? (
                   <div className="text-xs" style={{ color: INK_SOFT }}>Aucun objectif sélectionné.</div>
@@ -2379,9 +2435,12 @@ function crisesRetenues(donnees, config, periode) {
     .filter((c) => dansPeriode(c.date, periode));
 }
 
-function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusConsomme,
+/* `config` vient de ManagerApp, pour la même raison que `unite` du tableau de
+   bord : l'onglet est monté conditionnellement, et tout un bilan réglé —
+   personne, type, segmentation, blocs — repartait de zéro au moindre passage
+   par un autre onglet. */
+function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPersonne, onFocusConsomme,
   composition, onValiderBilan, onAnnulerBilan }) {
-  const [config, setConfig] = useState(configCriseVide());
   const [reglagesOuverts, setReglagesOuverts] = useState(false);
   const refChrono = useRef(null);
   const refZone = useRef(null);
@@ -2883,7 +2942,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'objectifs', l: 'Bilan des objectifs', icone: TrendingUp },
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
-          { k: 'renfo', l: 'Renforcement', icone: Gift },
           { k: 'suivi', l: 'Suivi continu', icone: Layers },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
@@ -3067,76 +3125,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         );
       })()}
 
-      {vue === 'renfo' && (() => {
-        const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
-        if (!releves.length) return <Empty>Aucune séance sur cette période.</Empty>;
-        const avecRenfo = releves.filter((r) => r.renfoMin > 0);
-        const totalRenfo = releves.reduce((a, r) => a + r.renfoMin, 0);
-        /* Deux moyennes, parce qu'elles ne répondent pas à la même question :
-           la générale compte les séances sans renforcement comme des zéros et
-           dit la place du renforcement dans l'accompagnement ; celle « quand il
-           y en a » ne porte que sur les séances concernées et dit la durée
-           habituelle d'un renforcement. Confondre les deux fait conclure à une
-           baisse là où il n'y a qu'un changement de fréquence. */
-        const moyenneGenerale = releves.length ? Math.round(totalRenfo / releves.length) : 0;
-        const moyenneRenfo = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.renfoMin, 0) / avecRenfo.length) : 0;
-        const moyennePart = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.part, 0) / avecRenfo.length) : 0;
-        const graphe = releves.map((r) => ({
-          label: new Date(r.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
-          Renforcement: r.renfoMin,
-          Activité: r.activiteMin,
-        }));
-        return (
-          <>
-            <Card className="mb-3">
-              <div className="flex flex-wrap gap-5">
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{moyenneGenerale} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenneRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>
-                    quand il y en a ({avecRenfo.length}/{releves.length} séances)
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyennePart} %</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>du temps de séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>au total sur la période</div>
-                </div>
-              </div>
-              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                Une séance sans renforcement compte comme zéro dans la moyenne générale : c'est ce qui
-                la distingue de la moyenne « quand il y en a », calculée sur les seules séances concernées.
-              </p>
-            </Card>
-
-            <Card>
-              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-                Répartition du temps de séance, séance par séance
-              </div>
-              <div style={{ height: 260 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="Activité" stackId="t" fill={INK} isAnimationActive={false} />
-                    <Bar dataKey="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </Card>
-          </>
-        );
-      })()}
-
       {vue === 'croisement' && (
         croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
           <Card>
@@ -3175,8 +3163,6 @@ const MESURES = [
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId' },
   { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte' },
   { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min' },
-  { k: 'renfo', label: 'Temps de renforcement', source: 'renforcements', agg: 'somme', champ: 'minutes', suffixe: ' min' },
-  { k: 'renfoMoyen', label: 'Renforcement moyen par séance', source: 'renforcements', agg: 'moyenne', champ: 'minutes', suffixe: ' min' },
 ];
 
 const DIMENSIONS = [
@@ -4597,6 +4583,12 @@ function ManagerApp() {
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
   const [periode, setPeriode] = useState(periodeVide());
+  /* Réglages d'écran qui doivent survivre à un changement d'onglet : les sept
+     onglets sont montés conditionnellement, un useState posé dans l'écran
+     repart de sa valeur initiale à chaque retour. Choix de lecture, jamais
+     persistés ni chiffrés — comme `periode` juste au-dessus. */
+  const [uniteBord, setUniteBord] = useState('nombre');
+  const [configCrises, setConfigCrises] = useState(configCriseVide());
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
@@ -4906,6 +4898,7 @@ function ManagerApp() {
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
+                unite={uniteBord} setUnite={setUniteBord}
                 onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
@@ -4927,6 +4920,7 @@ function ManagerApp() {
             <>
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
+                config={configCrises} setConfig={setConfigCrises}
                 focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
                 composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan} />
             </>
