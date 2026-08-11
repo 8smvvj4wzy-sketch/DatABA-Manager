@@ -698,10 +698,12 @@ function construireLignes(donnees) {
 }
 
 /* ==================== Table de faits ====================
-   Une ligne par cotation, par crise et par segment de suivi continu, avec
-   toutes les dimensions résolues. C'est ce qui permet de croiser librement
-   deux axes sans avoir prévu la combinaison à l'avance. */
-function construireFaits(donnees) {
+   Une ligne par cotation, par crise, par segment de suivi continu et par
+   objectif, avec toutes les dimensions résolues. C'est ce qui permet de
+   croiser librement deux axes sans avoir prévu la combinaison à l'avance.
+   `lignes` (état d'acquisition par personne × objectif, construireLignes)
+   nourrit la table `objectifs` ; les trois autres se suffisent à elles-mêmes. */
+function construireFaits(donnees, lignes) {
   const cotations = [];
   const nomIntervenant = (source, id) => {
     const t = (donnees._intervenants || {})[source] || {};
@@ -745,11 +747,71 @@ function construireFaits(donnees) {
       atelier: nomAtelier(donnees, c.source, c.atelierId),
       type: (c.kind || 'crise') === 'abc' ? 'Observation' : 'Crise',
       intensite: c.intensite ? `${c.intensite} · ${INTENSITES[c.intensite].label}` : 'Non renseignée',
+      intensiteNum: c.intensite || null,
       minutes: Math.round((c.durationMs || 0) / 60000),
     };
   });
 
-  return { cotations, crises };
+  /* Un fait par segment de suivi continu — pas par relevé : c'est la durée
+     bornée entre deux relevés qui a un sens à cumuler ou moyenner, un
+     horodatage isolé n'en a aucun. Les segments non bornés (voir
+     segmentsJournee) sont exclus, même règle que sur la fiche personne. */
+  const suivi = [];
+  (donnees.personnes || []).forEach((p) => {
+    const releves = suiviDePersonne(donnees, p.initials);
+    const parAxeJour = new Map();
+    releves.forEach((r) => {
+      const cle = `${r.nomAxe}|${jourLocal(r.timestamp)}`;
+      if (!parAxeJour.has(cle)) parAxeJour.set(cle, []);
+      parAxeJour.get(cle).push(r);
+    });
+    parAxeJour.forEach((rs, cle) => {
+      const axe = cle.slice(0, cle.lastIndexOf('|'));
+      const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      const nonFin = triees.filter((r) => !r.fin);
+      /* segmentsJournee ne pousse un segment que pour un relevé qui n'est pas
+         une clôture, dans le même ordre relatif : le k-ième segment retourné
+         correspond donc au k-ième relevé non-clôture de `triees`. */
+      segmentsJournee(triees).forEach((seg, i) => {
+        if (seg.ms == null) return;
+        const porteur = nonFin[i];
+        suivi.push({
+          date: new Date(seg.debut).toISOString(),
+          personne: p.initials,
+          atelier: porteur ? nomAtelier(donnees, porteur.source, porteur.atelierId) : 'Hors atelier',
+          intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
+          axe,
+          critere: seg.meta.l,
+          minutes: Math.round(seg.ms / 60000),
+        });
+      });
+    });
+  });
+
+  /* Un fait par personne × objectif, daté de sa cotation la plus récente :
+     l'état d'acquisition est une valeur globale (construireLignes), pas un
+     événement daté, mais l'ancrer ainsi permet de croiser « objectifs actifs
+     récemment » avec les axes temporels comme les autres tables. `evolution`
+     porte sur tout l'historique de l'objectif, pas seulement sur la période
+     affichée — la période ne filtre ici que la liste des objectifs retenus,
+     via leur dernière cotation. */
+  const objectifs = (lignes || [])
+    .filter((l) => l.points.length)
+    .map((l) => {
+      const dernier = l.points[l.points.length - 1];
+      const premier = l.points[0];
+      return {
+        date: dernier.date,
+        personne: l.initials,
+        objectif: l.objectif,
+        type: (TYPES_COTATION[l.type] || l.type),
+        etat: ETAT_RAPPORT[l.etat] || l.etat,
+        acquis: l.etat === 'acquis' ? 1 : 0,
+        evolution: l.points.length > 1 ? Math.round(dernier.value - premier.value) : null,
+      };
+    });
+
+  return { cotations, crises, suivi, objectifs };
 }
 
 /* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
@@ -3458,29 +3520,61 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   );
 }
 
+/* `hausseFavorable` sert à colorer l'écart entre deux périodes (voir Ecart,
+   lot socle) : true quand une hausse est le signe attendu d'un progrès, false
+   quand c'est l'inverse (crises, intensité). Sans jugement sur les mesures
+   neutres, laissées à true par convention plutôt que sans couleur du tout. */
 const MESURES = [
-  { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte' },
-  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %' },
-  { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId' },
-  { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte' },
-  { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min' },
+  { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
+  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %', hausseFavorable: true },
+  { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte', hausseFavorable: false },
+  { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
+  { k: 'dureeMoyenneCrise', label: 'Durée moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
+  { k: 'intensiteMoyenne', label: 'Intensité moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'intensiteNum', hausseFavorable: false },
+  { k: 'suiviDuree', label: 'Suivi continu : durée cumulée par critère', source: 'suivi', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: true },
+  /* « part » : proportion du total général de la mesure (même case, même
+     ligne, même colonne partagent le même dénominateur) — même convention que
+     la bascule Nombre/Pourcentage du tableau de bord et des crises, pas une
+     part relative à la ligne ou à la colonne. */
+  { k: 'suiviPart', label: 'Suivi continu : part du temps borné', source: 'suivi', agg: 'part', champ: 'minutes', suffixe: ' %', hausseFavorable: true },
+  { k: 'objAcquis', label: "Objectifs acquis (nombre)", source: 'objectifs', agg: 'somme', champ: 'acquis', hausseFavorable: true },
+  { k: 'objPartAcquis', label: 'Objectifs acquis (part du total)', source: 'objectifs', agg: 'part', champ: 'acquis', suffixe: ' %', hausseFavorable: true },
+  { k: 'autonomieEvolution', label: "Évolution de l'autonomie (première à dernière cotation)", source: 'objectifs', agg: 'moyenne', champ: 'evolution', suffixe: ' pts', hausseFavorable: true },
 ];
 
+/* `sources`, absent = applicable à toutes les mesures. Présent = liste des
+   tables de faits où le champ existe réellement — croiser un objectif avec
+   les crises n'a jamais eu de sens (aucune crise ne porte d'objectif), mais
+   rien ne l'empêchait avant : la colonne sortait vide sans un mot
+   d'explication au-delà de la note générale sous les menus. */
 const DIMENSIONS = [
   { k: 'aucune', label: 'Aucune', get: () => 'Total' },
   { k: 'personne', label: 'Personne', get: (f) => f.personne },
-  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier },
-  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné' },
-  { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—' },
-  { k: 'type', label: 'Type', get: (f) => f.type || '—' },
-  { k: 'phase', label: 'Phase', get: (f) => f.phase || '—' },
-  { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—' },
+  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi'] },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi'] },
+  { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—', sources: ['cotations', 'objectifs'] },
+  { k: 'type', label: 'Type', get: (f) => f.type || '—', sources: ['cotations', 'crises', 'objectifs'] },
+  { k: 'phase', label: 'Phase', get: (f) => f.phase || '—', sources: ['cotations'] },
+  { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—', sources: ['crises'] },
+  { k: 'axe', label: 'Axe de suivi', get: (f) => f.axe || '—', sources: ['suivi'] },
+  { k: 'critere', label: 'Critère de suivi', get: (f) => f.critere || '—', sources: ['suivi'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
 ];
 
-function agreger(faits, mesure) {
+/* `total`, optionnel, sert uniquement à `agg: 'part'` : la somme du champ sur
+   l'ensemble de la base filtrée, calculée une fois par l'appelant plutôt que
+   recalculée à chaque cellule. Sans lui, une mesure « part » ne peut rien
+   afficher — mieux vaut une case vide qu'un pourcentage sans dénominateur. */
+function agreger(faits, mesure, total) {
+  if (mesure.agg === 'part') {
+    if (!total || !faits.length) return null;
+    const valeurs = faits.map((f) => f[mesure.champ]).filter((v) => v != null);
+    if (!valeurs.length) return null;
+    return Math.round((valeurs.reduce((a, b) => a + b, 0) / total) * 100);
+  }
   if (!faits.length) return null;
   if (mesure.agg === 'compte') return faits.length;
   if (mesure.agg === 'distinct') return new Set(faits.map((f) => f[mesure.champ])).size;
@@ -3490,17 +3584,34 @@ function agreger(faits, mesure) {
   return mesure.agg === 'somme' ? Math.round(somme) : Math.round(somme / valeurs.length);
 }
 
-function ExplorerScreen({ donnees, periode, setPeriode }) {
+function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
   const [ligneDim, setLigneDim] = useState('personne');
   const [colonneDim, setColonneDim] = useState('semaine');
   const [mesureK, setMesureK] = useState('autonomie');
 
-  const faits = useMemo(() => construireFaits(donnees), [donnees.seances, donnees.crises, donnees.sources, donnees._idVersInitiales]);
+  const faits = useMemo(
+    () => construireFaits(donnees, lignes),
+    [donnees.seances, donnees.crises, donnees.suivi, donnees.stabilite, donnees.sources,
+      donnees._idVersInitiales, donnees._axesSuivi, donnees.personnes, lignes]
+  );
   const mesure = MESURES.find((m) => m.k === mesureK);
-  const dimL = DIMENSIONS.find((d) => d.k === ligneDim);
-  const dimC = DIMENSIONS.find((d) => d.k === colonneDim);
+  /* Les dimensions qui ne s'appliquent pas à la mesure choisie disparaissent
+     des menus plutôt que de proposer un croisement qui sortira vide sans
+     rien dire. Si le choix en cours devient inapplicable après un changement
+     de mesure, il retombe sur « Aucune » — dérivé au rendu, pas par un effet
+     qui rejouerait setLigneDim en boucle. */
+  const dimensionsApplicables = DIMENSIONS.filter((d) => !d.sources || d.sources.includes(mesure.source));
+  const ligneDimEff = dimensionsApplicables.some((d) => d.k === ligneDim) ? ligneDim : 'aucune';
+  const colonneDimEff = dimensionsApplicables.some((d) => d.k === colonneDim) ? colonneDim : 'aucune';
+  const dimL = DIMENSIONS.find((d) => d.k === ligneDimEff);
+  const dimC = DIMENSIONS.find((d) => d.k === colonneDimEff);
 
   const base = (faits[mesure.source] || []).filter((f) => dansPeriode(f.date, periode));
+  /* Période de comparaison réglée dans le sélecteur (lot socle) : sert à
+     l'écart affiché sous chaque case, jamais à la construction du tableau
+     lui-même — L et C restent ceux de la période affichée. */
+  const referencePeriode = periodeComparee(periode);
+  const baseRef = referencePeriode ? (faits[mesure.source] || []).filter((f) => dansPeriode(f.date, referencePeriode)) : [];
 
   /* Construction du croisement */
   const lignesCles = [];
@@ -3514,6 +3625,12 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     const cle = `${l}||${c}`;
     if (!cellules.has(cle)) cellules.set(cle, []);
     cellules.get(cle).push(f);
+  });
+  const cellulesRef = new Map();
+  baseRef.forEach((f) => {
+    const cle = `${dimL.get(f)}||${dimC.get(f)}`;
+    if (!cellulesRef.has(cle)) cellulesRef.set(cle, []);
+    cellulesRef.get(cle).push(f);
   });
 
   /* Les dimensions temporelles se lisent dans l'ordre du calendrier, pas par
@@ -3530,13 +3647,22 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     }
     return liste.slice().sort((a, b) => String(a).localeCompare(String(b), 'fr'));
   };
-  const L = trierTemps(ligneDim, lignesCles);
-  const C = trierTemps(colonneDim, colonnesCles);
+  const L = trierTemps(ligneDimEff, lignesCles);
+  const C = trierTemps(colonneDimEff, colonnesCles);
 
-  const valeurCellule = (l, c) => agreger(cellules.get(`${l}||${c}`) || [], mesure);
-  const totalLigne = (l) => agreger(base.filter((f) => dimL.get(f) === l), mesure);
-  const totalColonne = (c) => agreger(base.filter((f) => dimC.get(f) === c), mesure);
-  const totalGeneral = agreger(base, mesure);
+  /* Dénominateur de `agg: 'part'` : la somme du champ sur toute la base
+     filtrée, même convention que la bascule Nombre/Pourcentage ailleurs dans
+     l'application — chaque case, chaque total de ligne et de colonne
+     rapportés au même total général, jamais à leur propre sous-total. */
+  const sommeChamp = (liste) => liste.reduce((a, f) => (f[mesure.champ] != null ? a + f[mesure.champ] : a), 0);
+  const totalPart = mesure.agg === 'part' ? sommeChamp(base) : null;
+  const totalPartRef = mesure.agg === 'part' ? sommeChamp(baseRef) : null;
+
+  const valeurCellule = (l, c) => agreger(cellules.get(`${l}||${c}`) || [], mesure, totalPart);
+  const valeurCelluleRef = (l, c) => agreger(cellulesRef.get(`${l}||${c}`) || [], mesure, totalPartRef);
+  const totalLigne = (l) => agreger(base.filter((f) => dimL.get(f) === l), mesure, totalPart);
+  const totalColonne = (c) => agreger(base.filter((f) => dimC.get(f) === c), mesure, totalPart);
+  const totalGeneral = agreger(base, mesure, totalPart);
 
   /* Échelle de couleur : repérer d'un coup d'œil les cases fortes */
   const toutes = L.flatMap((l) => C.map((c) => valeurCellule(l, c))).filter((v) => v != null);
@@ -3545,12 +3671,23 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
   function exporterCsv() {
     const sep = ';';
     const echapper = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-    const lignes = [[dimL.label, ...C, 'Total'].map(echapper).join(sep)];
+    /* Nomm\u00E9 `lignesCsv` pour ne pas masquer la prop `lignes` (\u00E9tat
+       d'acquisition) re\u00E7ue par l'\u00E9cran \u2014 m\u00EAme variable, deux sens diff\u00E9rents,
+       source d'erreur si on les confond en relisant plus tard. */
+    const enTete = [dimL.label, ...C, 'Total'];
+    if (referencePeriode) enTete.push(`\u00C9cart vs ${libelleComparaison(periode)}`);
+    const lignesCsv = [enTete.map(echapper).join(sep)];
     L.forEach((l) => {
-      lignes.push([l, ...C.map((c) => valeurCellule(l, c)), totalLigne(l)].map(echapper).join(sep));
+      const rangee = [l, ...C.map((c) => valeurCellule(l, c)), totalLigne(l)];
+      if (referencePeriode) {
+        const cur = C.reduce((a, c) => a + (valeurCellule(l, c) || 0), 0);
+        const ref = C.reduce((a, c) => a + (valeurCelluleRef(l, c) || 0), 0);
+        rangee.push(cur - ref);
+      }
+      lignesCsv.push(rangee.map(echapper).join(sep));
     });
-    lignes.push(['Total', ...C.map((c) => totalColonne(c)), totalGeneral].map(echapper).join(sep));
-    const blob = new Blob(['\uFEFF' + lignes.join('\n')], { type: 'text/csv;charset=utf-8' });
+    lignesCsv.push(['Total', ...C.map((c) => totalColonne(c)), totalGeneral].map(echapper).join(sep));
+    const blob = new Blob(['\uFEFF' + lignesCsv.join('\n')], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -3559,9 +3696,12 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  /* Sans séance importée, le croisement n'a rien à montrer — mais le lecteur de
-     rapport tableur, lui, reste utilisable : il ne dépend d'aucun import. */
-  if (!donnees.seances.length) {
+  /* Sans aucune donnée croisable, le croisement n'a rien à montrer — mais le
+     lecteur de rapport tableur, lui, reste utilisable : il ne dépend d'aucun
+     import. Un import de suivi continu sans séance (voir fusionnerImport)
+     suffit désormais à ouvrir l'écran, la table `suivi` ne dépendant pas des
+     séances. */
+  if (!donnees.seances.length && !(donnees.suivi || []).length && !(donnees.stabilite || []).length) {
     return (
       <div>
         <Empty>Importez une sauvegarde depuis l'onglet Gestion pour explorer les données.</Empty>
@@ -3583,31 +3723,32 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
-            <select value={ligneDim} onChange={(e) => setLigneDim(e.target.value)}
+            <select value={ligneDimEff} onChange={(e) => setLigneDim(e.target.value)}
               className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+              {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
-            <select value={colonneDim} onChange={(e) => setColonneDim(e.target.value)}
+            <select value={colonneDimEff} onChange={(e) => setColonneDim(e.target.value)}
               className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+              {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
         </div>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-          Toutes les dimensions ne s'appliquent pas à toutes les mesures : croiser un objectif
-          avec un nombre de crises n'a pas de sens, la colonne restera vide.
+          Seules les dimensions qui existent réellement pour la mesure choisie sont proposées :
+          un objectif n'a pas d'atelier ni de critère de suivi, une crise n'a pas de phase.
         </p>
       </Card>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
 
       <Card className="mb-3">
         <div className="flex items-center justify-between gap-2 mb-2">
           <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
             {mesure.label} · {libellePeriode(periode)}
+            {referencePeriode && ` · écart vs ${libelleComparaison(periode)}`}
           </span>
           <Btn variant="outline" onClick={exporterCsv} disabled={!L.length} className="text-xs py-1.5">
             <Download size={14} /> CSV
@@ -3655,6 +3796,9 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
                                qu'un hex + alpha concaténé, invalide sur un token `var(--…)`. */
                             backgroundColor: v == null ? 'transparent' : `color-mix(in srgb, ${INK} ${Math.round((0.05 + intensite * 0.25) * 100)}%, transparent)` }}>
                           {v == null ? '' : `${v}${mesure.suffixe || ''}`}
+                          {referencePeriode && (
+                            <div><Ecart valeur={v} reference={valeurCelluleRef(l, c)} unite={mesure.suffixe || ''} hausseFavorable={mesure.hausseFavorable !== false} /></div>
+                          )}
                         </td>
                       );
                     })}
@@ -5246,7 +5390,7 @@ function ManagerApp() {
           {tab === 'explorer' && (
             <>
               <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
-              <ExplorerScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} />
             </>
           )}
           {tab === 'gestion' && (
