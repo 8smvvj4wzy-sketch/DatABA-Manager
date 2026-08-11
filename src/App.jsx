@@ -1486,14 +1486,28 @@ function MiniGraphe({ points, couleur }) {
 }
 
 /* Radar : quels objectifs sont travaillés, et à quel niveau */
-function RadarObjectifs({ lignes, hauteur = 320 }) {
+/* Une seule série ne répondait à rien : le dernier résultat de chaque
+   objectif est une photo, pas une évolution. Avec une période de comparaison
+   réglée (voir periodeComparee), une seconde série superpose le dernier
+   résultat de la même période de référence — la forme qui se creuse ou se
+   remplit d'un contour à l'autre montre ce qui a bougé. Sans comparaison
+   réglée, une seule série : le comportement d'origine reste le repli. */
+function RadarObjectifs({ lignes, lignesRef, libelleRef, hauteur = 320 }) {
+  const tronque = (nom) => (nom.length > 22 ? `${nom.slice(0, 20)}…` : nom);
+  const dernier = (l) => (l.points.length ? l.points[l.points.length - 1].value : null);
+  const refDe = (objectif) => (lignesRef || []).find((l) => l.objectif === objectif);
+
   const donnees = lignes
     .filter((l) => l.points.length)
-    .map((l) => ({
-      objectif: l.objectif.length > 22 ? `${l.objectif.slice(0, 20)}…` : l.objectif,
-      niveau: l.points[l.points.length - 1].value,
-      seances: l.points.length,
-    }));
+    .map((l) => {
+      const ref = refDe(l.objectif);
+      return {
+        objectif: tronque(l.objectif),
+        niveau: dernier(l),
+        seances: l.points.length,
+        reference: ref && ref.points.length ? dernier(ref) : null,
+      };
+    });
   if (donnees.length < 3) {
     return <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Le radar demande au moins trois objectifs cotés sur la période.</p>;
   }
@@ -1504,9 +1518,13 @@ function RadarObjectifs({ lignes, hauteur = 320 }) {
           <PolarGrid stroke={BORDER} />
           <PolarAngleAxis dataKey="objectif" tick={{ fontSize: 10, fill: INK_SOFT }} />
           <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: INK_SOFT }} />
-          <Radar name="Dernier résultat" dataKey="niveau" stroke={INK} fill={INK} fillOpacity={0.25} isAnimationActive={false} />
+          {lignesRef && (
+            <Radar name={libelleRef || 'Période de référence'} dataKey="reference" stroke={INK_SOFT} fill={INK_SOFT} fillOpacity={0.12} strokeDasharray="4 3" isAnimationActive={false} />
+          )}
+          <Radar name="Dernier résultat" dataKey="niveau" stroke={ACCENT} fill={ACCENT} fillOpacity={0.25} isAnimationActive={false} />
           <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
-            formatter={(v, n, p) => [`${v} % · ${p.payload.seances} séances`, 'Dernier résultat']} />
+            formatter={(v, n, entree) => [v == null ? '—' : (entree.dataKey === 'niveau' ? `${v} % · ${entree.payload.seances} séances` : `${v} %`), n]} />
+          {lignesRef && <Legend wrapperStyle={{ fontSize: 11 }} />}
         </RadarChart>
       </ResponsiveContainer>
     </div>
@@ -2639,9 +2657,15 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
 
   /* Reprise d'un bilan déjà composé : on repart de ses réglages exacts plutôt
      que des réglages par défaut, sinon revenir le modifier le reconstruirait
-     de zéro. */
+     de zéro. Un bilan enregistré avant le passage à une personne à la fois
+     peut porter plusieurs initiales dans `personnes` : normalisé à la
+     première pour que l'écran n'affiche jamais un état qu'il ne sait plus
+     produire. */
   useEffect(() => {
-    if (composition && composition.config) setConfig(composition.config);
+    if (!composition || !composition.config) return;
+    const c = composition.config;
+    const personnes = (c.personnes || []).length ? [c.personnes[0]] : [];
+    setConfig({ ...c, personnes });
   }, [composition && composition.jeton]);
 
   const retenues = crisesRetenues(donnees, config, periode);
@@ -2699,14 +2723,16 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
       </div>
 
       {donnees.personnes.length > 0 && (
+        /* Une personne à la fois : un croisement de plusieurs personnes se
+           lisait comme un profil collectif alors que rien n'agrège vraiment
+           leurs crises entre elles. Un appui remplace la sélection ; « Toutes
+           les personnes » reste la remise à zéro. */
         <div className="flex flex-wrap gap-1.5 mb-3 no-print">
           <Chip label="Toutes les personnes" on={!(config.personnes || []).length} onClick={() => maj({ personnes: [] })} />
           {donnees.personnes.map((p) => (
             <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
               on={(config.personnes || []).includes(p.initials)}
-              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials)
-                ? config.personnes.filter((x) => x !== p.initials)
-                : [...(config.personnes || []), p.initials] })} />
+              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials) ? [] : [p.initials] })} />
           ))}
         </div>
       )}
@@ -3058,6 +3084,15 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     .filter((l) => l.initials === personne)
     .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
 
+  /* Même construction que `siennes`, sur la période de comparaison réglée
+     dans le sélecteur — sert au radar, pour opposer deux moments plutôt que
+     de montrer une seule photo. */
+  const referencePeriode = periodeComparee(periode);
+  const siennesRef = referencePeriode
+    ? lignes.filter((l) => l.initials === personne)
+        .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, referencePeriode)) }))
+    : [];
+
   const crisesPersonne = (donnees.crises || []).filter((c) => {
     if (!c.studentId) return false;
     const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
@@ -3238,8 +3273,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
             Dernier résultat de chaque objectif travaillé sur la période — la forme montre d'un coup
             d'œil ce qui est solide et ce qui reste à consolider.
+            {referencePeriode && ' Le contour en pointillés reprend la période de comparaison réglée ci-dessus.'}
           </div>
-          <RadarObjectifs lignes={siennes} />
+          <RadarObjectifs lignes={siennes} lignesRef={referencePeriode ? siennesRef : null} libelleRef={libelleComparaison(periode)} />
         </Card>
       )}
 
