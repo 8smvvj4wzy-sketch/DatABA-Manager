@@ -40,6 +40,14 @@ const CRISE = 'var(--crisis)';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
+/* Le document imprimé (onglet Rapport) s'écarte volontairement de la
+   typographie d'écran : un bilan transmis à l'extérieur (Airmes) se lit dans
+   un registre institutionnel, pas dans celui d'un produit. Cambria/Georgia
+   plutôt que Calibri : présentes sur tous les postes (Windows, macOS, Linux)
+   sans police à charger, alors que Calibri n'existe nativement que sous
+   Windows/Office — un repli sur Carlito y aurait rendu différemment selon le
+   poste qui imprime. Voir DESIGN.md. */
+const F_DOC = "'Cambria', 'Georgia', 'Times New Roman', serif";
 
 /* ==================== Palette catégorielle ====================
    Fixe entre les deux thèmes — elle code de l'information, pas une
@@ -215,9 +223,13 @@ const VIDE = {
      peuvent avoir des critères différents pour le même identifiant d'axe. */
   suivi: [], _axesSuivi: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
-  /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
+  /* Code de curriculum attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
-     personne qui la travaille. La clé est donc le nom de l'objectif. */
+     personne qui la travaille. La clé est donc le nom de l'objectif.
+     `codesEfl` reste le nom de la clé (voyage à l'export, dans les rapports
+     enregistrés, dans l'import inter-Manager) même si l'interface ne dit plus
+     « EFL » — un renommage de clé casserait la lecture d'un fichier échangé
+     avec un Manager pas encore mis à jour, pour zéro différence à l'écran. */
   codesEfl: {},
   /* Rapports enregistrés : uniquement leur composition — personne, période,
      objectifs retenus, réglages du bilan de crise. Les commentaires et les
@@ -3195,7 +3207,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           <div className="flex items-center gap-2 mb-2">
             <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
             <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
-              className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
               <option value="">Toutes</option>
               {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
             </select>
@@ -3717,21 +3729,21 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mesure</div>
             <select value={mesureK} onChange={(e) => setMesureK(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
               {MESURES.map((m) => <option key={m.k} value={m.k}>{m.label}</option>)}
             </select>
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
             <select value={ligneDimEff} onChange={(e) => setLigneDim(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
               {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
             <select value={colonneDimEff} onChange={(e) => setColonneDim(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
               {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
@@ -3965,7 +3977,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 
         <div className="mb-3">
           <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
-            Objectifs à inclure, leur code EFL et leur libellé dans le document
+            Objectifs à inclure, leur code de curriculum et leur libellé dans le document
           </div>
           <div className="space-y-1.5">
             {disponibles.map((l) => {
@@ -3979,8 +3991,8 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   </button>
                   <input value={(donnees.codesEfl || {})[l.objectif] || ''}
                     onChange={(e) => onCodeEfl(l.objectif, e.target.value)}
-                    placeholder="EFL"
-                    title="Code du référentiel, repris à côté de l'objectif dans le document"
+                    placeholder="Code"
+                    title="Code de curriculum, repris à côté de l'objectif dans le document"
                     className="w-20 shrink-0 rounded-lg border px-2 py-1.5 text-sm bg-transparent"
                     style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }} />
                   <input value={(donnees.alias.objectifs || {})[cleAlias(personne, l.objectif)] || ''}
@@ -3994,7 +4006,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           </div>
           <p className="text-xs mt-1.5" style={{ color: INK_SOFT }}>
             Les libellés saisis remplacent l'intitulé de la tablette dans le document, et sont conservés.
-            Le code EFL est attaché à l'objectif : saisi une fois, il vaut pour toutes les personnes qui le travaillent.
+            Le code de curriculum est attaché à l'objectif : saisi une fois, il vaut pour toutes les personnes qui le travaillent.
           </p>
         </div>
 
@@ -4040,10 +4052,14 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         </p>
       </Card>
 
-      <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+      {/* F_DOC sur le conteneur : tout ce qui suit en hérite, sauf les
+          valeurs chiffrées et le code de curriculum qui restent en F_MONO —
+          un registre institutionnel plutôt que la typographie d'écran, voir
+          la constante F_DOC. */}
+      <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, backgroundColor: CARD, fontFamily: F_DOC }}>
         <div className="flex items-start justify-between gap-4 pb-4 mb-5" style={{ borderBottom: `2px solid ${INK}` }}>
           <div className="min-w-0">
-            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>{association || 'Bilan de suivi'}</div>
+            <div className="text-lg font-semibold">{association || 'Bilan de suivi'}</div>
             <div className="text-sm" style={{ color: INK_SOFT }}>
               {nomAffiche(donnees, personne)} · période : {libellePeriode(periode)} · établi le {aujourdhui}
             </div>
@@ -4063,7 +4079,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
             return (
               <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
                 <div className="flex items-start justify-between gap-3 mb-1">
-                  <div className="text-base font-semibold min-w-0 break-words" style={{ fontFamily: F_DISPLAY }}>
+                  <div className="text-base font-semibold min-w-0 break-words">
                     {codeEflDe(donnees, l.objectif) && (
                       <span className="text-xs font-medium mr-2 px-1.5 py-0.5 rounded align-middle"
                         style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
@@ -4153,7 +4169,9 @@ function BilanCrises({ donnees, config, periode }) {
 
   return (
     <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}` }}>
-      <div className="text-base font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+      {/* Pas de fontFamily ici : BilanCrises n'est monté que dans le document
+          du rapport, elle hérite donc de F_DOC posé sur son conteneur. */}
+      <div className="text-base font-semibold mb-1">Bilan des crises</div>
       <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
         {qui} · {libellePeriode(periode)}
       </div>
@@ -4297,7 +4315,7 @@ function LecteurExcel() {
           <div className="flex flex-wrap gap-1.5 mb-2">
             {entetes.map((h, j) => (valeursDistinctes[j] && valeursDistinctes[j].length > 1 ? (
               <select key={j} value={filtres[j] || ''} onChange={(e) => setFiltres((f) => ({ ...f, [j]: e.target.value }))}
-                className="rounded-lg border px-2 py-1.5 text-xs bg-transparent"
+                className="rounded-lg border px-2 py-1.5 text-xs"
                 style={{ borderColor: filtres[j] ? INK : BORDER, color: filtres[j] ? INK : INK_SOFT }}>
                 <option value="">{String(h)} : tout</option>
                 {valeursDistinctes[j].map((v) => <option key={v} value={v}>{v || '(vide)'}</option>)}
@@ -4476,8 +4494,8 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
     const commentaires = {};
     Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
-    /* Les codes EFL ne dépendent d'aucune personne : ils partent en entier,
-       même sur un export restreint à quelques personnes. */
+    /* Les codes de curriculum ne dépendent d'aucune personne : ils partent en
+       entier, même sur un export restreint à quelques personnes. */
     const codesEfl = { ...(donnees.codesEfl || {}) };
 
     return {

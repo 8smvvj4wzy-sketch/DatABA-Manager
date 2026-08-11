@@ -21,6 +21,12 @@
   --accent-wash: rgba(74, 74, 74, 0.08);
   --overlay-backdrop: rgba(0, 0, 0, 0.5);
   --color-abc: #4A4A4A;
+  /* Sans elle, le navigateur peint les widgets natifs (select, sa liste
+     déroulante, input[type=date|month]) avec son rendu clair par défaut, quel
+     que soit data-theme : fond blanc opaque sous un texte devenu presque
+     blanc en thème sombre (--ink), d'où un menu « tout blanc » tant qu'on ne
+     passe pas la souris dessus. */
+  color-scheme: light;
 }
 /* Pas de repli CSS sur prefers-color-scheme : le script anti-flash de
    index.html tranche toujours avant le premier rendu (préférence enregistrée
@@ -38,6 +44,16 @@
   --crisis: #FF5470;
   --accent-wash: rgba(91, 140, 255, 0.14);
   --color-abc: #7C5CFF;
+  color-scheme: dark;
+}
+
+/* Les widgets natifs héritent de color-scheme mais pas de nos tokens : sans
+   cette règle, un select en thème sombre prend un fond sombre correct
+   (color-scheme) mais parfois un texte hérité illisible selon le moteur. Fixer
+   explicitement les deux au lieu de compter sur l'un ou l'autre seul. */
+select, option {
+  background-color: var(--card);
+  color: var(--ink);
 }
 
 body {
@@ -106,6 +122,7 @@ button:not(:disabled) {
     --nav-bg: #E4E9F5 !important;
     --crisis: #D7263D !important;
     --color-abc: #4A4A4A !important;
+    color-scheme: light !important;
   }
   body { background: #fff !important; }
   .rounded-2xl { border: none !important; padding: 0 !important; }

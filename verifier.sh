@@ -160,6 +160,17 @@ if [ -n "$RESIDUS_GROUPE" ]; then
   RENOMMAGES=1
 fi
 
+# EFL → code de curriculum (lot suivi & rapports). L'identifiant `codesEfl` ne
+# matche pas \bEFL\b (pas de frontière de mot avant le E de Efl) et n'a donc
+# pas besoin d'exception explicite ; seule celle qui documente pourquoi la clé
+# ne suit pas le renommage doit rester tolérée.
+RESIDUS_EFL=$(grep -n '\bEFL\b' src/App.jsx | grep -v 'un renommage de clé casserait')
+if [ -n "$RESIDUS_EFL" ]; then
+  echo "  ✗ vocabulaire « EFL » résiduel (code de curriculum attendu) :"
+  echo "$RESIDUS_EFL" | sed 's/^/      /' | head -10
+  RENOMMAGES=1
+fi
+
 [ "$RENOMMAGES" -eq 0 ] && echo "  ✓ aucun résidu détecté" || ECHECS=$((ECHECS + 1))
 
 # ── 2 quinquies. Imports dupliqués ─────────────────────────────────────
