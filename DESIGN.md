@@ -83,9 +83,40 @@ mise en page en tient compte — pas la palette.
 ## Colors
 
 ### Primary
-- **Accent** (`#4A4A4A` clair / `#5B8CFF` sombre) : boutons primaires,
-  sélection courante, ligne active de la navigation, anneau de focus. Texte
-  associé : `accent-ink` (`#FFFFFF` clair / `#071021` sombre).
+- **Accent** (`#4A4A4A` clair / `#5B8CFF` sombre par défaut) : boutons
+  primaires, sélection courante, ligne active de la navigation, anneau de
+  focus. Texte associé : `accent-ink` (`#FFFFFF` clair / `#071021` sombre).
+
+### Deux axes : mode et couleur
+Le thème se règle sur **deux attributs indépendants**, et il faut les garder
+séparés :
+- `data-theme` (`light` / `dark`) porte les **surfaces** — paper, card,
+  border, ink, ink-soft, nav-bg. C'est le mode nuit, réglé depuis la pastille
+  du rail de navigation.
+- `data-accent` (absent, `rose`, `vert`, `jaune`, `rouge`) porte la
+  **couleur** — et uniquement `--accent`, `--accent-ink`, `--accent-wash`.
+  Réglé depuis la carte « Apparence » de l'onglet Gestion, pas depuis le
+  rail : son pied porte déjà trois pastilles, et une quatrième déborde des
+  64px du mode replié (piège documenté dans CLAUDE.md).
+
+Les deux se combinent librement : cinq couleurs × deux modes, un seul jeu de
+surfaces à maintenir. L'absence de `data-accent` vaut défaut — ce n'est pas
+une valeur, c'est l'absence d'attribut.
+
+`--accent-ink` se recalcule par couleur **et** par mode : c'est l'encre posée
+sur l'accent, le seul token où le contraste peut casser. Un jaune clair
+impose une encre sombre là où un rouge profond impose du blanc.
+
+À l'impression, `@media print` fige les trois tokens d'accent sur le neutre
+clair avec `!important` — `--accent-wash` compris, sans quoi le lavis coloré
+des pastilles sélectionnées fuit sur le document.
+
+**Réserve assumée sur le thème rouge.** `--crisis` porte les crises, les
+erreurs de formulaire et les actions destructrices (voir Alerte ci-dessous).
+Avec un accent rouge, le bouton primaire ressemble au bouton de purge. La
+brique retenue (`#A63528` clair / `#F08A7C` sombre) est volontairement plus
+sourde que le rouge d'alerte, ce qui atténue la confusion sans la supprimer :
+l'écran Apparence le dit à l'utilisateur qui choisit cette couleur.
 
 ### Neutral
 - **Ink** / **Ink Soft** / **Paper** / **Card** / **Border** / **Nav** :
@@ -114,6 +145,28 @@ Le contraste du texte sur un badge de cette palette n'est pas supposé blanc :
 `texteLisibleSur(hex)` calcule le meilleur des deux par luminance relative
 (portée de DatABA `src/App.jsx:57`) — un badge ambre ou lilas ne se lit pas
 forcément en blanc.
+
+**Cette palette ne bouge dans aucun thème de couleur.** Un thème rose ne
+repeint pas « non acquis » : ces teintes portent du sens, pas de la
+décoration. C'est ce qui permet à un thème d'être un choix de confort sans
+conséquence sur la lecture des données.
+
+### Séries des graphiques
+Les graphiques puisent dans la même palette catégorielle, mais chaque
+graphique doit rester lisible **par rapport à ses propres séries** — il n'y a
+pas d'attribution unique valable partout :
+- **Courbes d'objectifs** (`Graphique`) : série de données en indigo,
+  tendance en violet, moyenne mobile en ambre, seuil d'acquisition en teal,
+  moyenne et médiane en `ink-soft`. Rien n'y dépend de l'encre du texte —
+  c'est le défaut qui rendait la tendance invisible sur les barres, l'une et
+  l'autre étant tracées en `ink`.
+- **Chronologie des crises** (`BlocsCrise`) : les séries occupent déjà
+  `PALETTE_SERIES` (indigo, corail, ambre, teal, violet, cyan), donc les
+  lectures superposées y restent en `ink` et `ink-soft` pointillés — le
+  contraste tient puisque les barres, elles, sont colorées.
+
+Ne pas « harmoniser » ces deux attributions : elles diffèrent pour une
+raison.
 
 ### Named Rules
 Les deux règles nommées de DatABA s'appliquent ici à l'identique : **Règle
