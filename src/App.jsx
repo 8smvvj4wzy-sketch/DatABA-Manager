@@ -365,11 +365,18 @@ function fusionnerImport(actuel, backup, nomSource) {
     stabilite,
     suivi,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
-    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
-    _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    /* Les tables indexées par source se complètent, elles ne se remplacent
+       pas. Un fichier partiel — des relevés de suivi sans `students`, par
+       exemple — portait sinon une table vide qui écrasait celle de la
+       tablette déjà importée : plus aucune cotation, plus aucun relevé
+       rattaché à personne, sans le moindre message, alors que les données
+       restaient bien en mémoire. `_axesSuivi` avait déjà son repli, les trois
+       autres l'ont maintenant. */
+    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: { ...((actuel._idVersInitiales || {})[nomSource] || {}), ...idVersInitiales } },
+    _ateliers: { ...(actuel._ateliers || {}), [nomSource]: { ...((actuel._ateliers || {})[nomSource] || {}), ...ateliersSource } },
     _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
     collisionsInitiales,
-    _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
+    _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
     nbNouveauxReleves,
@@ -1591,8 +1598,18 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
     : null;
   const compte = (e) => lignes.filter((l) => l.etat === e).length;
 
+  /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
+     de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
+     vers un import qui vient d'avoir lieu. */
   if (!donnees.seances.length) {
-    return <Empty>Importez une sauvegarde DatABA depuis l'onglet Gestion pour commencer.</Empty>;
+    const avecReleves = (donnees.suivi || []).length + (donnees.stabilite || []).length > 0;
+    return (
+      <Empty>
+        {avecReleves
+          ? 'Aucune séance importée : le tableau de bord suit les objectifs cotés. Les relevés de suivi continu se lisent dans Personnes accompagnées.'
+          : "Importez une sauvegarde DatABA depuis l'onglet Gestion pour commencer."}
+      </Empty>
+    );
   }
 
   return (
@@ -3928,6 +3945,19 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
        fusionnerClasses la déduplique par id, la répéter à chaque source ne
        coûte rien. */
     const classeIdDe = Object.fromEntries((paquet.personnes || []).map((p) => [p.initials, p.classeId || null]));
+    /* Toutes les données du paquet sont attribuées à une source : sans liste
+       de sources, la boucle ci-dessous ne tourne pas et l'import ne reprend
+       rien du tout. Le dire plutôt que de laisser croire à une réussite. */
+    if (!(paquet.sources || []).length) {
+      setErreur("Ce fichier ne déclare aucune tablette d'origine : il n'y a rien à reprendre.");
+      return;
+    }
+    /* `suivi` prime sur `stabilite`, mais le test porte sur le contenu et non
+       sur le type : `normaliser` garantit un tableau pour les deux, si bien
+       qu'un `Array.isArray(paquet.suivi)` était toujours vrai et rendait la
+       branche `stabilite` inatteignable — un Manager n'ayant que des relevés
+       v3 les perdait intégralement au réimport de son propre export. */
+    const paquetEnV4 = (paquet.suivi || []).length > 0 || !(paquet.stabilite || []).length;
     (paquet.sources || []).forEach((src) => {
       const table = (paquet._idVersInitiales || {})[src] || {};
       const backup = {
@@ -3937,10 +3967,10 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
-        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite` s'il
-           est présent dans le paquet, pour ne pas dupliquer les mêmes relevés. */
-        ...(Array.isArray(paquet.suivi)
-          ? { suivi: paquet.suivi.filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
+        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite`, pour
+           ne pas compter deux fois les mêmes relevés. */
+        ...(paquetEnV4
+          ? { suivi: (paquet.suivi || []).filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
           : { stabilite: (paquet.stabilite || []).filter((r) => r.source === src) }),
       };
       cumul = fusionnerImport(cumul, backup, src);
@@ -4769,7 +4799,11 @@ function ManagerApp() {
         + (fusion.collisionsInitiales ? ` · ⚠ ${fusion.collisionsInitiales} collision(s) d'initiales entre classes, à vérifier` : '')
       );
     }
-    setTab('bord');
+    /* Le tableau de bord ne sait rien montrer sans séance : un import de
+       relevés de suivi seuls y annonçait « N relevés » puis affichait
+       « Importez une sauvegarde ». On atterrit là où les données importées se
+       voient réellement. */
+    setTab(fusion.seances.length ? 'bord' : 'personnes');
   }
   function ouvrirPersonne(initiales, objectif) {
     setFocus({ initiales, objectif });
