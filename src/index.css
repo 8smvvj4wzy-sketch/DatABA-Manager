@@ -9,6 +9,11 @@
    index.html. La palette catégorielle (états d'acquisition, séries) ne fait
    pas partie de ces variables : elle reste fixe entre les deux thèmes. */
 :root {
+  /* Police du document imprimé (rapport, bilan de crise) : une seule source,
+     pour qu'une règle d'impression puisse s'y référer sans dupliquer la
+     pile de polices. Ne dépend d'aucun thème — le document sort toujours
+     dans ce registre institutionnel, jamais dans la typographie d'écran. */
+  --font-doc: 'Cambria', 'Georgia', 'Times New Roman', serif;
   --paper: #F3F6FB;
   --card: #FFFFFF;
   --border: #D7E0EE;

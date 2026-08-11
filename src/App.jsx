@@ -40,14 +40,16 @@ const CRISE = 'var(--crisis)';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
-/* Le document imprimé (onglet Rapport) s'écarte volontairement de la
-   typographie d'écran : un bilan transmis à l'extérieur (Airmes) se lit dans
-   un registre institutionnel, pas dans celui d'un produit. Cambria/Georgia
-   plutôt que Calibri : présentes sur tous les postes (Windows, macOS, Linux)
-   sans police à charger, alors que Calibri n'existe nativement que sous
-   Windows/Office — un repli sur Carlito y aurait rendu différemment selon le
-   poste qui imprime. Voir DESIGN.md. */
-const F_DOC = "'Cambria', 'Georgia', 'Times New Roman', serif";
+/* Le document imprimé (rapport, bilan de crise) s'écarte volontairement de la
+   typographie d'écran : un document transmis à l'extérieur (Airmes) se lit
+   dans un registre institutionnel, pas dans celui d'un produit. Cambria/
+   Georgia plutôt que Calibri : présentes sur tous les postes (Windows, macOS,
+   Linux) sans police à charger, alors que Calibri n'existe nativement que
+   sous Windows/Office — un repli sur Carlito y aurait rendu différemment
+   selon le poste qui imprime. Passe par --font-doc (src/index.css) : une
+   seule source, au cas où une règle d'impression en ait besoin. Voir
+   DESIGN.md. */
+const F_DOC = 'var(--font-doc)';
 
 /* ==================== Palette catégorielle ====================
    Fixe entre les deux thèmes — elle code de l'information, pas une
@@ -102,6 +104,12 @@ const ETATS = {
      d'acquisition en pourcentage ne s'y applique. */
   mesure: { label: 'Suivi en mesure', court: 'Mesure', color: CAT_LILAC },
   non_acquis: { label: 'Non acquis', court: 'Non acquis', color: CAT_CORAL },
+};
+/* Sens d'une hausse par état, pour l'écart affiché entre deux périodes (voir
+   Ecart) : plus d'acquis ou de bientôt-acquis est un progrès, plus de
+   plateau, de dormant ou de non-acquis ne l'est pas. */
+const ETAT_HAUSSE_FAVORABLE = {
+  acquis: true, bientot: true, plateau: false, en_cours: true, dormant: false, mesure: true, non_acquis: false,
 };
 /* Le rapport transmis ne retient que trois états : les nuances de travail
    interne n'ont pas leur place dans un document officiel. */
@@ -1033,14 +1041,23 @@ function SectionTitle({ children, sub, icone: Icone }) {
 }
 
 /* Sélecteur de période, partagé par tous les écrans */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison }) {
+/* `collant` : la carte se réduit à une bande fine posée en position sticky,
+   qui reste atteignable au défilement sous les graphiques — sans lui,
+   modifier la période impose de remonter en haut de l'écran à chaque fois.
+   Repliée par défaut ; « Modifier » déplie le formulaire complet en dessous,
+   qui lui n'est pas sticky (il peut être haut avec la comparaison ouverte).
+   Absent (RapportScreen, où le sélecteur est un champ de formulaire parmi
+   d'autres, pas un filtre d'écran) : comportement d'origine, toujours
+   déplié, jamais collant. */
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
   const cmp = p.comparer;
   const majCmp = (champs) => maj({ comparer: { ...(cmp || { mode: 'precedente', debut: '', fin: '' }), ...champs } });
+  const [deplie, setDeplie] = useState(!collant);
 
-  return (
-    <Card className="mb-4">
+  const corps = (
+    <>
       <div className="flex flex-wrap gap-1.5 mb-3">
         {[
           { k: 'raccourci', l: 'Raccourci' },
@@ -1118,9 +1135,39 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
             changement de rythme, d'intervenant ou de saison se lit dans le même chiffre qu'un effet
             de l'accompagnement.
           </p>
+          {/* Le réglage est proposé sur tout un écran, mais ne sert pas sous
+             toutes ses sous-vues (le croisement, par exemple) : le dire
+             plutôt que de laisser deviner pourquoi rien ne change. */}
+          {cmp && !comparaisonUtile && (
+            <p className="text-xs mt-1" style={{ color: INK_SOFT, fontStyle: 'italic' }}>
+              Cette vue n'affiche pas encore d'écart avec la période de comparaison.
+            </p>
+          )}
         </div>
       )}
-    </Card>
+    </>
+  );
+
+  if (!collant) {
+    return <Card className="mb-4">{corps}</Card>;
+  }
+
+  return (
+    <>
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-1.5 mb-3 px-3 py-2 rounded-xl border no-print"
+        style={{ backgroundColor: CARD, borderColor: BORDER }}>
+        <span className="text-xs font-medium shrink-0" style={{ color: INK, fontFamily: F_MONO }}>{libellePeriode(p)}</span>
+        {p.mode === 'raccourci' && (
+          <div className="flex flex-wrap gap-1.5">
+            {RACCOURCIS.map((r) => <Chip key={r.k} label={r.label} on={p.jours === r.k} onClick={() => maj({ jours: r.k })} />)}
+          </div>
+        )}
+        <Btn variant="ghost" onClick={() => setDeplie((d) => !d)} className="text-xs py-1 ml-auto">
+          {deplie ? 'Réduire' : 'Modifier'}
+        </Btn>
+      </div>
+      {deplie && <Card className="mb-4">{corps}</Card>}
+    </>
   );
 }
 
@@ -1894,7 +1941,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
 
   return (
     <div>
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
 
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
@@ -1914,8 +1961,8 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
               const on = etatOuvert === e;
               return (
                 <button key={e} onClick={() => setEtatOuvert(on ? null : e)} disabled={!n}
-                  className="min-w-[74px] rounded-xl px-2.5 py-2 border text-left disabled:opacity-40"
-                  style={{ borderColor: on ? ETATS[e].color : BORDER, backgroundColor: on ? `${ETATS[e].color}14` : 'transparent' }}>
+                  className="min-w-[74px] px-2.5 py-1.5 text-center disabled:opacity-40"
+                  style={{ borderBottom: `2px solid ${on ? ETATS[e].color : 'transparent'}` }}>
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>
                     {unite === 'pct' ? `${Math.round((n / tot) * 100)} %` : n}
                   </div>
@@ -2183,14 +2230,18 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   const [choisie, setChoisie] = useState(null);
   const [ouverte, setOuverte] = useState(null);      // séance dépliée
   const [recherche, setRecherche] = useState('');
-  const [tri, setTri] = useState('date');
-  const [toutes, setToutes] = useState(false);       // au-delà des 25 premières
-  /* Groupes repliés, par clé de tranche. Tous ouverts par défaut : replier est
-     le geste ajouté, rien ne disparaît sans qu'on l'ait demandé. La liste est
-     vidée en changeant de tri — une clé de semaine ne veut rien dire pour un
+  /* Par jour d'office : à dix séances par jour, une liste à plat déborde vite.
+     « Par date » a disparu — le regroupement par jour en tient lieu, avec le
+     même ordre antéchronologique. */
+  const [tri, setTri] = useState('jour');
+  const [toutes, setToutes] = useState(false);       // au-delà des 25 premiers
+  /* Groupes ouverts, par clé de tranche. Vide = tout replié, le défaut : à
+     dix séances par jour, tout déplié rendrait la liste plus longue que la
+     liste à plat qu'elle est censée remplacer. La liste est vidée en
+     changeant de tri — une clé de semaine ne veut rien dire pour un
      regroupement par mois. */
-  const [groupesReplies, setGroupesReplies] = useState([]);
-  const changerTri = (k) => { setTri(k); setGroupesReplies([]); };
+  const [groupesOuverts, setGroupesOuverts] = useState([]);
+  const changerTri = (k) => { setTri(k); setGroupesOuverts([]); };
 
   const LOT = 25;
 
@@ -2220,7 +2271,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
     return champs.includes(q);
   }).sort((a, b) => {
     if (tri === 'cotations') return b.cotations - a.cotations;
-    if (tri === 'semaine' || tri === 'mois') {
+    if (tri === 'jour' || tri === 'semaine' || tri === 'mois') {
       const ka = cleAgregation(a.date, tri);
       const kb = cleAgregation(b.date, tri);
       /* Groupes du plus récent au plus ancien, séances du plus récent au plus
@@ -2232,14 +2283,16 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
     return new Date(b.date) - new Date(a.date);
   });
 
-  const affichees = toutes ? filtrees : filtrees.slice(0, LOT);
-  /* La pagination porte sur des séances, pas sur des groupes : un groupe peut
-     donc apparaître tronqué en bas de la première page, comme n'importe quel
-     tri à plat. */
-  const groupes = (tri === 'semaine' || tri === 'mois')
+  const groupe = tri === 'jour' || tri === 'semaine' || tri === 'mois';
+  /* Groupée, la pagination porte sur des tranches — pas sur des séances : à
+     dix séances par jour et tout replié, plafonner à 25 séances aurait coupé
+     des journées entières derrière « afficher les autres » sans dire
+     lesquelles. À plat (tri par cotations), elle reste ce qu'elle a toujours
+     été. */
+  const groupesTous = groupe
     ? (() => {
         const m = new Map();
-        affichees.forEach((s) => {
+        filtrees.forEach((s) => {
           const k = cleAgregation(s.date, tri);
           if (!m.has(k)) m.set(k, []);
           m.get(k).push(s);
@@ -2247,6 +2300,9 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
         return Array.from(m.entries()).sort((a, b) => b[0] - a[0]);
       })()
     : null;
+  const groupes = groupe ? (toutes ? groupesTous : groupesTous.slice(0, LOT)) : null;
+  const affichees = groupe ? groupesTous.flatMap(([, ss]) => ss) : (toutes ? filtrees : filtrees.slice(0, LOT));
+  const resteAAfficher = groupe ? groupesTous.length - groupesTous.slice(0, LOT).length : filtrees.length - LOT;
 
   const paires = trouverPaires(donnees);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
@@ -2262,7 +2318,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
           className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
           style={{ borderColor: BORDER, color: INK }} />
         <div className="flex gap-1.5 flex-wrap">
-          <Chip label="Par date" on={tri === 'date'} onClick={() => changerTri('date')} />
+          <Chip label="Par jour" on={tri === 'jour'} onClick={() => changerTri('jour')} />
           <Chip label="Par semaine" on={tri === 'semaine'} onClick={() => changerTri('semaine')} />
           <Chip label="Par mois" on={tri === 'mois'} onClick={() => changerTri('mois')} />
           <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => changerTri('cotations')} />
@@ -2275,32 +2331,30 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
           {q && ` sur ${seances.length}`} — appuyez pour voir le détail
         </span>
         {groupes && (
-          /* Replier un groupe ne fait pas remonter les séances suivantes : la
-             pagination compte des séances, pas des groupes. */
           <Btn variant="ghost" className="text-xs py-1 ml-auto"
-            onClick={() => setGroupesReplies(groupesReplies.length ? [] : groupes.map(([k]) => k))}>
-            {groupesReplies.length ? 'Tout déplier' : 'Tout replier'}
+            onClick={() => setGroupesOuverts(groupesOuverts.length ? [] : groupesTous.map(([k]) => k))}>
+            {groupesOuverts.length ? 'Tout replier' : 'Tout déplier'}
           </Btn>
         )}
       </div>
 
       <div className="mb-4">
         {groupes ? groupes.map(([k, ss]) => {
-          const replie = groupesReplies.includes(k);
+          const ouvert = groupesOuverts.includes(k);
           return (
             <div key={k} className="mb-3 last:mb-0">
               <button
-                onClick={() => setGroupesReplies((cur) => (replie ? cur.filter((x) => x !== k) : [...cur, k]))}
+                onClick={() => setGroupesOuverts((cur) => (ouvert ? cur.filter((x) => x !== k) : [...cur, k]))}
                 className="w-full flex items-center gap-1.5 text-xs uppercase tracking-wide mb-1.5 text-left"
                 style={{ color: INK_SOFT, fontFamily: F_MONO }}
-                aria-expanded={!replie}
+                aria-expanded={ouvert}
               >
                 <ChevronDown size={13} className="shrink-0"
-                  style={{ transform: replie ? 'rotate(-90deg)' : 'none', transition: 'transform .15s' }} />
+                  style={{ transform: ouvert ? 'none' : 'rotate(-90deg)', transition: 'transform .15s' }} />
                 {etiquetteAgregation(k, tri)}
                 <span className="font-normal normal-case">· {ss.length} séance{ss.length !== 1 ? 's' : ''}</span>
               </button>
-              {!replie && (
+              {ouvert && (
                 <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
                   {ss.map((s) => (
                     <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
@@ -2325,9 +2379,14 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
         {!affichees.length && <Empty>Aucune séance ne correspond à cette recherche.</Empty>}
       </div>
 
-      {filtrees.length > LOT && (
+      {/* Groupée, la pagination porte sur des tranches — replier les tranches
+         affichées ne fait pas remonter les suivantes. À plat, elle porte sur
+         des séances, comme avant. */}
+      {resteAAfficher > 0 && (
         <Btn variant="outline" onClick={() => setToutes((v) => !v)} className="text-sm mb-6">
-          {toutes ? `N'afficher que les ${LOT} premières` : `Afficher les ${filtrees.length - LOT} autres`}
+          {toutes
+            ? (groupe ? `N'afficher que les ${LOT} premières tranches` : `N'afficher que les ${LOT} premières`)
+            : (groupe ? `Afficher les ${resteAAfficher} autres tranches` : `Afficher les ${resteAAfficher} autres`)}
         </Btn>
       )}
 
@@ -2769,6 +2828,18 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
     ? Math.round(chronometrees.reduce((a, c) => a + minutesDe(c), 0) / chronometrees.length) : 0;
   const dureeMax = chronometrees.length ? Math.max(...chronometrees.map(minutesDe)) : 0;
 
+  /* Période de comparaison : mêmes filtres (crisesRetenues), autre fenêtre.
+     Rejoue les mêmes calculs de synthèse pour fournir la référence à Ecart —
+     aucune nouvelle prop, BlocsCrise reçoit déjà donnees/config/periode. */
+  const referencePeriode = periodeComparee(periode);
+  const crisesRef = referencePeriode ? crisesRetenues(donnees, config, referencePeriode) : null;
+  const chronometreesRef = crisesRef ? crisesRef.filter((c) => (c.durationMs || 0) > 0) : [];
+  const noteesRef = crisesRef ? crisesRef.filter((c) => c.intensite).length : null;
+  const dureeTotaleRef = crisesRef ? crisesRef.reduce((a, c) => a + minutesDe(c), 0) : null;
+  const dureeMoyenneRef = chronometreesRef.length
+    ? Math.round(chronometreesRef.reduce((a, c) => a + minutesDe(c), 0) / chronometreesRef.length) : null;
+  const dureeMaxRef = chronometreesRef.length ? Math.max(...chronometreesRef.map(minutesDe)) : null;
+
   const compter = (valeurs) => {
     const m = new Map();
     valeurs.forEach((v) => m.set(v, (m.get(v) || 0) + 1));
@@ -2797,6 +2868,18 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
 
   return (
     <>
+      {/* Bandeau de synthèse : une ligne, lisible sans lire les blocs qui
+         suivent. Vit ici et non dans CrisesScreen — c'est ce qui le fait
+         apparaître tel quel sur le document imprimé et dans le bilan joint à
+         un rapport, sans seconde version qui finirait par diverger. */}
+      {referencePeriode && crisesRef && (
+        <p className="text-sm mb-3">
+          <span style={{ fontFamily: F_MONO, fontWeight: 600 }}>{crises.length}</span> crise{crises.length !== 1 ? 's' : ''}
+          {' '}contre <span style={{ fontFamily: F_MONO }}>{crisesRef.length}</span> sur {libelleComparaison(periode)}
+          {' · '}<Ecart valeur={crises.length} reference={crisesRef.length} hausseFavorable={false} />
+        </p>
+      )}
+
       {actif('chronologie') && (
         <Card className="mb-3">
           <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Évolution dans le temps</div>
@@ -2871,10 +2954,16 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
               <span className="text-xs ml-1.5" style={{ color: INK_SOFT }}>
                 enregistrement{crises.length !== 1 ? 's' : ''} sur {libellePeriode(periode)}
               </span>
+              {referencePeriode && crisesRef && (
+                <Ecart className="ml-1.5" valeur={crises.length} reference={crisesRef.length} hausseFavorable={false} />
+              )}
             </span>
             {notees > 0 && (
               <span className="text-xs" style={{ color: INK_SOFT }}>
                 dont <span style={{ fontFamily: F_MONO }}>{notees}</span> avec une intensité renseignée
+                {referencePeriode && crisesRef && (
+                  <Ecart className="ml-1.5" valeur={notees} reference={noteesRef} hausseFavorable={false} />
+                )}
               </span>
             )}
           </div>
@@ -2883,16 +2972,25 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
               <div>
                 <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: CRISE }}>{dureeTotale} min</div>
                 <div className="text-xs" style={{ color: INK_SOFT }}>durée cumulée</div>
+                {referencePeriode && crisesRef && (
+                  <Ecart valeur={dureeTotale} reference={dureeTotaleRef} unite=" min" hausseFavorable={false} />
+                )}
               </div>
               <div>
                 <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMoyenne} min</div>
                 <div className="text-xs" style={{ color: INK_SOFT }}>
                   en moyenne ({chronometrees.length}/{crises.length} chronométrée{chronometrees.length !== 1 ? 's' : ''})
                 </div>
+                {referencePeriode && crisesRef && (
+                  <Ecart valeur={dureeMoyenne} reference={dureeMoyenneRef} unite=" min" hausseFavorable={false} />
+                )}
               </div>
               <div>
                 <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{dureeMax} min</div>
                 <div className="text-xs" style={{ color: INK_SOFT }}>la plus longue</div>
+                {referencePeriode && crisesRef && (
+                  <Ecart valeur={dureeMax} reference={dureeMaxRef} unite=" min" hausseFavorable={false} />
+                )}
               </div>
             </div>
           )}
@@ -2942,7 +3040,7 @@ function crisesRetenues(donnees, config, periode) {
    personne, type, segmentation, blocs — repartait de zéro au moindre passage
    par un autre onglet. */
 function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPersonne, onFocusConsomme,
-  composition, onValiderBilan, onAnnulerBilan }) {
+  composition, onValiderBilan, onAnnulerBilan, rapportEnCours, onJoindreAuRapport }) {
   const [reglagesOuverts, setReglagesOuverts] = useState(false);
   const refChrono = useRef(null);
   const refZone = useRef(null);
@@ -3042,7 +3140,7 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
         </div>
       )}
 
-      <div className="no-print"><SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite /></div>
+      <div className="no-print"><SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant /></div>
 
       <Card className="mb-3 no-print">
         <div className="flex flex-wrap items-center gap-2">
@@ -3055,6 +3153,20 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
             <Btn variant="outline" className="text-xs py-1.5" onClick={() => imprimerZone(refZone.current)}>
               <Printer size={13} /> PDF du bilan
             </Btn>
+            {/* Absent quand on est déjà venu composer ce bilan depuis le
+               rapport : le bandeau ci-dessus tient déjà ce rôle, une seconde
+               façon de faire la même chose finirait par diverger. Un rapport
+               d'objectifs porte sur une personne, jamais sur « toutes » — le
+               bouton le dit plutôt que de joindre au hasard la première de
+               la liste. */}
+            {!composition && (
+              <Btn variant="outline" className="text-xs py-1.5"
+                onClick={() => onJoindreAuRapport(config)}
+                disabled={!(config.personnes || []).length}
+                title={(config.personnes || []).length ? undefined : 'Filtrez sur une personne pour joindre ce bilan à un rapport.'}>
+                <FileText size={13} /> {rapportEnCours && rapportEnCours.bilanCrises ? 'Remplacer le bilan du rapport' : 'Joindre à un rapport'}
+              </Btn>
+            )}
             <Btn variant="ghost" className="text-xs py-1.5" onClick={() => setReglagesOuverts((v) => !v)}>
               {reglagesOuverts ? 'Replier' : 'Modifier'}
             </Btn>
@@ -3107,10 +3219,13 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
       </Card>
 
       {/* Zone exportée en PDF : le bilan tel qu'il est réglé, précédé de son
-          titre et du rappel des réglages. */}
-      <div ref={refZone}>
+          titre et du rappel des réglages. F_DOC sur le conteneur, comme celui
+          du rapport : un bilan imprimé seul depuis cet onglet doit sortir
+          dans le même registre institutionnel qu'un bilan joint à un
+          rapport — pas une seconde typographie selon la porte de sortie. */}
+      <div ref={refZone} style={{ fontFamily: F_DOC }}>
         <div className="print-only" style={{ marginBottom: '0.75rem' }}>
-          <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>
+          <div className="text-lg font-semibold">
             Bilan des crises — {libellePeriode(periode)}
           </div>
           <div className="text-xs" style={{ color: INK_SOFT }}>{resumeReglages}</div>
@@ -3448,6 +3563,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   }));
 
   const compte = (e) => siennes.filter((l) => l.etat === e).length;
+  const compteRef = (e) => siennesRef.filter((l) => l.etat === e).length;
 
   /* Filtre par classe : la liste de personnes se resserre, mais un choix qui
      viderait la liste (classe supprimée entre-temps, par exemple) est ignoré
@@ -3512,7 +3628,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       </div>
 
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'}
-        avecComparaison={vue === 'suivi' || vue === 'radar'} />
+        avecComparaison collant
+        comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'} />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
@@ -3523,9 +3640,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         </Btn>
         <span className="text-xs" style={{ color: INK_SOFT }}>Reprend cette personne et cette période.</span>
       </div>
-
-      <ApercuCrises donnees={donnees} personne={personne} crises={crisesPersonne}
-        periode={periode} granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
 
       {vue === 'objectifs' && (() => {
         const retenusPdf = siennes.filter((l) => !nonRetenusPdf.includes(l.objectif));
@@ -3548,9 +3662,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           <>
             <div className="flex flex-wrap gap-4 mb-4">
               {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => (
-                <div key={e} className="min-w-[80px]">
+                <div key={e} className="min-w-[80px] text-center">
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+                  {referencePeriode && (
+                    <Ecart valeur={compte(e)} reference={compteRef(e)} hausseFavorable={ETAT_HAUSSE_FAVORABLE[e]} />
+                  )}
                 </div>
               ))}
             </div>
@@ -3629,7 +3746,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       )}
 
       {vue === 'crises' && (
-        crisesPersonne.length === 0 ? <Empty>Aucune crise consignée sur la période.</Empty> : (
+        <>
+          {/* Ne s'affiche que dans cette sous-vue : elle précédait auparavant
+              Objectifs, Radar, Suivi et Croisement sans y avoir de sens. */}
+          <ApercuCrises donnees={donnees} personne={personne} crises={crisesPersonne}
+            periode={periode} granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
+          {crisesPersonne.length === 0 ? <Empty>Aucune crise consignée sur la période.</Empty> : (
           <Card>
             <div className="text-sm mb-3">
               <span style={{ fontFamily: F_MONO, fontSize: '1.25rem' }}>{crisesPersonne.length}</span> crise{crisesPersonne.length !== 1 ? 's' : ''} sur la période
@@ -3653,7 +3775,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               ))}
             </div>
           </Card>
-        )
+          )}
+        </>
       )}
 
       {vue === 'suivi' && (() => {
@@ -4029,7 +4152,7 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
         </p>
       </Card>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
 
       <Card className="mb-3">
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -5651,6 +5774,27 @@ function ManagerApp() {
     setTab('rapport');
   }
 
+  /* Joindre directement depuis l'onglet Crises, sans être parti du rapport.
+     Contrairement à validerBilan (qui ne touche que bilanCrises, la personne
+     et la période du rapport étant déjà celles réglées avant de composer),
+     ici rien n'est réglé côté rapport : il faut reporter la personne du
+     filtre ET la période de l'écran Crises — BilanCrises se rend avec
+     selection.periode, pas avec celle de l'écran, un bilan qui ne reprendrait
+     que la config referrait sur une autre fenêtre et pourrait sortir vide. */
+  function joindreBilanAuRapport(config) {
+    const cible = (config.personnes || [])[0] || null;
+    if (!cible) return;
+    setSelectionRapport((sel) => ({
+      ...sel,
+      personne: cible,
+      objectifs: sel.personne === cible ? (sel.objectifs || []) : [],
+      periode,
+      bilanCrises: config,
+    }));
+    setTab('rapport');
+    notify('Bilan des crises joint au rapport');
+  }
+
   /* Enregistrement d'un rapport. Réenregistrer sous un nom déjà pris écrase
      l'existant : c'est ce qu'on attend quand on revient corriger un document,
      et cela évite de collectionner des doublons homonymes. */
@@ -5751,7 +5895,8 @@ function ManagerApp() {
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
                 config={configCrises} setConfig={setConfigCrises}
                 focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
-                composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan} />
+                composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan}
+                rapportEnCours={selectionRapport} onJoindreAuRapport={joindreBilanAuRapport} />
             </>
           )}
           {tab === 'explorer' && (
