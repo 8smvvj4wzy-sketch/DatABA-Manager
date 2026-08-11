@@ -6,10 +6,13 @@
     <title>DatABA Manager</title>
     <meta name="description" content="Consolidation et bilan des cotations DatABA, pour les cadres pédagogiques" />
 
-    <!-- Thème clair/sombre choisi avant le premier rendu : évite le flash d'un
-         thème puis l'autre. Préférence explicite sinon système ; clé
-         aba-cadre: en clair, ce n'est pas une donnée sensible — même script
-         que côté DatABA, avec le préfixe de Manager. -->
+    <!-- Thème clair/sombre ET couleur d'accent posés avant le premier rendu :
+         évite le flash d'un thème puis l'autre. Deux axes indépendants, deux
+         attributs et deux clés. Préférence explicite sinon système pour le
+         mode, neutre par défaut pour la couleur ; clés aba-cadre: en clair, ce
+         ne sont pas des données sensibles — même script que côté DatABA, avec
+         le préfixe de Manager.
+         theme-color décrit la surface, pas l'accent : il ne suit que le mode. -->
     <script>
       (function () {
         try {
@@ -18,6 +21,10 @@
             t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
           }
           document.documentElement.setAttribute('data-theme', t);
+          var a = localStorage.getItem('aba-cadre:accent');
+          if (['rose', 'vert', 'jaune', 'rouge'].indexOf(a) >= 0) {
+            document.documentElement.setAttribute('data-accent', a);
+          }
           document.addEventListener('DOMContentLoaded', function () {
             var m = document.querySelector('meta[name="theme-color"]');
             if (m) m.setAttribute('content', t === 'dark' ? '#0A1120' : '#F3F6FB');

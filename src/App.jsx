@@ -3,7 +3,7 @@ import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
-  ChevronLeft, ChevronRight, Minimize2, Maximize2,
+  ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -1170,6 +1170,19 @@ const STYLES_GRAPHIQUE = [
    montre les paliers que la droite écrase, moyenne et médiane situent le
    niveau par rapport au seuil d'acquisition déjà tracé. Aucune n'est active
    par défaut : un graphique s'ouvre sur ses données, pas sur leur commentaire. */
+/* Couleurs d'accent. `echantillon` pointe une variable CSS et non un hex :
+   le contrôle 2 sexies de verifier.sh refuse tout hex écrit en dur ici, et
+   une pastille de choix doit montrer sa couleur même quand ce n'est pas celle
+   en vigueur — d'où les --swatch-* déclarés dans src/index.css. 'neutre' est
+   l'absence de data-accent, pas une valeur. */
+const ACCENTS = [
+  { k: 'neutre', label: 'Neutre', echantillon: 'var(--swatch-neutre)' },
+  { k: 'rose', label: 'Rose', echantillon: 'var(--swatch-rose)' },
+  { k: 'vert', label: 'Vert', echantillon: 'var(--swatch-vert)' },
+  { k: 'jaune', label: 'Jaune', echantillon: 'var(--swatch-jaune)' },
+  { k: 'rouge', label: 'Rouge', echantillon: 'var(--swatch-rouge)' },
+];
+
 const COURBES_LECTURE = [
   { k: 'tendance', label: 'Tendance' },
   { k: 'mobile', label: 'Moyenne mobile' },
@@ -1634,22 +1647,28 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
             <ReferenceLine y={mediane} stroke={INK_SOFT} strokeDasharray="6 3" strokeWidth={1.5}
               label={{ value: `méd. ${mediane}`, position: 'insideBottomLeft', fontSize: 10, fill: INK_SOFT }} />
           )}
-          {/* `name` explicite : sans lui la légende afficherait la clé brute
+          {/* Série de données en bleu, pas en encre du thème : l'encre suit le
+              texte, donc quasi blanche en thème sombre, et la courbe de
+              tendance — tracée en encre elle aussi — s'y confondait purement
+              et simplement. Chaque élément de ce graphique porte désormais sa
+              propre teinte, indépendante du thème.
+              `name` explicite : sans lui la légende afficherait la clé brute
               « valeur » à côté des lectures, qui portent déjà leur nom. */}
           {style === 'barres' ? (
-            <Bar dataKey="valeur" name={etiquette} fill={INK} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            <Bar dataKey="valeur" name={etiquette} fill={CAT_INDIGO} radius={[4, 4, 0, 0]} isAnimationActive={false} />
           ) : style === 'aire' ? (
-            <Area type="monotone" dataKey="valeur" name={etiquette} stroke={INK} fill={INK} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+            <Area type="monotone" dataKey="valeur" name={etiquette} stroke={CAT_INDIGO} fill={CAT_INDIGO} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
           ) : style === 'points' ? (
-            <Scatter dataKey="valeur" name={etiquette} fill={INK} isAnimationActive={false} />
+            <Scatter dataKey="valeur" name={etiquette} fill={CAT_INDIGO} isAnimationActive={false} />
           ) : (
-            <Line type="monotone" dataKey="valeur" name={etiquette} stroke={INK} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+            <Line type="monotone" dataKey="valeur" name={etiquette} stroke={CAT_INDIGO} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
           )}
-          {/* Les lectures ne sont pas des catégories mais des relectures de la
-              même série : encre du thème et pointillés distincts, jamais la
-              palette catégorielle — réservée aux états et aux séries. */}
-          {tendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
-          {mobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
+          {/* Teintes distinctes de la série et du seuil. Ambre plutôt que cyan
+              pour la moyenne mobile : le cyan est trop proche du teal du seuil
+              d'acquisition. La chronologie des crises, elle, garde ses lectures
+              en encre — ses séries occupent déjà cette palette, voir BlocsCrise. */}
+          {tendance && <Line type="linear" dataKey="Tendance" stroke={CAT_VIOLET} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+          {mobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={CAT_AMBER} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
           {avecLegende && <Legend wrapperStyle={{ fontSize: 11 }} />}
         </ComposedChart>
       </ResponsiveContainer>
@@ -2166,6 +2185,12 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   const [recherche, setRecherche] = useState('');
   const [tri, setTri] = useState('date');
   const [toutes, setToutes] = useState(false);       // au-delà des 25 premières
+  /* Groupes repliés, par clé de tranche. Tous ouverts par défaut : replier est
+     le geste ajouté, rien ne disparaît sans qu'on l'ait demandé. La liste est
+     vidée en changeant de tri — une clé de semaine ne veut rien dire pour un
+     regroupement par mois. */
+  const [groupesReplies, setGroupesReplies] = useState([]);
+  const changerTri = (k) => { setTri(k); setGroupesReplies([]); };
 
   const LOT = 25;
 
@@ -2237,34 +2262,57 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
           className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
           style={{ borderColor: BORDER, color: INK }} />
         <div className="flex gap-1.5 flex-wrap">
-          <Chip label="Par date" on={tri === 'date'} onClick={() => setTri('date')} />
-          <Chip label="Par semaine" on={tri === 'semaine'} onClick={() => setTri('semaine')} />
-          <Chip label="Par mois" on={tri === 'mois'} onClick={() => setTri('mois')} />
-          <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => setTri('cotations')} />
+          <Chip label="Par date" on={tri === 'date'} onClick={() => changerTri('date')} />
+          <Chip label="Par semaine" on={tri === 'semaine'} onClick={() => changerTri('semaine')} />
+          <Chip label="Par mois" on={tri === 'mois'} onClick={() => changerTri('mois')} />
+          <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => changerTri('cotations')} />
         </div>
       </div>
 
-      <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
-        {filtrees.length} séance{filtrees.length !== 1 ? 's' : ''}
-        {q && ` sur ${seances.length}`} — appuyez pour voir le détail
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+          {filtrees.length} séance{filtrees.length !== 1 ? 's' : ''}
+          {q && ` sur ${seances.length}`} — appuyez pour voir le détail
+        </span>
+        {groupes && (
+          /* Replier un groupe ne fait pas remonter les séances suivantes : la
+             pagination compte des séances, pas des groupes. */
+          <Btn variant="ghost" className="text-xs py-1 ml-auto"
+            onClick={() => setGroupesReplies(groupesReplies.length ? [] : groupes.map(([k]) => k))}>
+            {groupesReplies.length ? 'Tout déplier' : 'Tout replier'}
+          </Btn>
+        )}
       </div>
 
       <div className="mb-4">
-        {groupes ? groupes.map(([k, ss]) => (
-          <div key={k} className="mb-3 last:mb-0">
-            <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT, fontFamily: F_MONO }}>
-              {etiquetteAgregation(k, tri)} <span className="font-normal normal-case">· {ss.length} séance{ss.length !== 1 ? 's' : ''}</span>
+        {groupes ? groupes.map(([k, ss]) => {
+          const replie = groupesReplies.includes(k);
+          return (
+            <div key={k} className="mb-3 last:mb-0">
+              <button
+                onClick={() => setGroupesReplies((cur) => (replie ? cur.filter((x) => x !== k) : [...cur, k]))}
+                className="w-full flex items-center gap-1.5 text-xs uppercase tracking-wide mb-1.5 text-left"
+                style={{ color: INK_SOFT, fontFamily: F_MONO }}
+                aria-expanded={!replie}
+              >
+                <ChevronDown size={13} className="shrink-0"
+                  style={{ transform: replie ? 'rotate(-90deg)' : 'none', transition: 'transform .15s' }} />
+                {etiquetteAgregation(k, tri)}
+                <span className="font-normal normal-case">· {ss.length} séance{ss.length !== 1 ? 's' : ''}</span>
+              </button>
+              {!replie && (
+                <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
+                  {ss.map((s) => (
+                    <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
+                      ouverte={ouverte === s.id}
+                      onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+                      onSupprimer={() => onSupprimerSeance(s)} />
+                  ))}
+                </div>
+              )}
             </div>
-            <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
-              {ss.map((s) => (
-                <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
-                  ouverte={ouverte === s.id}
-                  onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-                  onSupprimer={() => onSupprimerSeance(s)} />
-              ))}
-            </div>
-          </div>
-        )) : (
+          );
+        }) : (
           <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
             {affichees.map((s) => (
               <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
@@ -2786,7 +2834,13 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
                           radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
                       ))}
                     {/* Encre du thème et pointillés, jamais PALETTE_SERIES :
-                        elle est déjà prise par les séries de ce graphique. */}
+                        elle est déjà prise par les séries de ce graphique, et
+                        les barres n'étant pas en encre le contraste tient.
+                        C'est l'inverse du choix fait dans `Graphique`, où la
+                        série occupe le bleu et les lectures prennent violet et
+                        ambre : une superposition doit contraster avec les
+                        séries de SON graphique, et les deux n'ont pas les
+                        mêmes. Ne pas « harmoniser » les deux endroits. */}
                     {chronoTendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
                     {chronoMobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
                   </ComposedChart>
@@ -4595,7 +4649,7 @@ function LecteurExcel() {
 }
 
 /* ==================== Gestion ==================== */
-function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify }) {
+function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify }) {
   const [fichier, setFichier] = useState(null);
   const [enveloppe, setEnveloppe] = useState(null);
   const [passphrase, setPassphrase] = useState('');
@@ -4991,6 +5045,40 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         </div>
       </Card>
 
+      {/* Apparence ici et non dans le rail : son pied porte déjà trois
+          pastilles de 32px, et à 64px de large en mode replié une quatrième
+          déborde du cadre (voir NavigationLaterale). Le mode clair/sombre y
+          reste, c'est un geste fréquent ; la couleur se choisit une fois. */}
+      <Card className="mb-3">
+        <div className="flex items-center gap-1.5 mb-2">
+          <Palette size={16} style={{ color: INK_SOFT }} />
+          <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Apparence</span>
+        </div>
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          La couleur ne touche qu'à l'accent — boutons, sélection, ligne active de la navigation.
+          Elle se combine avec le mode clair ou sombre, qui se règle depuis la navigation.
+          Les couleurs des états d'acquisition et des intensités de crise ne changent jamais :
+          elles portent du sens. Un document imprimé sort toujours en neutre.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {ACCENTS.map((a) => (
+            <button key={a.k} onClick={() => onAccent(a.k)}
+              className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs"
+              style={{ borderColor: accent === a.k ? INK : BORDER, color: accent === a.k ? INK : INK_SOFT }}
+              aria-pressed={accent === a.k}>
+              <span className="w-3.5 h-3.5 rounded-full shrink-0" style={{ backgroundColor: a.echantillon }} />
+              {a.label}
+            </button>
+          ))}
+        </div>
+        {accent === 'rouge' && (
+          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+            Le rouge est aussi la couleur des crises et des actions destructrices : avec cet accent,
+            un bouton principal ressemble à un bouton de suppression.
+          </p>
+        )}
+      </Card>
+
       <Card>
         <div className="flex items-center gap-1.5 mb-2">
           <Lock size={16} style={{ color: INK_SOFT }} />
@@ -5276,6 +5364,20 @@ function ManagerApp() {
       try { window.localStorage.setItem(`${PREFIXE}theme`, suivant); } catch (e) {}
       return suivant;
     });
+  };
+  /* Couleur d'accent, second axe indépendant du mode clair/sombre : elle ne
+     touche qu'à `--accent`, `--accent-ink` et `--accent-wash` (voir
+     src/index.css). 'neutre' retire l'attribut plutôt que d'en poser un —
+     c'est l'absence de `data-accent` qui vaut défaut, pas une valeur. */
+  const [accent, setAccentState] = useState(() => {
+    if (typeof document === 'undefined') return 'neutre';
+    return document.documentElement.getAttribute('data-accent') || 'neutre';
+  });
+  const choisirAccent = (k) => {
+    if (k === 'neutre') document.documentElement.removeAttribute('data-accent');
+    else document.documentElement.setAttribute('data-accent', k);
+    try { window.localStorage.setItem(`${PREFIXE}accent`, k); } catch (e) {}
+    setAccentState(k);
   };
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
@@ -5660,8 +5762,9 @@ function ManagerApp() {
           )}
           {tab === 'gestion' && (
             <>
-              <SectionTitle sub="Import, export et sécurité." icone={Settings}>Gestion</SectionTitle>
-              <GestionScreen donnees={donnees} securite={securite} onImported={onImported}
+              <SectionTitle sub="Import, export, apparence et sécurité." icone={Settings}>Gestion</SectionTitle>
+              <GestionScreen donnees={donnees} securite={securite}
+                accent={accent} onAccent={choisirAccent} onImported={onImported}
                 onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection}
                 onPurger={purger} notify={notify} />
             </>

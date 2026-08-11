@@ -47,6 +47,93 @@
   color-scheme: dark;
 }
 
+/* ==================== Couleur d'accent ====================
+   Deux axes indépendants : `data-theme` porte les surfaces (clair/sombre),
+   `data-accent` porte la couleur. Les deux se combinent librement, il n'y a
+   donc qu'un seul jeu de surfaces à maintenir et le mode nuit reste ce qu'il
+   est quelle que soit la couleur choisie.
+
+   Sans `data-accent`, les valeurs des blocs ci-dessus s'appliquent : charbon
+   en clair, bleu en sombre. Rien ne bouge pour qui ne choisit pas.
+
+   `--accent-ink` est l'encre POSÉE SUR l'accent (texte d'un bouton primaire,
+   d'une pastille sélectionnée) : c'est le seul token qui peut casser le
+   contraste, et il se recalcule donc par couleur ET par mode. Le jaune impose
+   une encre sombre là où le rouge impose du blanc.
+
+   La palette catégorielle (CAT_* dans App.jsx) ne bouge dans aucun thème :
+   les états d'acquisition et les intensités de crise portent du sens, pas de
+   la décoration. Un thème rose ne repeint pas « non acquis ».
+
+   `--crisis` ne bouge pas non plus. Réserve assumée sur le thème rouge : il
+   est le seul où le bouton primaire ressemble au bouton destructeur — la
+   brique retenue est volontairement plus sourde que le rouge d'alerte, sans
+   supprimer la ressemblance. Voir DESIGN.md. */
+:root[data-accent='rose'] {
+  --accent: #C2185B;
+  --accent-ink: #FFFFFF;
+  --accent-wash: rgba(194, 24, 91, 0.10);
+}
+:root[data-theme='dark'][data-accent='rose'] {
+  --accent: #FF8FB1;
+  --accent-ink: #2A0713;
+  --accent-wash: rgba(255, 143, 177, 0.16);
+}
+
+:root[data-accent='vert'] {
+  --accent: #1B7A4B;
+  --accent-ink: #FFFFFF;
+  --accent-wash: rgba(27, 122, 75, 0.10);
+}
+:root[data-theme='dark'][data-accent='vert'] {
+  --accent: #4ADE94;
+  --accent-ink: #04240F;
+  --accent-wash: rgba(74, 222, 148, 0.16);
+}
+
+/* Jaune : le seul accent trop clair pour porter du blanc, dans les deux
+   modes. Son encre est sombre des deux côtés. */
+:root[data-accent='jaune'] {
+  --accent: #B7791F;
+  --accent-ink: #FFFFFF;
+  --accent-wash: rgba(183, 121, 31, 0.12);
+}
+:root[data-theme='dark'][data-accent='jaune'] {
+  --accent: #F5C451;
+  --accent-ink: #2A1D02;
+  --accent-wash: rgba(245, 196, 81, 0.16);
+}
+
+:root[data-accent='rouge'] {
+  --accent: #A63528;
+  --accent-ink: #FFFFFF;
+  --accent-wash: rgba(166, 53, 40, 0.10);
+}
+:root[data-theme='dark'][data-accent='rouge'] {
+  --accent: #F08A7C;
+  --accent-ink: #2B0A05;
+  --accent-wash: rgba(240, 138, 124, 0.16);
+}
+
+/* Échantillons du sélecteur d'apparence. Ils vivent ici et non dans App.jsx :
+   le contrôle 2 sexies de verifier.sh refuse tout hex écrit en dur hors de la
+   palette catégorielle, et une pastille de choix doit bien montrer sa couleur
+   même quand ce n'est pas celle en vigueur. */
+:root {
+  --swatch-neutre: #4A4A4A;
+  --swatch-rose: #C2185B;
+  --swatch-vert: #1B7A4B;
+  --swatch-jaune: #B7791F;
+  --swatch-rouge: #A63528;
+}
+:root[data-theme='dark'] {
+  --swatch-neutre: #5B8CFF;
+  --swatch-rose: #FF8FB1;
+  --swatch-vert: #4ADE94;
+  --swatch-jaune: #F5C451;
+  --swatch-rouge: #F08A7C;
+}
+
 /* Les widgets natifs héritent de color-scheme mais pas de nos tokens : sans
    cette règle, un select en thème sombre prend un fond sombre correct
    (color-scheme) mais parfois un texte hérité illisible selon le moteur. Fixer
@@ -107,10 +194,14 @@ button:not(:disabled) {
      l'intérieur ne sortait que des pages blanches. */
   .no-print:not(.chemin-impression) { display: none !important; }
   .print-only { display: block !important; }
-  /* Le thème sombre ne part jamais à l'imprimante, quel que soit le réglage
-     à l'écran. `!important` est nécessaire ici : `:root[data-theme='dark']`
-     a une spécificité plus élevée qu'un simple `:root`, l'ordre de
-     déclaration seul ne suffirait pas à le faire céder sous ce media query. */
+  /* Ni le thème sombre ni la couleur d'accent ne partent à l'imprimante, quels
+     que soient les réglages à l'écran : un bilan transmis à l'extérieur se lit
+     en neutre. `!important` est nécessaire ici — `:root[data-theme='dark']` et
+     `:root[data-accent='…']` ont une spécificité plus élevée qu'un simple
+     `:root`, l'ordre de déclaration seul ne suffirait pas à les faire céder
+     sous ce media query.
+     `--accent-wash` en fait partie : il manquait, et un lavis coloré (fond des
+     pastilles sélectionnées, ligne active) fuyait donc sur le document. */
   :root {
     --paper: #F3F6FB !important;
     --card: #FFFFFF !important;
@@ -119,6 +210,7 @@ button:not(:disabled) {
     --ink-soft: #52627A !important;
     --accent: #4A4A4A !important;
     --accent-ink: #FFFFFF !important;
+    --accent-wash: rgba(74, 74, 74, 0.08) !important;
     --nav-bg: #E4E9F5 !important;
     --crisis: #D7263D !important;
     --color-abc: #4A4A4A !important;

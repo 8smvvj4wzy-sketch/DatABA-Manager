@@ -21,10 +21,13 @@ clé `aba-cadre:data`. Structure dans la constante `VIDE`.
 
 Poste PC : navigation latérale persistante (`NavigationLaterale`, sept
 destinations, repliable en rail), pas d'onglets ni de balayage tactile —
-retiré, pas laissé en dormance. Tokens CSS (`src/index.css`, `[data-theme]`
-sur `<html>`) pour le thème clair/sombre ; palette catégorielle fixe
-(`CAT_*`) pour les états d'acquisition et l'intensité de crise. Voir
-`DESIGN.md` avant de toucher une couleur.
+retiré, pas laissé en dormance. Tokens CSS (`src/index.css`) sur **deux axes
+indépendants** posés sur `<html>` : `[data-theme]` pour les surfaces
+(clair/sombre) et `[data-accent]` pour la couleur (absent, rose, vert, jaune,
+rouge — il ne touche qu'à `--accent`, `--accent-ink`, `--accent-wash`).
+Palette catégorielle fixe (`CAT_*`) pour les états d'acquisition et
+l'intensité de crise : elle ne bouge dans aucun thème. Voir `DESIGN.md` avant
+de toucher une couleur.
 
 ## Avant toute modification
 
@@ -50,7 +53,8 @@ rouge.
   `github.io` et le même `localStorage`. Un `localStorage.clear()` global ici a
   déjà effacé les données de production de la tablette. Toute suppression est
   bornée au préfixe `aba-cadre:`. Jamais de clear global — y compris pour toute
-  nouvelle clé (la clé de thème, `aba-cadre:theme`, suit la même règle).
+  nouvelle clé (les clés d'apparence, `aba-cadre:theme` et
+  `aba-cadre:accent`, suivent la même règle).
 - **Le champ `source`.** Ici il désigne la tablette d'origine ; côté DatABA il
   désigne l'origine d'un relevé. Renommé `origine` à l'import, dans
   `fusionnerImport`. Toute nouvelle donnée importée qui porte un `source` doit
@@ -78,10 +82,13 @@ rouge.
   garanties, déjà arrivé). Un changement de structure de page (navigation,
   colonnes) est le risque de régression n°1 : vérifier l'impression après
   coup, pas seulement en fin de chantier.
-- **Le thème sombre ne doit jamais partir à l'imprimante.** Les tokens sont
-  figés sur leurs valeurs claires sous `@media print` avec `!important` —
-  nécessaire, `:root[data-theme='dark']` a une spécificité plus élevée qu'un
-  simple `:root`.
+- **Ni le thème sombre ni la couleur d'accent ne partent à l'imprimante.** Les
+  tokens sont figés sur leurs valeurs claires neutres sous `@media print` avec
+  `!important` — nécessaire, `:root[data-theme='dark']` et
+  `:root[data-accent='…']` ont une spécificité plus élevée qu'un simple
+  `:root`. **Tout token d'accent ajouté doit être ajouté là aussi** :
+  `--accent-wash` y manquait, et le lavis coloré des pastilles sélectionnées
+  fuyait sur le document imprimé.
 - **Couleur en dur hors de la palette catégorielle.** C'est la faute qui casse
   le thème sombre sans prévenir tant qu'on développe en clair. Les tokens de
   surface (`PAPER`, `INK`, `BORDER`…) sont des `var(--…)`, jamais un hex
