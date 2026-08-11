@@ -1900,11 +1900,20 @@ function ioaPourEntree(obj, ea, eb) {
   return null;
 }
 
-function trouverPaires(seances) {
-  const cand = seances.filter((s) => s.doubleCotation);
+/* Apparie les séances marquées « deux observateurs en parallèle » du même
+   jour. Le regroupement se fait sur le NOM de l'atelier, jamais sur
+   `atelierId` : cet identifiant est propre à chaque tablette (`_ateliers` est
+   indexé par source), si bien que deux intervenants qui cotent le même
+   atelier depuis deux tablettes portent deux identifiants différents et
+   tombaient chacun dans leur paquet — aucune paire ne sortait jamais. Prend
+   `donnees` plutôt que `donnees.seances` pour résoudre ce nom via
+   `nomAtelier`. */
+function trouverPaires(donnees) {
+  const cand = (donnees.seances || []).filter((s) => s.doubleCotation);
   const parJour = new Map();
   cand.forEach((s) => {
-    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${s.atelierId || 'libre'}`;
+    const atelier = s.atelierId ? nomAtelier(donnees, s.source, s.atelierId) : 'libre';
+    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${atelier}`;
     if (!parJour.has(cle)) parJour.set(cle, []);
     parJour.get(cle).push(s);
   });
@@ -1979,13 +1988,37 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       ...s.initiales.map((i) => nomAffiche(donnees, i)),
     ].join(' ').toLowerCase();
     return champs.includes(q);
-  }).sort((a, b) => (tri === 'cotations'
-    ? b.cotations - a.cotations
-    : new Date(b.date) - new Date(a.date)));
+  }).sort((a, b) => {
+    if (tri === 'cotations') return b.cotations - a.cotations;
+    if (tri === 'semaine' || tri === 'mois') {
+      const ka = cleAgregation(a.date, tri);
+      const kb = cleAgregation(b.date, tri);
+      /* Groupes du plus récent au plus ancien, séances du plus récent au plus
+         ancien dans chaque groupe : même ordre que le tri par date, juste
+         entrecoupé d'en-têtes. */
+      if (ka !== kb) return kb - ka;
+      return new Date(b.date) - new Date(a.date);
+    }
+    return new Date(b.date) - new Date(a.date);
+  });
 
   const affichees = toutes ? filtrees : filtrees.slice(0, LOT);
+  /* La pagination porte sur des séances, pas sur des groupes : un groupe peut
+     donc apparaître tronqué en bas de la première page, comme n'importe quel
+     tri à plat. */
+  const groupes = (tri === 'semaine' || tri === 'mois')
+    ? (() => {
+        const m = new Map();
+        affichees.forEach((s) => {
+          const k = cleAgregation(s.date, tri);
+          if (!m.has(k)) m.set(k, []);
+          m.get(k).push(s);
+        });
+        return Array.from(m.entries()).sort((a, b) => b[0] - a[0]);
+      })()
+    : null;
 
-  const paires = trouverPaires(donnees.seances);
+  const paires = trouverPaires(donnees);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
   const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
 
@@ -1998,8 +2031,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
           placeholder="Rechercher une date, une personne, un atelier…"
           className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
           style={{ borderColor: BORDER, color: INK }} />
-        <div className="flex gap-1.5">
+        <div className="flex gap-1.5 flex-wrap">
           <Chip label="Par date" on={tri === 'date'} onClick={() => setTri('date')} />
+          <Chip label="Par semaine" on={tri === 'semaine'} onClick={() => setTri('semaine')} />
+          <Chip label="Par mois" on={tri === 'mois'} onClick={() => setTri('mois')} />
           <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => setTri('cotations')} />
         </div>
       </div>
@@ -2009,13 +2044,31 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
         {q && ` sur ${seances.length}`} — appuyez pour voir le détail
       </div>
 
-      <div className={densite === 'compact' ? 'space-y-1 mb-4' : 'space-y-1.5 mb-4'}>
-        {affichees.map((s) => (
-          <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
-            ouverte={ouverte === s.id}
-            onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-            onSupprimer={() => onSupprimerSeance(s)} />
-        ))}
+      <div className="mb-4">
+        {groupes ? groupes.map(([k, ss]) => (
+          <div key={k} className="mb-3 last:mb-0">
+            <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT, fontFamily: F_MONO }}>
+              {etiquetteAgregation(k, tri)} <span className="font-normal normal-case">· {ss.length} séance{ss.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
+              {ss.map((s) => (
+                <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
+                  ouverte={ouverte === s.id}
+                  onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+                  onSupprimer={() => onSupprimerSeance(s)} />
+              ))}
+            </div>
+          </div>
+        )) : (
+          <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
+            {affichees.map((s) => (
+              <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
+                ouverte={ouverte === s.id}
+                onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+                onSupprimer={() => onSupprimerSeance(s)} />
+            ))}
+          </div>
+        )}
         {!affichees.length && <Empty>Aucune séance ne correspond à cette recherche.</Empty>}
       </div>
 
