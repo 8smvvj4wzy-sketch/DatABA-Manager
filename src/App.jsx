@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
-  LineChart, Line, BarChart, Bar, AreaChart, Area, ScatterChart, Scatter,
+  LineChart, Line, Bar, Area, Scatter,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
   CartesianGrid, Legend,
@@ -910,6 +910,42 @@ function jourLocal(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/* Jours où l'on a une trace de la personne : une séance à laquelle elle a
+   participé, une crise ou une observation la concernant, un relevé de suivi
+   continu. C'est la meilleure preuve de présence dont Manager dispose —
+   DatABA ne consigne aucun calendrier de présence.
+
+   Sert à distinguer deux choses que la chronologie des crises confondait : un
+   jour sans crise, qui est un vrai zéro et doit compter, et un jour d'absence
+   ou de vacances, qui ne doit pas. Sans cette distinction la tendance se
+   calculait sur les seules tranches où il s'était passé quelque chose, donc
+   biaisée vers le haut ; en comptant tous les jours du calendrier elle
+   l'aurait été vers le bas.
+
+   Biais résiduel assumé, dit à l'écran : un jour de présence sans rien de coté
+   ni relevé reste invisible et son zéro est perdu. `initiales` à null =
+   n'importe quelle personne, pour le filtre « toutes les personnes ». */
+function joursObserves(donnees, initiales) {
+  const jours = new Set();
+  const ajouter = (d) => { const j = jourLocal(d); if (j) jours.add(j); };
+  const iniDe = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+
+  (donnees.seances || []).forEach((s) => {
+    if (initiales && !(s.studentIds || []).some((sid) => iniDe(s.source, sid) === initiales)) return;
+    ajouter(s.date);
+  });
+  (donnees.crises || []).forEach((c) => {
+    if (initiales && iniDe(c.source, c.studentId) !== initiales) return;
+    ajouter(c.date);
+  });
+  if (initiales) {
+    suiviDePersonne(donnees, initiales).forEach((r) => ajouter(r.timestamp));
+  } else {
+    [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => ajouter(r.timestamp));
+  }
+  return jours;
+}
+
 /* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
    les relevés déjà résolus par suiviDePersonne (un seul axe, un seul jour,
    triés du plus ancien au plus récent) — contrairement à `segmentsJournee`
@@ -1128,6 +1164,17 @@ const STYLES_GRAPHIQUE = [
   { k: 'barres', label: 'Barres' },
   { k: 'aire', label: 'Aire' },
   { k: 'points', label: 'Points' },
+];
+/* Lectures superposables à une série. Cumulables : elles ne disent pas la même
+   chose et se complètent — la droite donne le sens général, la moyenne mobile
+   montre les paliers que la droite écrase, moyenne et médiane situent le
+   niveau par rapport au seuil d'acquisition déjà tracé. Aucune n'est active
+   par défaut : un graphique s'ouvre sur ses données, pas sur leur commentaire. */
+const COURBES_LECTURE = [
+  { k: 'tendance', label: 'Tendance' },
+  { k: 'mobile', label: 'Moyenne mobile' },
+  { k: 'moyenne', label: 'Moyenne' },
+  { k: 'mediane', label: 'Médiane' },
 ];
 /* --- Période d'observation ---
    Trois façons de la définir : un raccourci glissant, une plage de dates au
@@ -1403,6 +1450,38 @@ function tendanceLineaire(valeurs) {
   return valeurs.map((_, i) => Math.round((origine + pente * i) * 100) / 100);
 }
 
+/* Moyenne mobile centrée. Renvoie un tableau de même longueur, `null` là où la
+   fenêtre déborde de la série — jamais une fenêtre rétrécie sur les bords :
+   une moyenne « mobile » calculée sur un point isolé n'en est pas une, et la
+   courbe doit s'arrêter là où le calcul s'arrête. Même principe que le segment
+   de suivi non borné, qui reste de durée inconnue plutôt que d'être deviné.
+   Fenêtre impaire seulement : une fenêtre paire n'a pas de centre. */
+function moyenneMobile(valeurs, fenetre = 3) {
+  if (!valeurs || valeurs.length < fenetre || fenetre < 3 || fenetre % 2 === 0) return null;
+  const demi = (fenetre - 1) / 2;
+  return valeurs.map((_, i) => {
+    if (i < demi || i > valeurs.length - 1 - demi) return null;
+    const tranche = valeurs.slice(i - demi, i + demi + 1);
+    return Math.round((tranche.reduce((a, v) => a + v, 0) / fenetre) * 100) / 100;
+  });
+}
+
+/* Médiane et moyenne d'une série, arrondies au centième. `null` en dessous de
+   trois valeurs : c'est le seuil que `tendanceLineaire` applique déjà, et les
+   quatre lectures doivent apparaître et disparaître ensemble plutôt que de
+   laisser croire qu'une série trop courte se lit quand même. */
+function medianeDe(valeurs) {
+  if (!valeurs || valeurs.length < 3) return null;
+  const triees = valeurs.slice().sort((a, b) => a - b);
+  const milieu = Math.floor(triees.length / 2);
+  const m = triees.length % 2 ? triees[milieu] : (triees[milieu - 1] + triees[milieu]) / 2;
+  return Math.round(m * 100) / 100;
+}
+function moyenneDe(valeurs) {
+  if (!valeurs || valeurs.length < 3) return null;
+  return Math.round((valeurs.reduce((a, v) => a + v, 0) / valeurs.length) * 100) / 100;
+}
+
 /* Sens de la tendance, dit en clair — mais seulement s'il est net.
    Un écart absolu ne suffit pas comme critère : « +0,5 crise » ne veut pas
    dire la même chose chez quelqu'un qui en fait une par semaine et chez
@@ -1503,11 +1582,29 @@ function imprimerZone(element) {
 /* Nom de fichier sans caractère qui gêne un système de fichiers */
 const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'graphique';
 
-function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
-  const donnees = points.map((p) => ({
+/* Un seul ComposedChart pour les quatre styles, au lieu de quatre conteneurs
+   distincts : Recharts refuse une <Line> dans un BarChart ou un ScatterChart,
+   donc superposer une courbe de lecture imposait de toute façon ce
+   regroupement. ApercuCrises fait déjà exactement ça pour ses barres et sa
+   tendance. */
+function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes = [] }) {
+  const valeurs = points.map((p) => p.value);
+  const actif = (k) => courbes.includes(k);
+  /* Les quatre lectures partagent le seuil de trois points de tendanceLineaire :
+     elles apparaissent et disparaissent ensemble plutôt que d'en laisser une
+     seule donner un chiffre à du bruit. */
+  const tendance = actif('tendance') ? tendanceLineaire(valeurs) : null;
+  const mobile = actif('mobile') ? moyenneMobile(valeurs) : null;
+  const moyenne = actif('moyenne') ? moyenneDe(valeurs) : null;
+  const mediane = actif('mediane') ? medianeDe(valeurs) : null;
+  const avecLegende = !!(tendance || mobile);
+
+  const donnees = points.map((p, i) => ({
     label: new Date(p.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
       + (libelleCreneauProbe(p.creneau) ? ` (${libelleCreneauProbe(p.creneau)})` : ''),
     valeur: p.value,
+    Tendance: tendance ? tendance[i] : null,
+    'Moyenne mobile': mobile ? mobile[i] : null,
   }));
   /* Un pourcentage se lit toujours sur 0-100 : borner l'axe évite de faire
      passer une variation de trois points pour un bouleversement. Une mesure
@@ -1515,30 +1612,46 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%' }) {
      laisse alors recharts choisir l'échelle. */
   const enPourcent = unite === '%';
   const etiquette = enPourcent ? 'Résultat' : 'Moyenne du jour';
-  const axes = (
-    <>
-      <CartesianGrid stroke={BORDER} vertical={false} />
-      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-      <YAxis domain={enPourcent ? [0, 100] : [0, 'auto']} allowDecimals={!enPourcent}
-        tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
-        formatter={(v) => [`${v} ${unite}`, etiquette]} />
-      {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
-    </>
-  );
   const marge = { top: 8, right: 8, bottom: 4, left: -14 };
   return (
     <div style={{ height: hauteur }}>
       <ResponsiveContainer width="100%" height="100%">
-        {style === 'barres' ? (
-          <BarChart data={donnees} margin={marge}>{axes}<Bar dataKey="valeur" fill={INK} radius={[4, 4, 0, 0]} isAnimationActive={false} /></BarChart>
-        ) : style === 'aire' ? (
-          <AreaChart data={donnees} margin={marge}>{axes}<Area type="monotone" dataKey="valeur" stroke={INK} fill={INK} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} /></AreaChart>
-        ) : style === 'points' ? (
-          <ScatterChart data={donnees} margin={marge}>{axes}<Scatter dataKey="valeur" fill={INK} isAnimationActive={false} /></ScatterChart>
-        ) : (
-          <LineChart data={donnees} margin={marge}>{axes}<Line type="monotone" dataKey="valeur" stroke={INK} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} /></LineChart>
-        )}
+        <ComposedChart data={donnees} margin={marge}>
+          <CartesianGrid stroke={BORDER} vertical={false} />
+          <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+          <YAxis domain={enPourcent ? [0, 100] : [0, 'auto']} allowDecimals={!enPourcent}
+            tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+          <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
+            formatter={(v, nom) => [`${v} ${unite}`, nom]} />
+          {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
+          {/* Moyenne et médiane sont des horizontales : ReferenceLine, le même
+              primitif que le seuil, plutôt qu'une série constante de plus. */}
+          {moyenne != null && (
+            <ReferenceLine y={moyenne} stroke={INK_SOFT} strokeDasharray="2 3" strokeWidth={1.5}
+              label={{ value: `moy. ${moyenne}`, position: 'insideTopLeft', fontSize: 10, fill: INK_SOFT }} />
+          )}
+          {mediane != null && (
+            <ReferenceLine y={mediane} stroke={INK_SOFT} strokeDasharray="6 3" strokeWidth={1.5}
+              label={{ value: `méd. ${mediane}`, position: 'insideBottomLeft', fontSize: 10, fill: INK_SOFT }} />
+          )}
+          {/* `name` explicite : sans lui la légende afficherait la clé brute
+              « valeur » à côté des lectures, qui portent déjà leur nom. */}
+          {style === 'barres' ? (
+            <Bar dataKey="valeur" name={etiquette} fill={INK} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          ) : style === 'aire' ? (
+            <Area type="monotone" dataKey="valeur" name={etiquette} stroke={INK} fill={INK} fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+          ) : style === 'points' ? (
+            <Scatter dataKey="valeur" name={etiquette} fill={INK} isAnimationActive={false} />
+          ) : (
+            <Line type="monotone" dataKey="valeur" name={etiquette} stroke={INK} strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+          )}
+          {/* Les lectures ne sont pas des catégories mais des relectures de la
+              même série : encre du thème et pointillés distincts, jamais la
+              palette catégorielle — réservée aux états et aux séries. */}
+          {tendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+          {mobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
+          {avecLegende && <Legend wrapperStyle={{ fontSize: 11 }} />}
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   );
@@ -2390,14 +2503,33 @@ function valeursSegment(donnees, crise, segmentation) {
 }
 
 /* Chronologie des crises, découpée en séries.
-   Les périodes sans aucune crise sont conservées : un trou dans la courbe est
-   une information, l'écraser laisserait croire à une continuité.
+
+   Une tranche existe dès qu'elle contient un jour observé (`jours`, produit
+   par joursObserves), même sans aucune crise : ce zéro-là est une information,
+   et l'omettre biaisait la lecture deux fois — la tendance ne se calculait que
+   sur les tranches où il s'était passé quelque chose, et l'axe mentait sur le
+   temps écoulé en collant deux semaines non consécutives. Une tranche sans
+   aucun jour observé (vacances, absence prolongée) n'est en revanche pas
+   créée : elle sortirait du calcul comme un zéro qu'elle n'est pas.
+
+   `jours` absent (appel historique) → repli sur l'ancien comportement, une
+   tranche par tranche portant une crise.
+
    « mesure » vaut 'nombre' (chaque crise pèse 1) ou 'duree' (chaque crise pèse
    ses minutes) : une semaine peut compter peu de crises mais très longues. */
-function chronologieCrises(donnees, crises, granularite, segmentation, mesure = 'nombre') {
+function chronologieCrises(donnees, crises, granularite, segmentation, mesure = 'nombre', jours = null) {
   const paquets = new Map();
   const totaux = new Map();
   const poids = (c) => (mesure === 'duree' ? Math.round((c.durationMs || 0) / 60000) : 1);
+
+  /* Les tranches observées d'abord : elles fixent le squelette de l'axe, les
+     crises ne font ensuite que le remplir. */
+  if (jours) {
+    jours.forEach((j) => {
+      const cle = cleAgregation(`${j}T12:00:00`, granularite);
+      if (!paquets.has(cle)) paquets.set(cle, {});
+    });
+  }
 
   crises.forEach((c) => {
     const cle = cleAgregation(c.date, granularite);
@@ -2426,6 +2558,9 @@ function chronologieCrises(donnees, crises, granularite, segmentation, mesure = 
         const cible = gardees.includes(v) ? v : 'Autres';
         ligne[cible] = (ligne[cible] || 0) + n;
       });
+      /* Total de la tranche : c'est lui que lisent les courbes superposées.
+         Une lecture par série serait illisible (jusqu'à six séries). */
+      ligne._total = series.reduce((a, v) => a + (ligne[v] || 0), 0);
       return ligne;
     });
 
@@ -2459,6 +2594,10 @@ const configCriseVide = () => ({
   mesure: 'nombre',
   unite: 'nombre',
   blocs: TOUS_LES_BLOCS,
+  /* Lectures superposées à la chronologie. Vide par défaut : le graphique
+     s'ouvre sur ses données. Un bilan enregistré avant ce réglage n'a pas la
+     clé — d'où les `config.courbes || []` à la lecture. */
+  courbes: [],
 });
 
 /* Barres horizontales : les intitulés sont longs, un axe vertical les
@@ -2547,7 +2686,33 @@ function BarresCrise({ titre, donnees: d, couleur, note, valeur, suffixe }) {
 function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
   const actif = (k) => (config.blocs || TOUS_LES_BLOCS).includes(k);
   const gran = periode.granularite || 'semaine';
-  const chrono = chronologieCrises(donnees, crises, gran, config.segmentation, config.mesure);
+  /* Jours observés bornés à la période affichée : joursObserves balaie tout
+     l'historique, alors que `crises` arrive déjà filtré. Sans ce filtre l'axe
+     s'étendrait au-delà de la période choisie. Mémoïsé : le balayage porte sur
+     toutes les séances, crises et relevés. Le filtre par personne suit celui
+     du bilan — une seule personne à la fois depuis le lot précédent. */
+  const jours = useMemo(() => {
+    const cible = (config.personnes || [])[0] || null;
+    return new Set(Array.from(joursObserves(donnees, cible))
+      .filter((j) => dansPeriode(`${j}T12:00:00`, periode)));
+  }, [donnees.seances, donnees.crises, donnees.suivi, donnees.stabilite,
+    donnees._idVersInitiales, config.personnes, periode]);
+  const chrono = chronologieCrises(donnees, crises, gran, config.segmentation, config.mesure, jours);
+
+  /* Lectures superposées à la chronologie : elles portent sur le total de
+     chaque tranche (`_total`), jamais série par série — jusqu'à six séries,
+     quatre courbes chacune serait illisible. */
+  const totaux = chrono.donnees.map((d) => d._total);
+  const courbesActives = config.courbes || [];
+  const chronoTendance = courbesActives.includes('tendance') ? tendanceLineaire(totaux) : null;
+  const chronoMobile = courbesActives.includes('mobile') ? moyenneMobile(totaux) : null;
+  const chronoMoyenne = courbesActives.includes('moyenne') ? moyenneDe(totaux) : null;
+  const chronoMediane = courbesActives.includes('mediane') ? medianeDe(totaux) : null;
+  const donneesChrono = chrono.donnees.map((d, i) => ({
+    ...d,
+    Tendance: chronoTendance ? chronoTendance[i] : null,
+    'Moyenne mobile': chronoMobile ? chronoMobile[i] : null,
+  }));
 
   const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
   const chronometrees = crises.filter((c) => (c.durationMs || 0) > 0);
@@ -2591,33 +2756,40 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
             <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
           ) : (
             <>
+              {/* Un seul ComposedChart pour les deux formes : Recharts refuse
+                  une <Line> de lecture dans un BarChart, et la branche
+                  LineChart/BarChart ne différait que par le mark de ses
+                  séries. */}
               <div style={{ height: 300 }} ref={refChrono}>
                 <ResponsiveContainer width="100%" height="100%">
-                  {config.forme === 'courbes' ? (
-                    <LineChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                      <CartesianGrid stroke={BORDER} vertical={false} />
-                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
-                      <Legend wrapperStyle={{ fontSize: 11 }} />
-                      {chrono.series.map((nom, i) => (
+                  <ComposedChart data={donneesChrono} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                    <CartesianGrid stroke={BORDER} vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    {chronoMoyenne != null && (
+                      <ReferenceLine y={chronoMoyenne} stroke={INK_SOFT} strokeDasharray="2 3" strokeWidth={1.5}
+                        label={{ value: `moy. ${chronoMoyenne}`, position: 'insideTopLeft', fontSize: 10, fill: INK_SOFT }} />
+                    )}
+                    {chronoMediane != null && (
+                      <ReferenceLine y={chronoMediane} stroke={INK_SOFT} strokeDasharray="6 3" strokeWidth={1.5}
+                        label={{ value: `méd. ${chronoMediane}`, position: 'insideBottomLeft', fontSize: 10, fill: INK_SOFT }} />
+                    )}
+                    {config.forme === 'courbes'
+                      ? chrono.series.map((nom, i) => (
                         <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
                           strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
-                      ))}
-                    </LineChart>
-                  ) : (
-                    <BarChart data={chrono.donnees} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                      <CartesianGrid stroke={BORDER} vertical={false} />
-                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                      <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
-                      <Legend wrapperStyle={{ fontSize: 11 }} />
-                      {chrono.series.map((nom, i) => (
+                      ))
+                      : chrono.series.map((nom, i) => (
                         <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
                           radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
                       ))}
-                    </BarChart>
-                  )}
+                    {/* Encre du thème et pointillés, jamais PALETTE_SERIES :
+                        elle est déjà prise par les séries de ce graphique. */}
+                    {chronoTendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+                    {chronoMobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
               <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
@@ -2626,6 +2798,11 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
                 {(SEGMENTATIONS.find((sg) => sg.k === config.segmentation) || {}).multi &&
                   " Un même enregistrement peut porter plusieurs valeurs : le total empilé dépasse alors le nombre d'enregistrements."}
                 {config.mesure === 'duree' && " Une observation ABC n'a pas de durée : elle pèse zéro dans cette vue."}
+                {' '}Une période sans crise compte pour zéro dès qu'elle porte une trace de la personne ;
+                une période sans aucune trace — vacances, absence — n'apparaît pas, faute de pouvoir
+                la distinguer d'un vrai zéro.
+                {(chronoTendance || chronoMobile || chronoMoyenne != null || chronoMediane != null)
+                  && " Les lectures superposées portent sur le total de chaque période, toutes séries confondues, et décrivent la période affichée sans la prolonger."}
               </p>
             </>
           )}
@@ -2842,10 +3019,20 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
               <Chip label="Nombre" on={config.mesure === 'nombre'} onClick={() => maj({ mesure: 'nombre' })} />
               <Chip label="Durée cumulée (min)" on={config.mesure === 'duree'} onClick={() => maj({ mesure: 'duree' })} />
             </div>
-            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
               <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
               {SEGMENTATIONS.map((sg) => (
                 <Chip key={sg.k} label={sg.label} on={config.segmentation === sg.k} onClick={() => maj({ segmentation: sg.k })} />
+              ))}
+            </div>
+            {/* Cumulables : chacune bascule indépendamment des autres. */}
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+              {COURBES_LECTURE.map((c) => (
+                <Chip key={c.k} label={c.label} on={(config.courbes || []).includes(c.k)}
+                  onClick={() => maj({ courbes: (config.courbes || []).includes(c.k)
+                    ? config.courbes.filter((x) => x !== c.k)
+                    : [...(config.courbes || []), c.k] })} />
               ))}
             </div>
 
@@ -2890,10 +3077,17 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
    tendance de la période. Volontairement dépouillé — il sert à repérer qu'il
    se passe quelque chose, l'analyse se fait dans l'onglet Crises, où il
    renvoie d'un appui. */
-function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
+function ApercuCrises({ donnees, personne, crises, periode, granularite, onOuvrir }) {
   const vraies = crises.filter((c) => (c.kind || 'crise') === 'crise');
 
+  /* Même règle que la chronologie de l'onglet Crises : une tranche existe dès
+     qu'un jour y porte une trace de la personne, avec ou sans crise. Sans ce
+     squelette, l'aperçu et le graphique détaillé afficheraient deux tendances
+     différentes sur les mêmes données. */
   const paquets = new Map();
+  Array.from(joursObserves(donnees, personne))
+    .filter((j) => dansPeriode(`${j}T12:00:00`, periode))
+    .forEach((j) => paquets.set(cleAgregation(`${j}T12:00:00`, granularite), 0));
   vraies.forEach((c) => {
     const k = cleAgregation(c.date, granularite);
     paquets.set(k, (paquets.get(k) || 0) + 1);
@@ -2940,6 +3134,8 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
       <p className="text-xs mt-1" style={{ color: INK_SOFT }}>
         Occurrences par {granularite === 'jour' ? 'jour' : granularite === 'mois' ? 'mois' : 'semaine'}
         {tendance && ', ligne pointillée : tendance'}. Les observations ABC ne sont pas comptées.
+        Une période sans crise compte pour zéro dès qu'elle porte une trace de la personne ;
+        une période sans aucune trace — vacances, absence — n'apparaît pas.
       </p>
     </button>
   );
@@ -2949,7 +3145,7 @@ function ApercuCrises({ donnees, personne, crises, granularite, onOuvrir }) {
    sur les autres), agrandir (une courbe dense est illisible à 220 px), et
    exporter en image (pour coller dans un compte rendu sans passer par une
    capture d'écran). */
-function CarteObjectif({ ligne, donnees, personne, style, deplie, pourPdf, agrandi, surligne, onBasculerDeplie, onBasculerPdf, onAgrandir }) {
+function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourPdf, agrandi, surligne, onBasculerDeplie, onBasculerPdf, onAgrandir }) {
   const refGraphe = useRef(null);
   const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
   const code = codeEflDe(donnees, ligne.objectif);
@@ -3072,7 +3268,7 @@ function CarteObjectif({ ligne, donnees, personne, style, deplie, pourPdf, agran
               qu'un critère s'y applique — c'est le cas du comptage
               d'occurrences. `ligne.threshold` est déjà nul quand aucun
               critère ne vaut pour cette série. */}
-          <Graphique points={courbe} style={style} seuil={ligne.threshold}
+          <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
             hauteur={agrandi ? 460 : surligne ? 300 : 220}
             unite={enMesure ? ligne.unite : '%'} />
         </div>
@@ -3083,9 +3279,19 @@ function CarteObjectif({ ligne, donnees, personne, style, deplie, pourPdf, agran
   );
 }
 
-function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, onRapport, onRapportCrises, onOuvrirCrises }) {
+/* `graphe` ({ style, courbes }) vient de ManagerApp : les onglets sont montés
+   conditionnellement, un réglage d'affichage posé en état local repart de sa
+   valeur initiale à chaque aller-retour — même raison que `unite` du tableau
+   de bord et `config` du bilan de crise. */
+function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises }) {
   const [vue, setVue] = useState('objectifs');
-  const [style, setStyle] = useState('ligne');
+  const style = graphe.style;
+  const courbes = graphe.courbes;
+  const setStyle = (k) => setGraphe((g) => ({ ...g, style: k }));
+  const basculerCourbe = (k) => setGraphe((g) => ({
+    ...g,
+    courbes: g.courbes.includes(k) ? g.courbes.filter((x) => x !== k) : [...g.courbes, k],
+  }));
   /* Objectifs dont la courbe est dépliée, et celui qu'on a agrandi. Repérés
      par leur nom : les identifiants d'objectif changent d'une tablette à
      l'autre, le nom est ce qui reste stable côté consolidation. Vue Objectifs
@@ -3265,7 +3471,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       </div>
 
       <ApercuCrises donnees={donnees} personne={personne} crises={crisesPersonne}
-        granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
+        periode={periode} granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
 
       {vue === 'objectifs' && (() => {
         const retenusPdf = siennes.filter((l) => !nonRetenusPdf.includes(l.objectif));
@@ -3308,6 +3514,21 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               )}
             </div>
 
+            {/* Lectures superposables, cumulables : chacune bascule seule. */}
+            <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+              {COURBES_LECTURE.map((c) => (
+                <Chip key={c.k} label={c.label} on={courbes.includes(c.k)} onClick={() => basculerCourbe(c.k)} />
+              ))}
+            </div>
+            {courbes.length > 0 && (
+              <p className="text-xs mb-3 no-print" style={{ color: INK_SOFT }}>
+                Ces lectures décrivent la période affichée, elles ne la prolongent pas : une droite qui
+                monte vers le seuil ne dit pas à quelle date l'objectif sera acquis. Elles demandent au
+                moins trois points cotés.
+              </p>
+            )}
+
             {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
               /* Zone exportée : seuls les objectifs cochés (case à gauche de
                  chaque carte) en sortent, dans le style choisi — voir
@@ -3326,7 +3547,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                 <div className="space-y-3">
                   {siennes.map((l) => (
                     <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
-                      style={style}
+                      style={style} courbes={courbes}
                       deplie={deplies.includes(l.objectif)}
                       pourPdf={!nonRetenusPdf.includes(l.objectif)}
                       agrandi={agrandi === l.objectif}
@@ -3856,9 +4077,19 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
 }
 
 /* ==================== Rapport ==================== */
-function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, onLogo, onAssociation, onAlias, onCommentaire, onCodeEfl, onComposerBilan, onEnregistrer, onOuvrirRapport, onSupprimerRapport }) {
+/* `graphe` séparé de celui de la fiche personne : les deux écrans ont toujours
+   eu des choix de style indépendants — le document transmis n'a pas de raison
+   de suivre ce qu'on regarde à l'écran. Remonté dans ManagerApp pour la même
+   raison que les autres réglages : l'onglet est monté conditionnellement. */
+function RapportScreen({ donnees, lignes, selection, setSelection, logo, association, graphe, setGraphe, onLogo, onAssociation, onAlias, onCommentaire, onCodeEfl, onComposerBilan, onEnregistrer, onOuvrirRapport, onSupprimerRapport }) {
   const [avecGraphiques, setAvecGraphiques] = useState(true);
-  const [style, setStyle] = useState('ligne');
+  const style = graphe.style;
+  const courbes = graphe.courbes;
+  const setStyle = (k) => setGraphe((g) => ({ ...g, style: k }));
+  const basculerCourbe = (k) => setGraphe((g) => ({
+    ...g,
+    courbes: g.courbes.includes(k) ? g.courbes.filter((x) => x !== k) : [...g.courbes, k],
+  }));
   const [nomRapport, setNomRapport] = useState('');
 
   if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour composer un rapport.</Empty>;
@@ -4017,9 +4248,17 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           Inclure les graphiques
         </button>
         {avecGraphiques && (
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
-          </div>
+          <>
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+              {COURBES_LECTURE.map((c) => (
+                <Chip key={c.k} label={c.label} on={courbes.includes(c.k)} onClick={() => basculerCourbe(c.k)} />
+              ))}
+            </div>
+          </>
         )}
 
         {/* Le bilan de crise se compose dans l'onglet Crises, là où se trouvent
@@ -4102,7 +4341,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   const enMesure = !l.points.length && (l.mesures || []).length > 0;
                   if (!enMesure) {
                     return avecGraphiques && l.points.length > 0 ? (
-                      <div className="mb-3"><Graphique points={l.points} style={style} seuil={l.threshold} hauteur={180} /></div>
+                      <div className="mb-3"><Graphique points={l.points} style={style} courbes={courbes} seuil={l.threshold} hauteur={180} /></div>
                     ) : null;
                   }
                   const journalieres = moyennesParJour(l.mesures);
@@ -4126,7 +4365,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                       </div>
                       {avecGraphiques && journalieres.length > 0 && (
                         <div className="mb-3">
-                          <Graphique points={journalieres} style={style} seuil={null} hauteur={180} unite={l.unite} />
+                          <Graphique points={journalieres} style={style} courbes={courbes} seuil={null} hauteur={180} unite={l.unite} />
                         </div>
                       )}
                     </>
@@ -5065,6 +5304,12 @@ function ManagerApp() {
      persistés ni chiffrés — comme `periode` juste au-dessus. */
   const [uniteBord, setUniteBord] = useState('nombre');
   const [configCrises, setConfigCrises] = useState(configCriseVide());
+  /* Réglages de graphique — style de tracé et lectures superposées. Deux jeux
+     séparés : la fiche personne et le document du rapport ont toujours eu des
+     choix indépendants, les fusionner ferait suivre au document ce qu'on
+     regarde à l'écran. */
+  const [graphePersonnes, setGraphePersonnes] = useState({ style: 'ligne', courbes: [] });
+  const [grapheRapport, setGrapheRapport] = useState({ style: 'ligne', courbes: [] });
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
@@ -5392,7 +5637,9 @@ function ManagerApp() {
             <>
               <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes accompagnées</SectionTitle>
               <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
-                periode={periode} setPeriode={setPeriode} onRapport={lancerRapport}
+                periode={periode} setPeriode={setPeriode}
+                graphe={graphePersonnes} setGraphe={setGraphePersonnes}
+                onRapport={lancerRapport}
                 onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises} />
             </>
           )}
@@ -5427,6 +5674,7 @@ function ManagerApp() {
             <RapportScreen donnees={donnees} lignes={lignes}
               selection={selectionRapport} setSelection={setSelectionRapport}
               logo={logo} association={association}
+              graphe={grapheRapport} setGraphe={setGrapheRapport}
               onLogo={enregistrerLogo} onAssociation={enregistrerAssociation}
               onAlias={majAlias} onCommentaire={majCommentaire} onCodeEfl={majCodeEfl}
               onComposerBilan={composerBilan}
