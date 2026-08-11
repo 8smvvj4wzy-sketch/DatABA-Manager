@@ -826,6 +826,62 @@ function suiviDePersonne(donnees, initiales) {
   return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
+/* Jour local d'un horodatage, en « AAAA-MM-JJ » — repris de DatABA
+   (`jourLocal`). Jamais `toISOString().slice(0, 10)`, qui bascule de jour en
+   fin de soirée selon le fuseau. */
+function jourLocal(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
+   les relevés déjà résolus par suiviDePersonne (un seul axe, un seul jour,
+   triés du plus ancien au plus récent) — contrairement à `segmentsJournee`
+   côté DatABA qui recherche l'axe lui-même dans les relevés bruts, chaque
+   relevé porte déjà sa `meta` ici. Une clôture (`r.fin`) ne démarre pas de
+   segment, elle borne le précédent. Le dernier segment de la liste reste
+   `ms: null` tant qu'aucune clôture ni relevé suivant ne le borne : ce n'est
+   pas une durée nulle, c'est une durée pas encore connue — l'étirer jusqu'à
+   minuit inventerait une donnée jamais saisie. */
+function segmentsJournee(relevesJour) {
+  const segments = [];
+  for (let i = 0; i < relevesJour.length; i++) {
+    const r = relevesJour[i];
+    if (r.fin) continue;
+    const debut = new Date(r.timestamp).getTime();
+    if (Number.isNaN(debut)) continue;
+    const suivant = relevesJour[i + 1];
+    const fin = suivant ? new Date(suivant.timestamp).getTime() : null;
+    segments.push({ debut, fin, meta: r.meta, cle: r.cle, ms: fin != null ? fin - debut : null });
+  }
+  return segments;
+}
+
+/* Part du temps passée dans chaque critère, sur un ensemble de segments
+   (une journée, ou plusieurs journées mises bout à bout sur une période). Les
+   segments non bornés (`ms: null`) sont exclus du dénominateur et comptés à
+   part : un pourcentage ne doit jamais reposer sur une durée devinée. */
+function repartitionCriteres(segments) {
+  const bornes = segments.filter((s) => s.ms != null);
+  const total = bornes.reduce((a, s) => a + s.ms, 0);
+  const parCritere = new Map();
+  bornes.forEach((s) => {
+    if (!parCritere.has(s.cle)) parCritere.set(s.cle, { cle: s.cle, meta: s.meta, ms: 0, n: 0 });
+    const e = parCritere.get(s.cle);
+    e.ms += s.ms;
+    e.n += 1;
+  });
+  return {
+    totalMs: total,
+    nonBornes: segments.length - bornes.length,
+    lignes: Array.from(parCritere.values())
+      .map((e) => ({ ...e, part: total ? Math.round((e.ms / total) * 100) : null }))
+      .sort((a, b) => b.ms - a.ms),
+  };
+}
+
 
 /* ==================== Composants de base ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
@@ -2262,6 +2318,59 @@ const configCriseVide = () => ({
 
 /* Barres horizontales : les intitulés sont longs, un axe vertical les
    tronquerait. */
+/* Frise d'une journée de suivi continu : une piste horizontale, un segment
+   par état, proportionnel à sa durée réelle — remplace la liste
+   d'horodatages, où un critère tenu cinq minutes et un autre tenu trois
+   heures se lisaient à l'identique. Grammaire reprise de FriseJournee côté
+   DatABA (src/App.jsx), adaptée à une journée passée : pas de « maintenant »
+   à qui accrocher le dernier segment, donc une largeur nominale plutôt qu'une
+   extension jusqu'à l'heure courante. Un segment non borné (`ms: null`) est
+   rendu en hachures, jamais en aplat : sa largeur est arbitraire, sa couleur
+   ne doit pas laisser croire à une durée mesurée. */
+const DUREE_NOMINALE_MS = 30 * 60000;
+function FriseSuivi({ segments, hauteur = 22 }) {
+  if (!segments.length) return null;
+  const heure = (t) => new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const finDe = (seg) => (seg.fin != null ? seg.fin : seg.debut + DUREE_NOMINALE_MS);
+  const debut = segments[0].debut;
+  const finVisible = finDe(segments[segments.length - 1]);
+  const duree = Math.max(1, finVisible - debut);
+  const heures = [];
+  const premiere = new Date(debut);
+  premiere.setMinutes(0, 0, 0);
+  for (let h = premiere.getTime() + 3600000; h < finVisible; h += 3600000) heures.push(h);
+  return (
+    <div>
+      <div className="relative rounded-lg overflow-hidden flex" style={{ height: hauteur, backgroundColor: PAPER }}>
+        {segments.map((seg, i) => {
+          const largeur = ((finDe(seg) - seg.debut) / duree) * 100;
+          const titre = `${seg.meta.l} — ${heure(seg.debut)}${seg.fin != null ? ` à ${heure(seg.fin)}` : ' (durée inconnue)'}`;
+          return (
+            <span key={i} title={titre} style={seg.ms != null
+              ? { width: `${largeur}%`, backgroundColor: seg.meta.color }
+              : {
+                width: `${largeur}%`,
+                border: `1px dashed ${seg.meta.color}`,
+                backgroundImage: `repeating-linear-gradient(45deg, ${seg.meta.color}, ${seg.meta.color} 3px, transparent 3px, transparent 7px)`,
+              }} />
+          );
+        })}
+        {/* Repères horaires en teinte de page, pas en blanc fixe : un blanc
+            en dur se fond dans un segment de couleur pâle — déjà le cas côté
+            DatABA. */}
+        {heures.map((h) => (
+          <span key={h} title={heure(h)} className="absolute top-0 bottom-0 w-px"
+            style={{ left: `${((h - debut) / duree) * 100}%`, backgroundColor: `color-mix(in srgb, ${PAPER} 70%, transparent)` }} />
+        ))}
+      </div>
+      <div className="flex justify-between text-xs mt-1" style={{ color: INK_SOFT, fontFamily: F_MONO }}>
+        <span>{heure(debut)}</span>
+        <span>{heure(finVisible)}</span>
+      </div>
+    </div>
+  );
+}
+
 function BarresCrise({ titre, donnees: d, couleur, note, valeur, suffixe }) {
   if (!d.length || d.every((x) => !x.n)) return null;
   const max = Math.max(...d.map((x) => x.n)) || 1;
@@ -2840,6 +2949,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
   const [classeFiltre, setClasseFiltre] = useState('');
+  /* Journée affichée dans la frise de suivi continu. null = pas de choix
+     explicite, la dernière journée cotée sert de défaut — calculé par
+     dérivation au moment du rendu (voir vue === 'suivi'), pas par un effet :
+     un effet ici tournerait après le retour anticipé plus bas selon que la
+     personne a ou non des relevés, et changerait l'ordre des hooks. */
+  const [jourChoisi, setJourChoisi] = useState(null);
   /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
      cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
      peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
@@ -2863,6 +2978,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     setDeplies(objectifOuvert ? [objectifOuvert] : []);
     setAgrandi(null);
     setNonRetenusPdf([]);
+    setJourChoisi(null);
   }, [personne]);
 
   /* Navigation vers un objectif précis sans changement de personne (rare,
@@ -2973,7 +3089,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         })}
       </div>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'}
+        avecComparaison={vue === 'suivi' || vue === 'radar'} />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
@@ -3102,41 +3219,119 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       )}
 
       {vue === 'suivi' && (() => {
-        const releves = suiviDePersonne(donnees, personne).filter((r) => dansPeriode(r.timestamp, periode));
+        const tousReleves = suiviDePersonne(donnees, personne);
+        const releves = tousReleves.filter((r) => dansPeriode(r.timestamp, periode));
         if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
-        /* Un axe par colonne : le nombre d'axes n'est pas borné côté DatABA,
-           l'affichage ne présume donc de rien de plus qu'une liste. */
-        const parAxe = new Map();
-        releves.forEach((r) => {
-          if (!parAxe.has(r.nomAxe)) parAxe.set(r.nomAxe, []);
-          parAxe.get(r.nomAxe).push(r);
-        });
+
+        const referencePeriode = periodeComparee(periode);
+        const relevesRef = referencePeriode ? tousReleves.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
+
+        /* Une carte par axe : le nombre d'axes n'est pas borné côté DatABA. */
+        const parAxeMap = (liste) => {
+          const m = new Map();
+          liste.forEach((r) => {
+            if (!m.has(r.nomAxe)) m.set(r.nomAxe, []);
+            m.get(r.nomAxe).push(r);
+          });
+          return m;
+        };
+        const parAxe = parAxeMap(releves);
+        const parAxeRef = parAxeMap(relevesRef);
+
+        /* Segments de toutes les journées d'un axe, mises bout à bout : c'est
+           ce qui nourrit la répartition par critère sur la période entière,
+           quand la frise elle-même n'en montre qu'une. */
+        const segmentsAxe = (relevesAxe) => {
+          const parJour = new Map();
+          relevesAxe.forEach((r) => {
+            const j = jourLocal(r.timestamp);
+            if (!parJour.has(j)) parJour.set(j, []);
+            parJour.get(j).push(r);
+          });
+          let tous = [];
+          parJour.forEach((rs) => {
+            const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            tous = tous.concat(segmentsJournee(triees));
+          });
+          return tous;
+        };
+
+        /* Journées cotées sur la période, toutes colonnes confondues, la plus
+           récente en tête : c'est parmi elles que se choisit la frise. Le
+           choix explicite (jourChoisi) est ignoré s'il ne fait plus partie de
+           la période affichée — dérivé au rendu, pas par un effet. */
+        const jours = Array.from(new Set(releves.map((r) => jourLocal(r.timestamp)))).sort().reverse();
+        const jourAffiche = jourChoisi && jours.includes(jourChoisi) ? jourChoisi : jours[0];
+        const minutes = (ms) => Math.round(ms / 60000);
+
         return (
           <>
             <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
               Ce que montre ce suivi est un état déclaré par l'équipe à un instant donné, pas une mesure de
               performance : un axe qui bascule souvent peut refléter un contexte qui change autant qu'une évolution
-              de la personne.
+              de la personne. Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
+              changement d'état : une durée pas encore connue n'entre pas dans un pourcentage.
             </p>
-            <div className="space-y-4">
-              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => (
-                <Card key={nomAxeVal}>
-                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
-                    {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''}</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {rs.slice(0, 30).map((r) => (
-                      <div key={r.id} className="rounded-xl px-3 py-2 flex items-center gap-2 text-xs" style={{ backgroundColor: PAPER }}>
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.meta.color }} />
-                        <span style={{ color: INK_SOFT }}>{new Date(r.timestamp).toLocaleString('fr-FR')}</span>
-                        <span className="font-medium">
-                          {r.fin ? '— fin —' : (r.meta === CRITERE_INCONNU_SUIVI ? `${r.meta.l} (${r.cle})` : r.meta.l)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
+
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {jours.map((j) => (
+                <button key={j} onClick={() => setJourChoisi(j)}
+                  className="rounded-lg px-2.5 py-1.5 text-xs border"
+                  style={{ borderColor: j === jourAffiche ? ACCENT : BORDER,
+                    backgroundColor: j === jourAffiche ? ACCENT_WASH : 'transparent',
+                    color: j === jourAffiche ? ACCENT : INK_SOFT, fontFamily: F_MONO }}>
+                  {new Date(`${j}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })}
+                </button>
               ))}
+            </div>
+
+            <div className="space-y-4">
+              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => {
+                const rsJour = rs.filter((r) => jourLocal(r.timestamp) === jourAffiche)
+                  .slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                const segments = segmentsJournee(rsJour);
+                const repar = repartitionCriteres(segmentsAxe(rs));
+                const reparRef = referencePeriode ? repartitionCriteres(segmentsAxe(parAxeRef.get(nomAxeVal) || [])) : null;
+                return (
+                  <Card key={nomAxeVal}>
+                    <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                      {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''} sur la période</span>
+                    </div>
+
+                    {segments.length > 0 ? (
+                      <div className="mb-4"><FriseSuivi segments={segments} /></div>
+                    ) : (
+                      <div className="text-xs mb-4" style={{ color: INK_SOFT }}>Rien de coté ce jour-là sur cet axe.</div>
+                    )}
+
+                    <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>Sur la période</div>
+                    <div className="space-y-1.5">
+                      {repar.lignes.map((l) => {
+                        const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
+                        return (
+                          <div key={String(l.cle)} className="flex items-center justify-between gap-2 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
+                              <span className="truncate">
+                                {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
+                              </span>
+                            </span>
+                            <span className="flex items-center gap-2 shrink-0" style={{ fontFamily: F_MONO }}>
+                              <span>{minutes(l.ms)} min{l.part != null ? ` · ${l.part} %` : ''}</span>
+                              {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" />}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {repar.nonBornes > 0 && (
+                        <div className="text-xs" style={{ color: INK_SOFT }}>
+                          {repar.nonBornes} relevé{repar.nonBornes !== 1 ? 's' : ''} sans durée connue, exclu{repar.nonBornes !== 1 ? 's' : ''} de ces chiffres.
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                );
+              })}
             </div>
           </>
         );
