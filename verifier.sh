@@ -94,8 +94,8 @@ for f in src/App.jsx; do
 
   # Blocs de rendu conditionnels dupliqués : {vue === 'x' && …} écrit deux fois
   # dans le même composant produit deux affichages superposés. Le grep de
-  # premier niveau ne les voit pas — c'est ce qui a laissé passer le doublon de
-  # la vue Renforcement.
+  # premier niveau ne les voit pas — c'est ce qui a laissé passer un doublon de
+  # sous-vue dans la fiche personne.
   # La garde doit être seule — « {vue === 'x' && ( » en début de ligne. Sans
   # cette exigence, deux conditions différentes qui commencent pareil
   # ({mode === 'export' && (} et {mode === 'export' && p1.length > 0 && (})
@@ -157,6 +157,17 @@ RESIDUS_GROUPE=$(grep -n '\bGroupe\b' src/App.jsx | grep -v 'migré Groupe → C
 if [ -n "$RESIDUS_GROUPE" ]; then
   echo "  ✗ vocabulaire « Groupe » résiduel (Classe attendu) :"
   echo "$RESIDUS_GROUPE" | sed 's/^/      /' | head -10
+  RENOMMAGES=1
+fi
+
+# EFL → code de curriculum (lot suivi & rapports). L'identifiant `codesEfl` ne
+# matche pas \bEFL\b (pas de frontière de mot avant le E de Efl) et n'a donc
+# pas besoin d'exception explicite ; seule celle qui documente pourquoi la clé
+# ne suit pas le renommage doit rester tolérée.
+RESIDUS_EFL=$(grep -n '\bEFL\b' src/App.jsx | grep -v 'un renommage de clé casserait')
+if [ -n "$RESIDUS_EFL" ]; then
+  echo "  ✗ vocabulaire « EFL » résiduel (code de curriculum attendu) :"
+  echo "$RESIDUS_EFL" | sed 's/^/      /' | head -10
   RENOMMAGES=1
 fi
 

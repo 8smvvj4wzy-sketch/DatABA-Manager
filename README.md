@@ -46,8 +46,7 @@ déplie. Un appui sur une ligne ouvre la fiche complète de la personne.
 **Séances** — la liste de tout ce qui a été importé, avec **recherche** (date,
 personne, atelier) et tri par date ou par nombre de cotations. Un appui déplie
 le **détail complet** de la séance : intervenant, durée, et pour chaque
-personne ses objectifs cotés avec leur résultat, ses notes et son temps de
-renforcement.
+personne ses objectifs cotés avec leur résultat et ses notes.
 
 Un bouton **Retirer cette séance de l'analyse** la fait disparaître des
 graphiques et des rapports de ce poste. Les cotations elles-mêmes ne sont pas

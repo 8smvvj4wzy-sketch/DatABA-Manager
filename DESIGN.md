@@ -205,6 +205,24 @@ jamais mélanger (voir CLAUDE.md) :
   couleur — fond CSS et remplissage SVG — ne se comportent pas pareil à
   l'impression.
 
+## Document imprimé
+
+Le document du rapport (`RapportScreen`, conteneur `.rounded-2xl border p-6`
+de l'onglet Rapport) s'écarte volontairement de la typographie d'écran :
+`F_DOC` (`'Cambria', 'Georgia', 'Times New Roman', serif`) plutôt que
+`F_DISPLAY`/`F_BODY`, posé sur le conteneur et hérité par son contenu — un
+bilan transmis à l'extérieur (Airmes) se lit dans un registre institutionnel,
+pas dans celui d'un produit web. Les valeurs chiffrées et le code de
+curriculum restent en `F_MONO`, comme partout ailleurs. Cambria/Georgia
+plutôt que Calibri : présentes nativement sur tous les postes, sans police à
+charger ni repli qui rendrait différemment selon l'imprimante.
+
+Écart accepté : `BlocsCrise`, partagé avec l'écran Crises (voir CLAUDE.md, ne
+jamais le forker), fixe `F_DISPLAY` sur un de ses sous-titres — ce fragment
+reste donc en sans-serif même dans le document imprimé. Corriger demanderait
+de sortir ce fragment de `BlocsCrise` ou de lui faire porter un paramètre de
+police, pas de le dupliquer.
+
 ## Do's and Don'ts
 
 Mêmes interdits que DatABA (voir son DESIGN.md), plus :

@@ -66,8 +66,10 @@ rouge.
   les additionner les dupliquerait. `fusionnerImport` regarde si `backup.suivi`
   est défini (même vide) avant de retomber sur `backup.stabilite`.
 - **`BlocsCrise` est partagé** entre l'écran et l'impression. Ne pas en créer
-  une seconde version pour l'impression : c'est exactement ce qui a produit le
-  doublon de la vue Renforcement.
+  une seconde version pour l'impression : deux blocs de rendu qui se
+  ressemblent finissent par diverger, et c'est déjà arrivé — un bloc
+  `{vue === 'x' && …}` écrit deux fois dans le même composant, d'où le
+  contrôle de doublons de rendu de `verifier.sh`.
 - **Impression.** Deux mécanismes, à ne pas confondre. Pleine page (onglet
   Rapport) : tout `no-print` disparaît, navigation latérale comprise.
   Ciblée (`imprimerZone`) : marque les ancêtres du nœud visé jusqu'à

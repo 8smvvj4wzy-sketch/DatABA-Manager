@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
-  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2, Gift,
+  Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, Minimize2, Maximize2,
 } from 'lucide-react';
@@ -40,6 +40,14 @@ const CRISE = 'var(--crisis)';
 const F_DISPLAY = "'Space Grotesk', sans-serif";
 const F_BODY = "'IBM Plex Sans', sans-serif";
 const F_MONO = "'IBM Plex Mono', monospace";
+/* Le document imprimé (onglet Rapport) s'écarte volontairement de la
+   typographie d'écran : un bilan transmis à l'extérieur (Airmes) se lit dans
+   un registre institutionnel, pas dans celui d'un produit. Cambria/Georgia
+   plutôt que Calibri : présentes sur tous les postes (Windows, macOS, Linux)
+   sans police à charger, alors que Calibri n'existe nativement que sous
+   Windows/Office — un repli sur Carlito y aurait rendu différemment selon le
+   poste qui imprime. Voir DESIGN.md. */
+const F_DOC = "'Cambria', 'Georgia', 'Times New Roman', serif";
 
 /* ==================== Palette catégorielle ====================
    Fixe entre les deux thèmes — elle code de l'information, pas une
@@ -215,9 +223,13 @@ const VIDE = {
      peuvent avoir des critères différents pour le même identifiant d'axe. */
   suivi: [], _axesSuivi: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
-  /* Code du référentiel (EFL) attaché à l'objectif lui-même, et non au couple
+  /* Code de curriculum attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
-     personne qui la travaille. La clé est donc le nom de l'objectif. */
+     personne qui la travaille. La clé est donc le nom de l'objectif.
+     `codesEfl` reste le nom de la clé (voyage à l'export, dans les rapports
+     enregistrés, dans l'import inter-Manager) même si l'interface ne dit plus
+     « EFL » — un renommage de clé casserait la lecture d'un fichier échangé
+     avec un Manager pas encore mis à jour, pour zéro différence à l'écran. */
   codesEfl: {},
   /* Rapports enregistrés : uniquement leur composition — personne, période,
      objectifs retenus, réglages du bilan de crise. Les commentaires et les
@@ -365,11 +377,18 @@ function fusionnerImport(actuel, backup, nomSource) {
     stabilite,
     suivi,
     sources: actuel.sources.includes(nomSource) ? actuel.sources : [...actuel.sources, nomSource],
-    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: idVersInitiales },
-    _ateliers: { ...(actuel._ateliers || {}), [nomSource]: ateliersSource },
+    /* Les tables indexées par source se complètent, elles ne se remplacent
+       pas. Un fichier partiel — des relevés de suivi sans `students`, par
+       exemple — portait sinon une table vide qui écrasait celle de la
+       tablette déjà importée : plus aucune cotation, plus aucun relevé
+       rattaché à personne, sans le moindre message, alors que les données
+       restaient bien en mémoire. `_axesSuivi` avait déjà son repli, les trois
+       autres l'ont maintenant. */
+    _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: { ...((actuel._idVersInitiales || {})[nomSource] || {}), ...idVersInitiales } },
+    _ateliers: { ...(actuel._ateliers || {}), [nomSource]: { ...((actuel._ateliers || {})[nomSource] || {}), ...ateliersSource } },
     _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
     collisionsInitiales,
-    _intervenants: { ...(actuel._intervenants || {}), [nomSource]: intervenantsSource },
+    _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
     nbNouvellesSeances: nouvelles.length,
     nbNouvellesCrises: nouvellesCrises.length,
     nbNouveauxReleves,
@@ -691,12 +710,13 @@ function construireLignes(donnees) {
 }
 
 /* ==================== Table de faits ====================
-   Une ligne par cotation, par crise et par renforcement, avec toutes les
-   dimensions résolues. C'est ce qui permet de croiser librement deux axes
-   sans avoir prévu la combinaison à l'avance. */
-function construireFaits(donnees) {
+   Une ligne par cotation, par crise, par segment de suivi continu et par
+   objectif, avec toutes les dimensions résolues. C'est ce qui permet de
+   croiser librement deux axes sans avoir prévu la combinaison à l'avance.
+   `lignes` (état d'acquisition par personne × objectif, construireLignes)
+   nourrit la table `objectifs` ; les trois autres se suffisent à elles-mêmes. */
+function construireFaits(donnees, lignes) {
   const cotations = [];
-  const renforcements = [];
   const nomIntervenant = (source, id) => {
     const t = (donnees._intervenants || {})[source] || {};
     return t[id] || 'Non renseigné';
@@ -728,18 +748,6 @@ function construireFaits(donnees) {
           score,
         });
       });
-
-      const r = (sess.reinforcement || {})[sid];
-      if (r && r.totalMs) {
-        renforcements.push({
-          seanceId: sess.id,
-          date: sess.date,
-          personne: initiales,
-          atelier,
-          intervenant,
-          minutes: Math.round(r.totalMs / 60000),
-        });
-      }
     });
   });
 
@@ -751,11 +759,71 @@ function construireFaits(donnees) {
       atelier: nomAtelier(donnees, c.source, c.atelierId),
       type: (c.kind || 'crise') === 'abc' ? 'Observation' : 'Crise',
       intensite: c.intensite ? `${c.intensite} · ${INTENSITES[c.intensite].label}` : 'Non renseignée',
+      intensiteNum: c.intensite || null,
       minutes: Math.round((c.durationMs || 0) / 60000),
     };
   });
 
-  return { cotations, crises, renforcements };
+  /* Un fait par segment de suivi continu — pas par relevé : c'est la durée
+     bornée entre deux relevés qui a un sens à cumuler ou moyenner, un
+     horodatage isolé n'en a aucun. Les segments non bornés (voir
+     segmentsJournee) sont exclus, même règle que sur la fiche personne. */
+  const suivi = [];
+  (donnees.personnes || []).forEach((p) => {
+    const releves = suiviDePersonne(donnees, p.initials);
+    const parAxeJour = new Map();
+    releves.forEach((r) => {
+      const cle = `${r.nomAxe}|${jourLocal(r.timestamp)}`;
+      if (!parAxeJour.has(cle)) parAxeJour.set(cle, []);
+      parAxeJour.get(cle).push(r);
+    });
+    parAxeJour.forEach((rs, cle) => {
+      const axe = cle.slice(0, cle.lastIndexOf('|'));
+      const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      const nonFin = triees.filter((r) => !r.fin);
+      /* segmentsJournee ne pousse un segment que pour un relevé qui n'est pas
+         une clôture, dans le même ordre relatif : le k-ième segment retourné
+         correspond donc au k-ième relevé non-clôture de `triees`. */
+      segmentsJournee(triees).forEach((seg, i) => {
+        if (seg.ms == null) return;
+        const porteur = nonFin[i];
+        suivi.push({
+          date: new Date(seg.debut).toISOString(),
+          personne: p.initials,
+          atelier: porteur ? nomAtelier(donnees, porteur.source, porteur.atelierId) : 'Hors atelier',
+          intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
+          axe,
+          critere: seg.meta.l,
+          minutes: Math.round(seg.ms / 60000),
+        });
+      });
+    });
+  });
+
+  /* Un fait par personne × objectif, daté de sa cotation la plus récente :
+     l'état d'acquisition est une valeur globale (construireLignes), pas un
+     événement daté, mais l'ancrer ainsi permet de croiser « objectifs actifs
+     récemment » avec les axes temporels comme les autres tables. `evolution`
+     porte sur tout l'historique de l'objectif, pas seulement sur la période
+     affichée — la période ne filtre ici que la liste des objectifs retenus,
+     via leur dernière cotation. */
+  const objectifs = (lignes || [])
+    .filter((l) => l.points.length)
+    .map((l) => {
+      const dernier = l.points[l.points.length - 1];
+      const premier = l.points[0];
+      return {
+        date: dernier.date,
+        personne: l.initials,
+        objectif: l.objectif,
+        type: (TYPES_COTATION[l.type] || l.type),
+        etat: ETAT_RAPPORT[l.etat] || l.etat,
+        acquis: l.etat === 'acquis' ? 1 : 0,
+        evolution: l.points.length > 1 ? Math.round(dernier.value - premier.value) : null,
+      };
+    });
+
+  return { cotations, crises, suivi, objectifs };
 }
 
 /* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
@@ -769,27 +837,6 @@ const TYPES_COTATION = {
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
-/* --- Temps de renforcement ---
-   Relevé par personne et par séance. Le temps d'activité est déduit de la
-   durée réelle de la séance, pauses comprises. */
-function renforcementsDe(donnees, initiales) {
-  const releves = [];
-  donnees.seances.forEach((se) => {
-    const sid = idPourSource(donnees, se.source, initiales);
-    if (!sid || !(se.studentIds || []).includes(sid)) return;
-    const r = (se.reinforcement || {})[sid];
-    const renfoMs = (r && r.totalMs) || 0;
-    const dureeMs = se.endedAt && se.startedAt ? Math.max(0, se.endedAt - se.startedAt) : 0;
-    releves.push({
-      date: se.date,
-      renfoMin: Math.round(renfoMs / 60000),
-      dureeMin: Math.round(dureeMs / 60000),
-      activiteMin: Math.max(0, Math.round((dureeMs - renfoMs) / 60000)),
-      part: dureeMs ? Math.round((renfoMs / dureeMs) * 100) : 0,
-    });
-  });
-  return releves.sort((a, b) => new Date(a.date) - new Date(b.date));
-}
 
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
@@ -853,6 +900,62 @@ function suiviDePersonne(donnees, initiales) {
   return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
+/* Jour local d'un horodatage, en « AAAA-MM-JJ » — repris de DatABA
+   (`jourLocal`). Jamais `toISOString().slice(0, 10)`, qui bascule de jour en
+   fin de soirée selon le fuseau. */
+function jourLocal(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
+   les relevés déjà résolus par suiviDePersonne (un seul axe, un seul jour,
+   triés du plus ancien au plus récent) — contrairement à `segmentsJournee`
+   côté DatABA qui recherche l'axe lui-même dans les relevés bruts, chaque
+   relevé porte déjà sa `meta` ici. Une clôture (`r.fin`) ne démarre pas de
+   segment, elle borne le précédent. Le dernier segment de la liste reste
+   `ms: null` tant qu'aucune clôture ni relevé suivant ne le borne : ce n'est
+   pas une durée nulle, c'est une durée pas encore connue — l'étirer jusqu'à
+   minuit inventerait une donnée jamais saisie. */
+function segmentsJournee(relevesJour) {
+  const segments = [];
+  for (let i = 0; i < relevesJour.length; i++) {
+    const r = relevesJour[i];
+    if (r.fin) continue;
+    const debut = new Date(r.timestamp).getTime();
+    if (Number.isNaN(debut)) continue;
+    const suivant = relevesJour[i + 1];
+    const fin = suivant ? new Date(suivant.timestamp).getTime() : null;
+    segments.push({ debut, fin, meta: r.meta, cle: r.cle, ms: fin != null ? fin - debut : null });
+  }
+  return segments;
+}
+
+/* Part du temps passée dans chaque critère, sur un ensemble de segments
+   (une journée, ou plusieurs journées mises bout à bout sur une période). Les
+   segments non bornés (`ms: null`) sont exclus du dénominateur et comptés à
+   part : un pourcentage ne doit jamais reposer sur une durée devinée. */
+function repartitionCriteres(segments) {
+  const bornes = segments.filter((s) => s.ms != null);
+  const total = bornes.reduce((a, s) => a + s.ms, 0);
+  const parCritere = new Map();
+  bornes.forEach((s) => {
+    if (!parCritere.has(s.cle)) parCritere.set(s.cle, { cle: s.cle, meta: s.meta, ms: 0, n: 0 });
+    const e = parCritere.get(s.cle);
+    e.ms += s.ms;
+    e.n += 1;
+  });
+  return {
+    totalMs: total,
+    nonBornes: segments.length - bornes.length,
+    lignes: Array.from(parCritere.values())
+      .map((e) => ({ ...e, part: total ? Math.round((e.ms / total) * 100) : null }))
+      .sort((a, b) => b.ms - a.ms),
+  };
+}
+
 
 /* ==================== Composants de base ==================== */
 function Btn({ children, onClick, variant = 'solid', className = '', disabled, style, title }) {
@@ -894,9 +997,11 @@ function SectionTitle({ children, sub, icone: Icone }) {
 }
 
 /* Sélecteur de période, partagé par tous les écrans */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite }) {
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
+  const cmp = p.comparer;
+  const majCmp = (champs) => maj({ comparer: { ...(cmp || { mode: 'precedente', debut: '', fin: '' }), ...champs } });
 
   return (
     <Card className="mb-4">
@@ -950,7 +1055,60 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite }) {
           {GRANULARITES.map((g) => <Chip key={g.k} label={g.label} on={p.granularite === g.k} onClick={() => maj({ granularite: g.k })} />)}
         </div>
       )}
+
+      {avecComparaison && (
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Comparer à</span>
+            <Chip label="Rien" on={!cmp} onClick={() => maj({ comparer: null })} />
+            <Chip label="Période précédente" on={!!cmp && cmp.mode === 'precedente'} onClick={() => majCmp({ mode: 'precedente' })} />
+            <Chip label="Dates précises" on={!!cmp && cmp.mode === 'dates'} onClick={() => majCmp({ mode: 'dates' })} />
+            {libelleComparaison(p) && (
+              <span className="text-xs ml-auto self-center" style={{ color: INK_SOFT }}>{libelleComparaison(p)}</span>
+            )}
+          </div>
+          {cmp && cmp.mode === 'dates' && (
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <span className="text-xs" style={{ color: INK_SOFT }}>du</span>
+              <input type="date" value={cmp.debut || ''} onChange={(e) => majCmp({ debut: e.target.value })}
+                className="rounded-lg border px-2 py-1.5 text-sm" style={{ borderColor: BORDER, color: INK, backgroundColor: CARD }} />
+              <span className="text-xs" style={{ color: INK_SOFT }}>au</span>
+              <input type="date" value={cmp.fin || ''} onChange={(e) => majCmp({ fin: e.target.value })}
+                className="rounded-lg border px-2 py-1.5 text-sm" style={{ borderColor: BORDER, color: INK, backgroundColor: CARD }} />
+            </div>
+          )}
+          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+            Un écart entre deux périodes montre ce qui a bougé, pas ce qui l'a fait bouger : un
+            changement de rythme, d'intervenant ou de saison se lit dans le même chiffre qu'un effet
+            de l'accompagnement.
+          </p>
+        </div>
+      )}
     </Card>
+  );
+}
+
+/* Écart avec la période de référence, dit seulement s'il est net.
+   Même double condition que `sensTendance` : un écart absolu et un écart
+   relatif. Sans elle, passer de 1 crise à 2 s'annoncerait « +100 % », et
+   l'écran crierait sur du bruit. En dessous du seuil on affiche « stable »,
+   pas rien : l'absence de mouvement est une réponse, le silence n'en est pas
+   une. `—` est réservé au cas où la référence n'existe pas. */
+function Ecart({ valeur, reference, unite = '', hausseFavorable = true, className = '' }) {
+  if (valeur == null || reference == null) {
+    return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>—</span>;
+  }
+  const delta = valeur - reference;
+  const net = Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
+  if (!net) {
+    return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>stable</span>;
+  }
+  const arrondi = Math.round(delta * 10) / 10;
+  const couleur = (delta > 0) === hausseFavorable ? ACQUIS : NON_ACQUIS;
+  return (
+    <span className={`text-xs ${className}`} style={{ color: couleur, fontFamily: F_MONO }}>
+      {arrondi > 0 ? '+' : '−'}{Math.abs(arrondi)}{unite}
+    </span>
   );
 }
 
@@ -989,7 +1147,12 @@ const GRANULARITES = [
   { k: 'mois', label: 'Mois' },
 ];
 
-const periodeVide = () => ({ mode: 'raccourci', jours: 30, debut: '', fin: '', moisDebut: '', moisFin: '', granularite: 'jour' });
+/* `comparer` : la période de référence à laquelle on oppose celle-ci, ou null.
+   Deux modes — 'precedente' (même durée, juste avant) et 'dates' (une plage
+   choisie, pour comparer à un trimestre précis plutôt qu'à ce qui précède).
+   Elle vit dans l'objet période plutôt qu'à côté : tout ce qui reçoit déjà
+   `periode` reçoit donc la comparaison sans changer de signature. */
+const periodeVide = () => ({ mode: 'raccourci', jours: 30, debut: '', fin: '', moisDebut: '', moisFin: '', granularite: 'jour', comparer: null });
 
 /* Bornes effectives, en millisecondes. null = pas de borne. */
 function bornesDe(p) {
@@ -1029,6 +1192,44 @@ function libellePeriode(p) {
     return `de ${f(p.moisDebut)} à ${f(p.moisFin)}`;
   }
   return (RACCOURCIS.find((r) => r.k === p.jours) || { label: 'Tout' }).label;
+}
+
+/* ==================== Période de comparaison ====================
+   « Est-ce que ce qu'on met en place porte ses fruits ? » ne se lit pas sur un
+   état, seulement sur un écart. D'où une seconde période, réglée une fois dans
+   le sélecteur et relue partout.
+
+   `periodeComparee` renvoie un objet période ordinaire : tout ce qui sait déjà
+   filtrer avec `dansPeriode` sait donc filtrer la référence, sans code de
+   filtrage en double. */
+function periodeComparee(p) {
+  const c = p && p.comparer;
+  if (!c) return null;
+  if (c.mode === 'dates') {
+    if (!c.debut && !c.fin) return null;
+    return { ...periodeVide(), mode: 'dates', debut: c.debut || '', fin: c.fin || '', granularite: p.granularite };
+  }
+  /* Période précédente de même durée. Une période ouverte d'un côté n'a pas de
+     durée : sans borne basse on retombe sur 30 jours, sans borne haute c'est
+     maintenant — mêmes replis que la tendance des crises, qui faisait déjà ce
+     calcul dans son coin avant d'être ramenée ici. */
+  const { min, max } = bornesDe(p);
+  const fin = max || Date.now();
+  const debut = min || (fin - 30 * 86400000);
+  const duree = fin - debut;
+  if (duree <= 0) return null;
+  const iso = (t) => {
+    const d = new Date(t);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  return { ...periodeVide(), mode: 'dates', debut: iso(debut - duree), fin: iso(debut - 1), granularite: p.granularite };
+}
+function libelleComparaison(p) {
+  const ref = periodeComparee(p);
+  if (!ref) return null;
+  if (p.comparer.mode === 'dates') return libellePeriode(ref);
+  return `période précédente (${libellePeriode(ref)})`;
 }
 
 /* Clé d'agrégation selon la granularité choisie */
@@ -1359,14 +1560,28 @@ function MiniGraphe({ points, couleur }) {
 }
 
 /* Radar : quels objectifs sont travaillés, et à quel niveau */
-function RadarObjectifs({ lignes, hauteur = 320 }) {
+/* Une seule série ne répondait à rien : le dernier résultat de chaque
+   objectif est une photo, pas une évolution. Avec une période de comparaison
+   réglée (voir periodeComparee), une seconde série superpose le dernier
+   résultat de la même période de référence — la forme qui se creuse ou se
+   remplit d'un contour à l'autre montre ce qui a bougé. Sans comparaison
+   réglée, une seule série : le comportement d'origine reste le repli. */
+function RadarObjectifs({ lignes, lignesRef, libelleRef, hauteur = 320 }) {
+  const tronque = (nom) => (nom.length > 22 ? `${nom.slice(0, 20)}…` : nom);
+  const dernier = (l) => (l.points.length ? l.points[l.points.length - 1].value : null);
+  const refDe = (objectif) => (lignesRef || []).find((l) => l.objectif === objectif);
+
   const donnees = lignes
     .filter((l) => l.points.length)
-    .map((l) => ({
-      objectif: l.objectif.length > 22 ? `${l.objectif.slice(0, 20)}…` : l.objectif,
-      niveau: l.points[l.points.length - 1].value,
-      seances: l.points.length,
-    }));
+    .map((l) => {
+      const ref = refDe(l.objectif);
+      return {
+        objectif: tronque(l.objectif),
+        niveau: dernier(l),
+        seances: l.points.length,
+        reference: ref && ref.points.length ? dernier(ref) : null,
+      };
+    });
   if (donnees.length < 3) {
     return <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Le radar demande au moins trois objectifs cotés sur la période.</p>;
   }
@@ -1377,9 +1592,13 @@ function RadarObjectifs({ lignes, hauteur = 320 }) {
           <PolarGrid stroke={BORDER} />
           <PolarAngleAxis dataKey="objectif" tick={{ fontSize: 10, fill: INK_SOFT }} />
           <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: INK_SOFT }} />
-          <Radar name="Dernier résultat" dataKey="niveau" stroke={INK} fill={INK} fillOpacity={0.25} isAnimationActive={false} />
+          {lignesRef && (
+            <Radar name={libelleRef || 'Période de référence'} dataKey="reference" stroke={INK_SOFT} fill={INK_SOFT} fillOpacity={0.12} strokeDasharray="4 3" isAnimationActive={false} />
+          )}
+          <Radar name="Dernier résultat" dataKey="niveau" stroke={ACCENT} fill={ACCENT} fillOpacity={0.25} isAnimationActive={false} />
           <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
-            formatter={(v, n, p) => [`${v} % · ${p.payload.seances} séances`, 'Dernier résultat']} />
+            formatter={(v, n, entree) => [v == null ? '—' : (entree.dataKey === 'niveau' ? `${v} % · ${entree.payload.seances} séances` : `${v} %`), n]} />
+          {lignesRef && <Legend wrapperStyle={{ fontSize: 11 }} />}
         </RadarChart>
       </ResponsiveContainer>
     </div>
@@ -1479,8 +1698,10 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 }
 
 /* ==================== Tableau de bord ==================== */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne, onOuvrirCrises }) {
-  const [unite, setUnite] = useState('nombre');
+/* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
+   montés conditionnellement, un état local d'écran ne survit pas à un
+   aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -1503,15 +1724,11 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
   const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
   const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
 
-  /* Période précédente de même durée, pour situer la tendance */
-  const { min, max } = bornesDe(periode);
-  const finRef = max || Date.now();
-  const debutRef = min || (finRef - 30 * 86400000);
-  const duree = finRef - debutRef;
-  const precedentes = crises.filter((c) => {
-    const t = new Date(c.date).getTime();
-    return t >= debutRef - duree && t < debutRef;
-  });
+  /* Période de référence : celle réglée dans le sélecteur si elle l'est, sinon
+     la précédente de même durée — le repli d'origine, désormais calculé par
+     periodeComparee plutôt qu'ici en double. */
+  const reference = periodeComparee(periode) || periodeComparee({ ...periode, comparer: { mode: 'precedente' } });
+  const precedentes = reference ? crises.filter((c) => dansPeriode(c.date, reference)) : [];
   const tendance = precedentes.length
     ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
     : null;
@@ -1529,13 +1746,23 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
     : null;
   const compte = (e) => lignes.filter((l) => l.etat === e).length;
 
+  /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
+     de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
+     vers un import qui vient d'avoir lieu. */
   if (!donnees.seances.length) {
-    return <Empty>Importez une sauvegarde DatABA depuis l'onglet Gestion pour commencer.</Empty>;
+    const avecReleves = (donnees.suivi || []).length + (donnees.stabilite || []).length > 0;
+    return (
+      <Empty>
+        {avecReleves
+          ? 'Aucune séance importée : le tableau de bord suit les objectifs cotés. Les relevés de suivi continu se lisent dans Personnes accompagnées.'
+          : "Importez une sauvegarde DatABA depuis l'onglet Gestion pour commencer."}
+      </Empty>
+    );
   }
 
   return (
     <div>
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
 
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
@@ -1601,7 +1828,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, onOuvrirPersonne,
             <span className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{recentesCrises.length}</span>
             {tendance != null && (
               <span className="text-xs" style={{ color: tendance > 0 ? NON_ACQUIS : tendance < 0 ? ACQUIS : INK_SOFT }}>
-                {tendance > 0 ? '+' : ''}{tendance} % vs période précédente
+                {tendance > 0 ? '+' : ''}{tendance} % vs {libelleComparaison(periode) || 'période précédente'}
               </span>
             )}
           </div>
@@ -1765,11 +1992,20 @@ function ioaPourEntree(obj, ea, eb) {
   return null;
 }
 
-function trouverPaires(seances) {
-  const cand = seances.filter((s) => s.doubleCotation);
+/* Apparie les séances marquées « deux observateurs en parallèle » du même
+   jour. Le regroupement se fait sur le NOM de l'atelier, jamais sur
+   `atelierId` : cet identifiant est propre à chaque tablette (`_ateliers` est
+   indexé par source), si bien que deux intervenants qui cotent le même
+   atelier depuis deux tablettes portent deux identifiants différents et
+   tombaient chacun dans leur paquet — aucune paire ne sortait jamais. Prend
+   `donnees` plutôt que `donnees.seances` pour résoudre ce nom via
+   `nomAtelier`. */
+function trouverPaires(donnees) {
+  const cand = (donnees.seances || []).filter((s) => s.doubleCotation);
   const parJour = new Map();
   cand.forEach((s) => {
-    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${s.atelierId || 'libre'}`;
+    const atelier = s.atelierId ? nomAtelier(donnees, s.source, s.atelierId) : 'libre';
+    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${atelier}`;
     if (!parJour.has(cle)) parJour.set(cle, []);
     parJour.get(cle).push(s);
   });
@@ -1844,13 +2080,37 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       ...s.initiales.map((i) => nomAffiche(donnees, i)),
     ].join(' ').toLowerCase();
     return champs.includes(q);
-  }).sort((a, b) => (tri === 'cotations'
-    ? b.cotations - a.cotations
-    : new Date(b.date) - new Date(a.date)));
+  }).sort((a, b) => {
+    if (tri === 'cotations') return b.cotations - a.cotations;
+    if (tri === 'semaine' || tri === 'mois') {
+      const ka = cleAgregation(a.date, tri);
+      const kb = cleAgregation(b.date, tri);
+      /* Groupes du plus récent au plus ancien, séances du plus récent au plus
+         ancien dans chaque groupe : même ordre que le tri par date, juste
+         entrecoupé d'en-têtes. */
+      if (ka !== kb) return kb - ka;
+      return new Date(b.date) - new Date(a.date);
+    }
+    return new Date(b.date) - new Date(a.date);
+  });
 
   const affichees = toutes ? filtrees : filtrees.slice(0, LOT);
+  /* La pagination porte sur des séances, pas sur des groupes : un groupe peut
+     donc apparaître tronqué en bas de la première page, comme n'importe quel
+     tri à plat. */
+  const groupes = (tri === 'semaine' || tri === 'mois')
+    ? (() => {
+        const m = new Map();
+        affichees.forEach((s) => {
+          const k = cleAgregation(s.date, tri);
+          if (!m.has(k)) m.set(k, []);
+          m.get(k).push(s);
+        });
+        return Array.from(m.entries()).sort((a, b) => b[0] - a[0]);
+      })()
+    : null;
 
-  const paires = trouverPaires(donnees.seances);
+  const paires = trouverPaires(donnees);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
   const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
 
@@ -1863,8 +2123,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
           placeholder="Rechercher une date, une personne, un atelier…"
           className="flex-1 min-w-[220px] rounded-xl border px-3 py-2.5 text-sm bg-transparent"
           style={{ borderColor: BORDER, color: INK }} />
-        <div className="flex gap-1.5">
+        <div className="flex gap-1.5 flex-wrap">
           <Chip label="Par date" on={tri === 'date'} onClick={() => setTri('date')} />
+          <Chip label="Par semaine" on={tri === 'semaine'} onClick={() => setTri('semaine')} />
+          <Chip label="Par mois" on={tri === 'mois'} onClick={() => setTri('mois')} />
           <Chip label="Par cotations" on={tri === 'cotations'} onClick={() => setTri('cotations')} />
         </div>
       </div>
@@ -1874,13 +2136,31 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
         {q && ` sur ${seances.length}`} — appuyez pour voir le détail
       </div>
 
-      <div className={densite === 'compact' ? 'space-y-1 mb-4' : 'space-y-1.5 mb-4'}>
-        {affichees.map((s) => (
-          <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
-            ouverte={ouverte === s.id}
-            onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-            onSupprimer={() => onSupprimerSeance(s)} />
-        ))}
+      <div className="mb-4">
+        {groupes ? groupes.map(([k, ss]) => (
+          <div key={k} className="mb-3 last:mb-0">
+            <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT, fontFamily: F_MONO }}>
+              {etiquetteAgregation(k, tri)} <span className="font-normal normal-case">· {ss.length} séance{ss.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
+              {ss.map((s) => (
+                <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
+                  ouverte={ouverte === s.id}
+                  onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+                  onSupprimer={() => onSupprimerSeance(s)} />
+              ))}
+            </div>
+          </div>
+        )) : (
+          <div className={densite === 'compact' ? 'space-y-1' : 'space-y-1.5'}>
+            {affichees.map((s) => (
+              <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
+                ouverte={ouverte === s.id}
+                onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
+                onSupprimer={() => onSupprimerSeance(s)} />
+            ))}
+          </div>
+        )}
         {!affichees.length && <Empty>Aucune séance ne correspond à cette recherche.</Empty>}
       </div>
 
@@ -2003,16 +2283,10 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
             const ini = table[sid];
             const objectifs = (seance.selectedObjectives || {})[sid] || [];
             const note = (seance.notes || {})[sid];
-            const renfo = (seance.reinforcement || {})[sid];
             return (
               <div key={sid} className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
                 <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>
                   {ini ? nomAffiche(donnees, ini) : 'Personne inconnue'}
-                  {renfo && renfo.totalMs > 0 && (
-                    <span className="text-xs font-normal ml-2" style={{ color: INK_SOFT }}>
-                      renforcement {Math.round(renfo.totalMs / 60000)} min
-                    </span>
-                  )}
                 </div>
                 {objectifs.length === 0 ? (
                   <div className="text-xs" style={{ color: INK_SOFT }}>Aucun objectif sélectionné.</div>
@@ -2189,6 +2463,59 @@ const configCriseVide = () => ({
 
 /* Barres horizontales : les intitulés sont longs, un axe vertical les
    tronquerait. */
+/* Frise d'une journée de suivi continu : une piste horizontale, un segment
+   par état, proportionnel à sa durée réelle — remplace la liste
+   d'horodatages, où un critère tenu cinq minutes et un autre tenu trois
+   heures se lisaient à l'identique. Grammaire reprise de FriseJournee côté
+   DatABA (src/App.jsx), adaptée à une journée passée : pas de « maintenant »
+   à qui accrocher le dernier segment, donc une largeur nominale plutôt qu'une
+   extension jusqu'à l'heure courante. Un segment non borné (`ms: null`) est
+   rendu en hachures, jamais en aplat : sa largeur est arbitraire, sa couleur
+   ne doit pas laisser croire à une durée mesurée. */
+const DUREE_NOMINALE_MS = 30 * 60000;
+function FriseSuivi({ segments, hauteur = 22 }) {
+  if (!segments.length) return null;
+  const heure = (t) => new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const finDe = (seg) => (seg.fin != null ? seg.fin : seg.debut + DUREE_NOMINALE_MS);
+  const debut = segments[0].debut;
+  const finVisible = finDe(segments[segments.length - 1]);
+  const duree = Math.max(1, finVisible - debut);
+  const heures = [];
+  const premiere = new Date(debut);
+  premiere.setMinutes(0, 0, 0);
+  for (let h = premiere.getTime() + 3600000; h < finVisible; h += 3600000) heures.push(h);
+  return (
+    <div>
+      <div className="relative rounded-lg overflow-hidden flex" style={{ height: hauteur, backgroundColor: PAPER }}>
+        {segments.map((seg, i) => {
+          const largeur = ((finDe(seg) - seg.debut) / duree) * 100;
+          const titre = `${seg.meta.l} — ${heure(seg.debut)}${seg.fin != null ? ` à ${heure(seg.fin)}` : ' (durée inconnue)'}`;
+          return (
+            <span key={i} title={titre} style={seg.ms != null
+              ? { width: `${largeur}%`, backgroundColor: seg.meta.color }
+              : {
+                width: `${largeur}%`,
+                border: `1px dashed ${seg.meta.color}`,
+                backgroundImage: `repeating-linear-gradient(45deg, ${seg.meta.color}, ${seg.meta.color} 3px, transparent 3px, transparent 7px)`,
+              }} />
+          );
+        })}
+        {/* Repères horaires en teinte de page, pas en blanc fixe : un blanc
+            en dur se fond dans un segment de couleur pâle — déjà le cas côté
+            DatABA. */}
+        {heures.map((h) => (
+          <span key={h} title={heure(h)} className="absolute top-0 bottom-0 w-px"
+            style={{ left: `${((h - debut) / duree) * 100}%`, backgroundColor: `color-mix(in srgb, ${PAPER} 70%, transparent)` }} />
+        ))}
+      </div>
+      <div className="flex justify-between text-xs mt-1" style={{ color: INK_SOFT, fontFamily: F_MONO }}>
+        <span>{heure(debut)}</span>
+        <span>{heure(finVisible)}</span>
+      </div>
+    </div>
+  );
+}
+
 function BarresCrise({ titre, donnees: d, couleur, note, valeur, suffixe }) {
   if (!d.length || d.every((x) => !x.n)) return null;
   const max = Math.max(...d.map((x) => x.n)) || 1;
@@ -2379,9 +2706,12 @@ function crisesRetenues(donnees, config, periode) {
     .filter((c) => dansPeriode(c.date, periode));
 }
 
-function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusConsomme,
+/* `config` vient de ManagerApp, pour la même raison que `unite` du tableau de
+   bord : l'onglet est monté conditionnellement, et tout un bilan réglé —
+   personne, type, segmentation, blocs — repartait de zéro au moindre passage
+   par un autre onglet. */
+function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPersonne, onFocusConsomme,
   composition, onValiderBilan, onAnnulerBilan }) {
-  const [config, setConfig] = useState(configCriseVide());
   const [reglagesOuverts, setReglagesOuverts] = useState(false);
   const refChrono = useRef(null);
   const refZone = useRef(null);
@@ -2401,9 +2731,15 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
 
   /* Reprise d'un bilan déjà composé : on repart de ses réglages exacts plutôt
      que des réglages par défaut, sinon revenir le modifier le reconstruirait
-     de zéro. */
+     de zéro. Un bilan enregistré avant le passage à une personne à la fois
+     peut porter plusieurs initiales dans `personnes` : normalisé à la
+     première pour que l'écran n'affiche jamais un état qu'il ne sait plus
+     produire. */
   useEffect(() => {
-    if (composition && composition.config) setConfig(composition.config);
+    if (!composition || !composition.config) return;
+    const c = composition.config;
+    const personnes = (c.personnes || []).length ? [c.personnes[0]] : [];
+    setConfig({ ...c, personnes });
   }, [composition && composition.jeton]);
 
   const retenues = crisesRetenues(donnees, config, periode);
@@ -2461,14 +2797,16 @@ function CrisesScreen({ donnees, periode, setPeriode, focusPersonne, onFocusCons
       </div>
 
       {donnees.personnes.length > 0 && (
+        /* Une personne à la fois : un croisement de plusieurs personnes se
+           lisait comme un profil collectif alors que rien n'agrège vraiment
+           leurs crises entre elles. Un appui remplace la sélection ; « Toutes
+           les personnes » reste la remise à zéro. */
         <div className="flex flex-wrap gap-1.5 mb-3 no-print">
           <Chip label="Toutes les personnes" on={!(config.personnes || []).length} onClick={() => maj({ personnes: [] })} />
           {donnees.personnes.map((p) => (
             <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
               on={(config.personnes || []).includes(p.initials)}
-              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials)
-                ? config.personnes.filter((x) => x !== p.initials)
-                : [...(config.personnes || []), p.initials] })} />
+              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials) ? [] : [p.initials] })} />
           ))}
         </div>
       )}
@@ -2764,6 +3102,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
   const [classeFiltre, setClasseFiltre] = useState('');
+  /* Journée affichée dans la frise de suivi continu. null = pas de choix
+     explicite, la dernière journée cotée sert de défaut — calculé par
+     dérivation au moment du rendu (voir vue === 'suivi'), pas par un effet :
+     un effet ici tournerait après le retour anticipé plus bas selon que la
+     personne a ou non des relevés, et changerait l'ordre des hooks. */
+  const [jourChoisi, setJourChoisi] = useState(null);
   /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
      cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
      peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
@@ -2787,6 +3131,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     setDeplies(objectifOuvert ? [objectifOuvert] : []);
     setAgrandi(null);
     setNonRetenusPdf([]);
+    setJourChoisi(null);
   }, [personne]);
 
   /* Navigation vers un objectif précis sans changement de personne (rare,
@@ -2812,6 +3157,15 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   const siennes = lignes
     .filter((l) => l.initials === personne)
     .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
+
+  /* Même construction que `siennes`, sur la période de comparaison réglée
+     dans le sélecteur — sert au radar, pour opposer deux moments plutôt que
+     de montrer une seule photo. */
+  const referencePeriode = periodeComparee(periode);
+  const siennesRef = referencePeriode
+    ? lignes.filter((l) => l.initials === personne)
+        .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, referencePeriode)) }))
+    : [];
 
   const crisesPersonne = (donnees.crises || []).filter((c) => {
     if (!c.studentId) return false;
@@ -2853,7 +3207,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           <div className="flex items-center gap-2 mb-2">
             <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
             <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
-              className="rounded-lg border px-2 py-1 text-xs bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
               <option value="">Toutes</option>
               {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
             </select>
@@ -2883,7 +3237,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           { k: 'objectifs', l: 'Bilan des objectifs', icone: TrendingUp },
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
-          { k: 'renfo', l: 'Renforcement', icone: Gift },
           { k: 'suivi', l: 'Suivi continu', icone: Layers },
           { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
@@ -2898,7 +3251,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         })}
       </div>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'}
+        avecComparaison={vue === 'suivi' || vue === 'radar'} />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
@@ -2993,8 +3347,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
           <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
             Dernier résultat de chaque objectif travaillé sur la période — la forme montre d'un coup
             d'œil ce qui est solide et ce qui reste à consolider.
+            {referencePeriode && ' Le contour en pointillés reprend la période de comparaison réglée ci-dessus.'}
           </div>
-          <RadarObjectifs lignes={siennes} />
+          <RadarObjectifs lignes={siennes} lignesRef={referencePeriode ? siennesRef : null} libelleRef={libelleComparaison(periode)} />
         </Card>
       )}
 
@@ -3027,112 +3382,120 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       )}
 
       {vue === 'suivi' && (() => {
-        const releves = suiviDePersonne(donnees, personne).filter((r) => dansPeriode(r.timestamp, periode));
+        const tousReleves = suiviDePersonne(donnees, personne);
+        const releves = tousReleves.filter((r) => dansPeriode(r.timestamp, periode));
         if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
-        /* Un axe par colonne : le nombre d'axes n'est pas borné côté DatABA,
-           l'affichage ne présume donc de rien de plus qu'une liste. */
-        const parAxe = new Map();
-        releves.forEach((r) => {
-          if (!parAxe.has(r.nomAxe)) parAxe.set(r.nomAxe, []);
-          parAxe.get(r.nomAxe).push(r);
-        });
+
+        const referencePeriode = periodeComparee(periode);
+        const relevesRef = referencePeriode ? tousReleves.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
+
+        /* Une carte par axe : le nombre d'axes n'est pas borné côté DatABA. */
+        const parAxeMap = (liste) => {
+          const m = new Map();
+          liste.forEach((r) => {
+            if (!m.has(r.nomAxe)) m.set(r.nomAxe, []);
+            m.get(r.nomAxe).push(r);
+          });
+          return m;
+        };
+        const parAxe = parAxeMap(releves);
+        const parAxeRef = parAxeMap(relevesRef);
+
+        /* Segments de toutes les journées d'un axe, mises bout à bout : c'est
+           ce qui nourrit la répartition par critère sur la période entière,
+           quand la frise elle-même n'en montre qu'une. */
+        const segmentsAxe = (relevesAxe) => {
+          const parJour = new Map();
+          relevesAxe.forEach((r) => {
+            const j = jourLocal(r.timestamp);
+            if (!parJour.has(j)) parJour.set(j, []);
+            parJour.get(j).push(r);
+          });
+          let tous = [];
+          parJour.forEach((rs) => {
+            const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            tous = tous.concat(segmentsJournee(triees));
+          });
+          return tous;
+        };
+
+        /* Journées cotées sur la période, toutes colonnes confondues, la plus
+           récente en tête : c'est parmi elles que se choisit la frise. Le
+           choix explicite (jourChoisi) est ignoré s'il ne fait plus partie de
+           la période affichée — dérivé au rendu, pas par un effet. */
+        const jours = Array.from(new Set(releves.map((r) => jourLocal(r.timestamp)))).sort().reverse();
+        const jourAffiche = jourChoisi && jours.includes(jourChoisi) ? jourChoisi : jours[0];
+        const minutes = (ms) => Math.round(ms / 60000);
+
         return (
           <>
             <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
               Ce que montre ce suivi est un état déclaré par l'équipe à un instant donné, pas une mesure de
               performance : un axe qui bascule souvent peut refléter un contexte qui change autant qu'une évolution
-              de la personne.
+              de la personne. Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
+              changement d'état : une durée pas encore connue n'entre pas dans un pourcentage.
             </p>
-            <div className="space-y-4">
-              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => (
-                <Card key={nomAxeVal}>
-                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
-                    {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''}</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {rs.slice(0, 30).map((r) => (
-                      <div key={r.id} className="rounded-xl px-3 py-2 flex items-center gap-2 text-xs" style={{ backgroundColor: PAPER }}>
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.meta.color }} />
-                        <span style={{ color: INK_SOFT }}>{new Date(r.timestamp).toLocaleString('fr-FR')}</span>
-                        <span className="font-medium">
-                          {r.fin ? '— fin —' : (r.meta === CRITERE_INCONNU_SUIVI ? `${r.meta.l} (${r.cle})` : r.meta.l)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
+
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {jours.map((j) => (
+                <button key={j} onClick={() => setJourChoisi(j)}
+                  className="rounded-lg px-2.5 py-1.5 text-xs border"
+                  style={{ borderColor: j === jourAffiche ? ACCENT : BORDER,
+                    backgroundColor: j === jourAffiche ? ACCENT_WASH : 'transparent',
+                    color: j === jourAffiche ? ACCENT : INK_SOFT, fontFamily: F_MONO }}>
+                  {new Date(`${j}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })}
+                </button>
               ))}
             </div>
-          </>
-        );
-      })()}
 
-      {vue === 'renfo' && (() => {
-        const releves = renforcementsDe(donnees, personne).filter((r) => dansPeriode(r.date, periode));
-        if (!releves.length) return <Empty>Aucune séance sur cette période.</Empty>;
-        const avecRenfo = releves.filter((r) => r.renfoMin > 0);
-        const totalRenfo = releves.reduce((a, r) => a + r.renfoMin, 0);
-        /* Deux moyennes, parce qu'elles ne répondent pas à la même question :
-           la générale compte les séances sans renforcement comme des zéros et
-           dit la place du renforcement dans l'accompagnement ; celle « quand il
-           y en a » ne porte que sur les séances concernées et dit la durée
-           habituelle d'un renforcement. Confondre les deux fait conclure à une
-           baisse là où il n'y a qu'un changement de fréquence. */
-        const moyenneGenerale = releves.length ? Math.round(totalRenfo / releves.length) : 0;
-        const moyenneRenfo = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.renfoMin, 0) / avecRenfo.length) : 0;
-        const moyennePart = avecRenfo.length ? Math.round(avecRenfo.reduce((a, r) => a + r.part, 0) / avecRenfo.length) : 0;
-        const graphe = releves.map((r) => ({
-          label: new Date(r.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
-          Renforcement: r.renfoMin,
-          Activité: r.activiteMin,
-        }));
-        return (
-          <>
-            <Card className="mb-3">
-              <div className="flex flex-wrap gap-5">
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{moyenneGenerale} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>en moyenne par séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyenneRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>
-                    quand il y en a ({avecRenfo.length}/{releves.length} séances)
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: EN_COURS }}>{moyennePart} %</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>du temps de séance</div>
-                </div>
-                <div>
-                  <div className="text-xl font-semibold" style={{ fontFamily: F_MONO }}>{totalRenfo} min</div>
-                  <div className="text-xs" style={{ color: INK_SOFT }}>au total sur la période</div>
-                </div>
-              </div>
-              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                Une séance sans renforcement compte comme zéro dans la moyenne générale : c'est ce qui
-                la distingue de la moyenne « quand il y en a », calculée sur les seules séances concernées.
-              </p>
-            </Card>
+            <div className="space-y-4">
+              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => {
+                const rsJour = rs.filter((r) => jourLocal(r.timestamp) === jourAffiche)
+                  .slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                const segments = segmentsJournee(rsJour);
+                const repar = repartitionCriteres(segmentsAxe(rs));
+                const reparRef = referencePeriode ? repartitionCriteres(segmentsAxe(parAxeRef.get(nomAxeVal) || [])) : null;
+                return (
+                  <Card key={nomAxeVal}>
+                    <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                      {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''} sur la période</span>
+                    </div>
 
-            <Card>
-              <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-                Répartition du temps de séance, séance par séance
-              </div>
-              <div style={{ height: 260 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={graphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} formatter={(v) => [`${v} min`]} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="Activité" stackId="t" fill={INK} isAnimationActive={false} />
-                    <Bar dataKey="Renforcement" stackId="t" fill={EN_COURS} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </Card>
+                    {segments.length > 0 ? (
+                      <div className="mb-4"><FriseSuivi segments={segments} /></div>
+                    ) : (
+                      <div className="text-xs mb-4" style={{ color: INK_SOFT }}>Rien de coté ce jour-là sur cet axe.</div>
+                    )}
+
+                    <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>Sur la période</div>
+                    <div className="space-y-1.5">
+                      {repar.lignes.map((l) => {
+                        const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
+                        return (
+                          <div key={String(l.cle)} className="flex items-center justify-between gap-2 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
+                              <span className="truncate">
+                                {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
+                              </span>
+                            </span>
+                            <span className="flex items-center gap-2 shrink-0" style={{ fontFamily: F_MONO }}>
+                              <span>{minutes(l.ms)} min{l.part != null ? ` · ${l.part} %` : ''}</span>
+                              {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" />}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {repar.nonBornes > 0 && (
+                        <div className="text-xs" style={{ color: INK_SOFT }}>
+                          {repar.nonBornes} relevé{repar.nonBornes !== 1 ? 's' : ''} sans durée connue, exclu{repar.nonBornes !== 1 ? 's' : ''} de ces chiffres.
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
           </>
         );
       })()}
@@ -3169,31 +3532,61 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   );
 }
 
+/* `hausseFavorable` sert à colorer l'écart entre deux périodes (voir Ecart,
+   lot socle) : true quand une hausse est le signe attendu d'un progrès, false
+   quand c'est l'inverse (crises, intensité). Sans jugement sur les mesures
+   neutres, laissées à true par convention plutôt que sans couleur du tout. */
 const MESURES = [
-  { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte' },
-  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %' },
-  { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId' },
-  { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte' },
-  { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min' },
-  { k: 'renfo', label: 'Temps de renforcement', source: 'renforcements', agg: 'somme', champ: 'minutes', suffixe: ' min' },
-  { k: 'renfoMoyen', label: 'Renforcement moyen par séance', source: 'renforcements', agg: 'moyenne', champ: 'minutes', suffixe: ' min' },
+  { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
+  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %', hausseFavorable: true },
+  { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte', hausseFavorable: false },
+  { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
+  { k: 'dureeMoyenneCrise', label: 'Durée moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
+  { k: 'intensiteMoyenne', label: 'Intensité moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'intensiteNum', hausseFavorable: false },
+  { k: 'suiviDuree', label: 'Suivi continu : durée cumulée par critère', source: 'suivi', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: true },
+  /* « part » : proportion du total général de la mesure (même case, même
+     ligne, même colonne partagent le même dénominateur) — même convention que
+     la bascule Nombre/Pourcentage du tableau de bord et des crises, pas une
+     part relative à la ligne ou à la colonne. */
+  { k: 'suiviPart', label: 'Suivi continu : part du temps borné', source: 'suivi', agg: 'part', champ: 'minutes', suffixe: ' %', hausseFavorable: true },
+  { k: 'objAcquis', label: "Objectifs acquis (nombre)", source: 'objectifs', agg: 'somme', champ: 'acquis', hausseFavorable: true },
+  { k: 'objPartAcquis', label: 'Objectifs acquis (part du total)', source: 'objectifs', agg: 'part', champ: 'acquis', suffixe: ' %', hausseFavorable: true },
+  { k: 'autonomieEvolution', label: "Évolution de l'autonomie (première à dernière cotation)", source: 'objectifs', agg: 'moyenne', champ: 'evolution', suffixe: ' pts', hausseFavorable: true },
 ];
 
+/* `sources`, absent = applicable à toutes les mesures. Présent = liste des
+   tables de faits où le champ existe réellement — croiser un objectif avec
+   les crises n'a jamais eu de sens (aucune crise ne porte d'objectif), mais
+   rien ne l'empêchait avant : la colonne sortait vide sans un mot
+   d'explication au-delà de la note générale sous les menus. */
 const DIMENSIONS = [
   { k: 'aucune', label: 'Aucune', get: () => 'Total' },
   { k: 'personne', label: 'Personne', get: (f) => f.personne },
-  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier },
-  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné' },
-  { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—' },
-  { k: 'type', label: 'Type', get: (f) => f.type || '—' },
-  { k: 'phase', label: 'Phase', get: (f) => f.phase || '—' },
-  { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—' },
+  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi'] },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi'] },
+  { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—', sources: ['cotations', 'objectifs'] },
+  { k: 'type', label: 'Type', get: (f) => f.type || '—', sources: ['cotations', 'crises', 'objectifs'] },
+  { k: 'phase', label: 'Phase', get: (f) => f.phase || '—', sources: ['cotations'] },
+  { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—', sources: ['crises'] },
+  { k: 'axe', label: 'Axe de suivi', get: (f) => f.axe || '—', sources: ['suivi'] },
+  { k: 'critere', label: 'Critère de suivi', get: (f) => f.critere || '—', sources: ['suivi'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
 ];
 
-function agreger(faits, mesure) {
+/* `total`, optionnel, sert uniquement à `agg: 'part'` : la somme du champ sur
+   l'ensemble de la base filtrée, calculée une fois par l'appelant plutôt que
+   recalculée à chaque cellule. Sans lui, une mesure « part » ne peut rien
+   afficher — mieux vaut une case vide qu'un pourcentage sans dénominateur. */
+function agreger(faits, mesure, total) {
+  if (mesure.agg === 'part') {
+    if (!total || !faits.length) return null;
+    const valeurs = faits.map((f) => f[mesure.champ]).filter((v) => v != null);
+    if (!valeurs.length) return null;
+    return Math.round((valeurs.reduce((a, b) => a + b, 0) / total) * 100);
+  }
   if (!faits.length) return null;
   if (mesure.agg === 'compte') return faits.length;
   if (mesure.agg === 'distinct') return new Set(faits.map((f) => f[mesure.champ])).size;
@@ -3203,17 +3596,34 @@ function agreger(faits, mesure) {
   return mesure.agg === 'somme' ? Math.round(somme) : Math.round(somme / valeurs.length);
 }
 
-function ExplorerScreen({ donnees, periode, setPeriode }) {
+function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
   const [ligneDim, setLigneDim] = useState('personne');
   const [colonneDim, setColonneDim] = useState('semaine');
   const [mesureK, setMesureK] = useState('autonomie');
 
-  const faits = useMemo(() => construireFaits(donnees), [donnees.seances, donnees.crises, donnees.sources, donnees._idVersInitiales]);
+  const faits = useMemo(
+    () => construireFaits(donnees, lignes),
+    [donnees.seances, donnees.crises, donnees.suivi, donnees.stabilite, donnees.sources,
+      donnees._idVersInitiales, donnees._axesSuivi, donnees.personnes, lignes]
+  );
   const mesure = MESURES.find((m) => m.k === mesureK);
-  const dimL = DIMENSIONS.find((d) => d.k === ligneDim);
-  const dimC = DIMENSIONS.find((d) => d.k === colonneDim);
+  /* Les dimensions qui ne s'appliquent pas à la mesure choisie disparaissent
+     des menus plutôt que de proposer un croisement qui sortira vide sans
+     rien dire. Si le choix en cours devient inapplicable après un changement
+     de mesure, il retombe sur « Aucune » — dérivé au rendu, pas par un effet
+     qui rejouerait setLigneDim en boucle. */
+  const dimensionsApplicables = DIMENSIONS.filter((d) => !d.sources || d.sources.includes(mesure.source));
+  const ligneDimEff = dimensionsApplicables.some((d) => d.k === ligneDim) ? ligneDim : 'aucune';
+  const colonneDimEff = dimensionsApplicables.some((d) => d.k === colonneDim) ? colonneDim : 'aucune';
+  const dimL = DIMENSIONS.find((d) => d.k === ligneDimEff);
+  const dimC = DIMENSIONS.find((d) => d.k === colonneDimEff);
 
   const base = (faits[mesure.source] || []).filter((f) => dansPeriode(f.date, periode));
+  /* Période de comparaison réglée dans le sélecteur (lot socle) : sert à
+     l'écart affiché sous chaque case, jamais à la construction du tableau
+     lui-même — L et C restent ceux de la période affichée. */
+  const referencePeriode = periodeComparee(periode);
+  const baseRef = referencePeriode ? (faits[mesure.source] || []).filter((f) => dansPeriode(f.date, referencePeriode)) : [];
 
   /* Construction du croisement */
   const lignesCles = [];
@@ -3227,6 +3637,12 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     const cle = `${l}||${c}`;
     if (!cellules.has(cle)) cellules.set(cle, []);
     cellules.get(cle).push(f);
+  });
+  const cellulesRef = new Map();
+  baseRef.forEach((f) => {
+    const cle = `${dimL.get(f)}||${dimC.get(f)}`;
+    if (!cellulesRef.has(cle)) cellulesRef.set(cle, []);
+    cellulesRef.get(cle).push(f);
   });
 
   /* Les dimensions temporelles se lisent dans l'ordre du calendrier, pas par
@@ -3243,13 +3659,22 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     }
     return liste.slice().sort((a, b) => String(a).localeCompare(String(b), 'fr'));
   };
-  const L = trierTemps(ligneDim, lignesCles);
-  const C = trierTemps(colonneDim, colonnesCles);
+  const L = trierTemps(ligneDimEff, lignesCles);
+  const C = trierTemps(colonneDimEff, colonnesCles);
 
-  const valeurCellule = (l, c) => agreger(cellules.get(`${l}||${c}`) || [], mesure);
-  const totalLigne = (l) => agreger(base.filter((f) => dimL.get(f) === l), mesure);
-  const totalColonne = (c) => agreger(base.filter((f) => dimC.get(f) === c), mesure);
-  const totalGeneral = agreger(base, mesure);
+  /* Dénominateur de `agg: 'part'` : la somme du champ sur toute la base
+     filtrée, même convention que la bascule Nombre/Pourcentage ailleurs dans
+     l'application — chaque case, chaque total de ligne et de colonne
+     rapportés au même total général, jamais à leur propre sous-total. */
+  const sommeChamp = (liste) => liste.reduce((a, f) => (f[mesure.champ] != null ? a + f[mesure.champ] : a), 0);
+  const totalPart = mesure.agg === 'part' ? sommeChamp(base) : null;
+  const totalPartRef = mesure.agg === 'part' ? sommeChamp(baseRef) : null;
+
+  const valeurCellule = (l, c) => agreger(cellules.get(`${l}||${c}`) || [], mesure, totalPart);
+  const valeurCelluleRef = (l, c) => agreger(cellulesRef.get(`${l}||${c}`) || [], mesure, totalPartRef);
+  const totalLigne = (l) => agreger(base.filter((f) => dimL.get(f) === l), mesure, totalPart);
+  const totalColonne = (c) => agreger(base.filter((f) => dimC.get(f) === c), mesure, totalPart);
+  const totalGeneral = agreger(base, mesure, totalPart);
 
   /* Échelle de couleur : repérer d'un coup d'œil les cases fortes */
   const toutes = L.flatMap((l) => C.map((c) => valeurCellule(l, c))).filter((v) => v != null);
@@ -3258,12 +3683,23 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
   function exporterCsv() {
     const sep = ';';
     const echapper = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-    const lignes = [[dimL.label, ...C, 'Total'].map(echapper).join(sep)];
+    /* Nomm\u00E9 `lignesCsv` pour ne pas masquer la prop `lignes` (\u00E9tat
+       d'acquisition) re\u00E7ue par l'\u00E9cran \u2014 m\u00EAme variable, deux sens diff\u00E9rents,
+       source d'erreur si on les confond en relisant plus tard. */
+    const enTete = [dimL.label, ...C, 'Total'];
+    if (referencePeriode) enTete.push(`\u00C9cart vs ${libelleComparaison(periode)}`);
+    const lignesCsv = [enTete.map(echapper).join(sep)];
     L.forEach((l) => {
-      lignes.push([l, ...C.map((c) => valeurCellule(l, c)), totalLigne(l)].map(echapper).join(sep));
+      const rangee = [l, ...C.map((c) => valeurCellule(l, c)), totalLigne(l)];
+      if (referencePeriode) {
+        const cur = C.reduce((a, c) => a + (valeurCellule(l, c) || 0), 0);
+        const ref = C.reduce((a, c) => a + (valeurCelluleRef(l, c) || 0), 0);
+        rangee.push(cur - ref);
+      }
+      lignesCsv.push(rangee.map(echapper).join(sep));
     });
-    lignes.push(['Total', ...C.map((c) => totalColonne(c)), totalGeneral].map(echapper).join(sep));
-    const blob = new Blob(['\uFEFF' + lignes.join('\n')], { type: 'text/csv;charset=utf-8' });
+    lignesCsv.push(['Total', ...C.map((c) => totalColonne(c)), totalGeneral].map(echapper).join(sep));
+    const blob = new Blob(['\uFEFF' + lignesCsv.join('\n')], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -3272,9 +3708,12 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  /* Sans séance importée, le croisement n'a rien à montrer — mais le lecteur de
-     rapport tableur, lui, reste utilisable : il ne dépend d'aucun import. */
-  if (!donnees.seances.length) {
+  /* Sans aucune donnée croisable, le croisement n'a rien à montrer — mais le
+     lecteur de rapport tableur, lui, reste utilisable : il ne dépend d'aucun
+     import. Un import de suivi continu sans séance (voir fusionnerImport)
+     suffit désormais à ouvrir l'écran, la table `suivi` ne dépendant pas des
+     séances. */
+  if (!donnees.seances.length && !(donnees.suivi || []).length && !(donnees.stabilite || []).length) {
     return (
       <div>
         <Empty>Importez une sauvegarde depuis l'onglet Gestion pour explorer les données.</Empty>
@@ -3290,37 +3729,38 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mesure</div>
             <select value={mesureK} onChange={(e) => setMesureK(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
               {MESURES.map((m) => <option key={m.k} value={m.k}>{m.label}</option>)}
             </select>
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En lignes</div>
-            <select value={ligneDim} onChange={(e) => setLigneDim(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+            <select value={ligneDimEff} onChange={(e) => setLigneDim(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
+              {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
           <div>
             <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>En colonnes</div>
-            <select value={colonneDim} onChange={(e) => setColonneDim(e.target.value)}
-              className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent" style={{ borderColor: BORDER, color: INK }}>
-              {DIMENSIONS.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
+            <select value={colonneDimEff} onChange={(e) => setColonneDim(e.target.value)}
+              className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
+              {dimensionsApplicables.map((d) => <option key={d.k} value={d.k}>{d.label}</option>)}
             </select>
           </div>
         </div>
         <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-          Toutes les dimensions ne s'appliquent pas à toutes les mesures : croiser un objectif
-          avec un nombre de crises n'a pas de sens, la colonne restera vide.
+          Seules les dimensions qui existent réellement pour la mesure choisie sont proposées :
+          un objectif n'a pas d'atelier ni de critère de suivi, une crise n'a pas de phase.
         </p>
       </Card>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison />
 
       <Card className="mb-3">
         <div className="flex items-center justify-between gap-2 mb-2">
           <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
             {mesure.label} · {libellePeriode(periode)}
+            {referencePeriode && ` · écart vs ${libelleComparaison(periode)}`}
           </span>
           <Btn variant="outline" onClick={exporterCsv} disabled={!L.length} className="text-xs py-1.5">
             <Download size={14} /> CSV
@@ -3368,6 +3808,9 @@ function ExplorerScreen({ donnees, periode, setPeriode }) {
                                qu'un hex + alpha concaténé, invalide sur un token `var(--…)`. */
                             backgroundColor: v == null ? 'transparent' : `color-mix(in srgb, ${INK} ${Math.round((0.05 + intensite * 0.25) * 100)}%, transparent)` }}>
                           {v == null ? '' : `${v}${mesure.suffixe || ''}`}
+                          {referencePeriode && (
+                            <div><Ecart valeur={v} reference={valeurCelluleRef(l, c)} unite={mesure.suffixe || ''} hausseFavorable={mesure.hausseFavorable !== false} /></div>
+                          )}
                         </td>
                       );
                     })}
@@ -3534,7 +3977,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
 
         <div className="mb-3">
           <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>
-            Objectifs à inclure, leur code EFL et leur libellé dans le document
+            Objectifs à inclure, leur code de curriculum et leur libellé dans le document
           </div>
           <div className="space-y-1.5">
             {disponibles.map((l) => {
@@ -3548,8 +3991,8 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   </button>
                   <input value={(donnees.codesEfl || {})[l.objectif] || ''}
                     onChange={(e) => onCodeEfl(l.objectif, e.target.value)}
-                    placeholder="EFL"
-                    title="Code du référentiel, repris à côté de l'objectif dans le document"
+                    placeholder="Code"
+                    title="Code de curriculum, repris à côté de l'objectif dans le document"
                     className="w-20 shrink-0 rounded-lg border px-2 py-1.5 text-sm bg-transparent"
                     style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }} />
                   <input value={(donnees.alias.objectifs || {})[cleAlias(personne, l.objectif)] || ''}
@@ -3563,7 +4006,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
           </div>
           <p className="text-xs mt-1.5" style={{ color: INK_SOFT }}>
             Les libellés saisis remplacent l'intitulé de la tablette dans le document, et sont conservés.
-            Le code EFL est attaché à l'objectif : saisi une fois, il vaut pour toutes les personnes qui le travaillent.
+            Le code de curriculum est attaché à l'objectif : saisi une fois, il vaut pour toutes les personnes qui le travaillent.
           </p>
         </div>
 
@@ -3609,10 +4052,14 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
         </p>
       </Card>
 
-      <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, backgroundColor: CARD }}>
+      {/* F_DOC sur le conteneur : tout ce qui suit en hérite, sauf les
+          valeurs chiffrées et le code de curriculum qui restent en F_MONO —
+          un registre institutionnel plutôt que la typographie d'écran, voir
+          la constante F_DOC. */}
+      <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, backgroundColor: CARD, fontFamily: F_DOC }}>
         <div className="flex items-start justify-between gap-4 pb-4 mb-5" style={{ borderBottom: `2px solid ${INK}` }}>
           <div className="min-w-0">
-            <div className="text-lg font-semibold" style={{ fontFamily: F_DISPLAY }}>{association || 'Bilan de suivi'}</div>
+            <div className="text-lg font-semibold">{association || 'Bilan de suivi'}</div>
             <div className="text-sm" style={{ color: INK_SOFT }}>
               {nomAffiche(donnees, personne)} · période : {libellePeriode(periode)} · établi le {aujourdhui}
             </div>
@@ -3632,7 +4079,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
             return (
               <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
                 <div className="flex items-start justify-between gap-3 mb-1">
-                  <div className="text-base font-semibold min-w-0 break-words" style={{ fontFamily: F_DISPLAY }}>
+                  <div className="text-base font-semibold min-w-0 break-words">
                     {codeEflDe(donnees, l.objectif) && (
                       <span className="text-xs font-medium mr-2 px-1.5 py-0.5 rounded align-middle"
                         style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
@@ -3722,7 +4169,9 @@ function BilanCrises({ donnees, config, periode }) {
 
   return (
     <div className="mt-6 pt-5" style={{ borderTop: `2px solid ${INK}` }}>
-      <div className="text-base font-semibold mb-1" style={{ fontFamily: F_DISPLAY }}>Bilan des crises</div>
+      {/* Pas de fontFamily ici : BilanCrises n'est monté que dans le document
+          du rapport, elle hérite donc de F_DOC posé sur son conteneur. */}
+      <div className="text-base font-semibold mb-1">Bilan des crises</div>
       <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
         {qui} · {libellePeriode(periode)}
       </div>
@@ -3866,7 +4315,7 @@ function LecteurExcel() {
           <div className="flex flex-wrap gap-1.5 mb-2">
             {entetes.map((h, j) => (valeursDistinctes[j] && valeursDistinctes[j].length > 1 ? (
               <select key={j} value={filtres[j] || ''} onChange={(e) => setFiltres((f) => ({ ...f, [j]: e.target.value }))}
-                className="rounded-lg border px-2 py-1.5 text-xs bg-transparent"
+                className="rounded-lg border px-2 py-1.5 text-xs"
                 style={{ borderColor: filtres[j] ? INK : BORDER, color: filtres[j] ? INK : INK_SOFT }}>
                 <option value="">{String(h)} : tout</option>
                 {valeursDistinctes[j].map((v) => <option key={v} value={v}>{v || '(vide)'}</option>)}
@@ -3942,6 +4391,19 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
        fusionnerClasses la déduplique par id, la répéter à chaque source ne
        coûte rien. */
     const classeIdDe = Object.fromEntries((paquet.personnes || []).map((p) => [p.initials, p.classeId || null]));
+    /* Toutes les données du paquet sont attribuées à une source : sans liste
+       de sources, la boucle ci-dessous ne tourne pas et l'import ne reprend
+       rien du tout. Le dire plutôt que de laisser croire à une réussite. */
+    if (!(paquet.sources || []).length) {
+      setErreur("Ce fichier ne déclare aucune tablette d'origine : il n'y a rien à reprendre.");
+      return;
+    }
+    /* `suivi` prime sur `stabilite`, mais le test porte sur le contenu et non
+       sur le type : `normaliser` garantit un tableau pour les deux, si bien
+       qu'un `Array.isArray(paquet.suivi)` était toujours vrai et rendait la
+       branche `stabilite` inatteignable — un Manager n'ayant que des relevés
+       v3 les perdait intégralement au réimport de son propre export. */
+    const paquetEnV4 = (paquet.suivi || []).length > 0 || !(paquet.stabilite || []).length;
     (paquet.sources || []).forEach((src) => {
       const table = (paquet._idVersInitiales || {})[src] || {};
       const backup = {
@@ -3951,10 +4413,10 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
-        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite` s'il
-           est présent dans le paquet, pour ne pas dupliquer les mêmes relevés. */
-        ...(Array.isArray(paquet.suivi)
-          ? { suivi: paquet.suivi.filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
+        /* Même règle que fusionnerImport : `suivi` prime sur `stabilite`, pour
+           ne pas compter deux fois les mêmes relevés. */
+        ...(paquetEnV4
+          ? { suivi: (paquet.suivi || []).filter((r) => r.source === src), axesSuivi: (paquet._axesSuivi || {})[src] || [] }
           : { stabilite: (paquet.stabilite || []).filter((r) => r.source === src) }),
       };
       cumul = fusionnerImport(cumul, backup, src);
@@ -4032,8 +4494,8 @@ function GestionScreen({ donnees, securite, onImported, onChangerMotDePasse, onR
     Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
     const commentaires = {};
     Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
-    /* Les codes EFL ne dépendent d'aucune personne : ils partent en entier,
-       même sur un export restreint à quelques personnes. */
+    /* Les codes de curriculum ne dépendent d'aucune personne : ils partent en
+       entier, même sur un export restreint à quelques personnes. */
     const codesEfl = { ...(donnees.codesEfl || {}) };
 
     return {
@@ -4597,6 +5059,12 @@ function ManagerApp() {
   const [logo, setLogo] = useState(null);
   const [association, setAssociation] = useState('');
   const [periode, setPeriode] = useState(periodeVide());
+  /* Réglages d'écran qui doivent survivre à un changement d'onglet : les sept
+     onglets sont montés conditionnellement, un useState posé dans l'écran
+     repart de sa valeur initiale à chaque retour. Choix de lecture, jamais
+     persistés ni chiffrés — comme `periode` juste au-dessus. */
+  const [uniteBord, setUniteBord] = useState('nombre');
+  const [configCrises, setConfigCrises] = useState(configCriseVide());
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
@@ -4777,7 +5245,11 @@ function ManagerApp() {
         + (fusion.collisionsInitiales ? ` · ⚠ ${fusion.collisionsInitiales} collision(s) d'initiales entre classes, à vérifier` : '')
       );
     }
-    setTab('bord');
+    /* Le tableau de bord ne sait rien montrer sans séance : un import de
+       relevés de suivi seuls y annonçait « N relevés » puis affichait
+       « Importez une sauvegarde ». On atterrit là où les données importées se
+       voient réellement. */
+    setTab(fusion.seances.length ? 'bord' : 'personnes');
   }
   function ouvrirPersonne(initiales, objectif) {
     setFocus({ initiales, objectif });
@@ -4906,6 +5378,7 @@ function ManagerApp() {
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
+                unite={uniteBord} setUnite={setUniteBord}
                 onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
@@ -4927,6 +5400,7 @@ function ManagerApp() {
             <>
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
+                config={configCrises} setConfig={setConfigCrises}
                 focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
                 composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan} />
             </>
@@ -4934,7 +5408,7 @@ function ManagerApp() {
           {tab === 'explorer' && (
             <>
               <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
-              <ExplorerScreen donnees={donnees} periode={periode} setPeriode={setPeriode} />
+              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} />
             </>
           )}
           {tab === 'gestion' && (
