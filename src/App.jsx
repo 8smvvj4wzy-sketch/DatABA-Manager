@@ -1015,8 +1015,8 @@ function Btn({ children, onClick, variant = 'solid', className = '', disabled, s
     </button>
   );
 }
-function Card({ children, className = '', style }) {
-  return <div className={`rounded-2xl border p-4 ${className}`} style={{ borderColor: BORDER, backgroundColor: CARD, ...style }}>{children}</div>;
+function Card({ children, className = '', style, ...rest }) {
+  return <div className={`rounded-2xl border p-4 ${className}`} style={{ borderColor: BORDER, backgroundColor: CARD, ...style }} {...rest}>{children}</div>;
 }
 function Chip({ label, on, onClick }) {
   return (
@@ -1044,12 +1044,21 @@ function SectionTitle({ children, sub, icone: Icone }) {
 /* `collant` : la carte se réduit à une bande fine posée en position sticky,
    qui reste atteignable au défilement sous les graphiques — sans lui,
    modifier la période impose de remonter en haut de l'écran à chaque fois.
-   Repliée par défaut ; « Modifier » déplie le formulaire complet en dessous,
-   qui lui n'est pas sticky (il peut être haut avec la comparaison ouverte).
+   Repliée par défaut ; « Modifier » déplie le formulaire complet en dessous.
+   Le panneau déplié est collant lui aussi — enveloppé dans le même bloc
+   sticky que la bande, plutôt que de calculer un second décalage : plus
+   simple, et ça évite qu'un réglage ouvert (comparaison + type de
+   graphique + courbes) sorte du champ au premier défilement.
+   `extra`/`resumeExtra` : un écran qui a d'autres réglages de vue à faire
+   suivre au même endroit (type de graphique, courbes de tendance — voir
+   PersonnesScreen et CrisesScreen) les passe ici plutôt que de poser un
+   second bloc sticky à côté : deux bandes collantes qui s'empilent sans
+   coordination sont le prochain piège, pas seulement un choix plus
+   verbeux.
    Absent (RapportScreen, où le sélecteur est un champ de formulaire parmi
    d'autres, pas un filtre d'écran) : comportement d'origine, toujours
-   déplié, jamais collant. */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true }) {
+   déplié, jamais collant, `extra` ignoré. */
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true, extra, resumeExtra }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
   const cmp = p.comparer;
@@ -1145,6 +1154,7 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
           )}
         </div>
       )}
+      {extra}
     </>
   );
 
@@ -1153,10 +1163,13 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
   }
 
   return (
-    <>
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-1.5 mb-3 px-3 py-2 rounded-xl border no-print"
+    <div className="sticky top-0 z-10 mb-4 no-print">
+      <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl border"
         style={{ backgroundColor: CARD, borderColor: BORDER }}>
         <span className="text-xs font-medium shrink-0" style={{ color: INK, fontFamily: F_MONO }}>{libellePeriode(p)}</span>
+        {resumeExtra && (
+          <span className="text-xs shrink-0" style={{ color: INK_SOFT }}>· {resumeExtra}</span>
+        )}
         {p.mode === 'raccourci' && (
           <div className="flex flex-wrap gap-1.5">
             {RACCOURCIS.map((r) => <Chip key={r.k} label={r.label} on={p.jours === r.k} onClick={() => maj({ jours: r.k })} />)}
@@ -1166,8 +1179,8 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
           {deplie ? 'Réduire' : 'Modifier'}
         </Btn>
       </div>
-      {deplie && <Card className="mb-4">{corps}</Card>}
-    </>
+      {deplie && <Card className="mt-2">{corps}</Card>}
+    </div>
   );
 }
 
@@ -1429,6 +1442,86 @@ function valeurCotation(obj, entry) {
   return null;
 }
 
+/* Détail des cotations d'une personne sur une période, au niveau de
+   l'essai/étape/intervalle — pas du score agrégé de la séance
+   (`construireFaits` s'arrête là). Une ligne par élément brut pour les
+   quatre types qui s'y prêtent (trials, chaining, balance, interval) ; pour
+   probe/occurrence/timer/latency, la donnée relevée est déjà un scalaire,
+   il n'y a rien en dessous à décomposer — une ligne par cotation, comme
+   `valeurCotation` la rend déjà pour ces quatre-là. `periode` filtre sur la
+   date de séance, jamais sur celle d'un essai : DatABA ne date pas
+   l'essai lui-même. */
+function detailCotationsPersonne(donnees, personne, periode) {
+  const lignes = [];
+  const nomIntervenant = (source, id) => (((donnees._intervenants || {})[source] || {})[id]) || 'Non renseigné';
+
+  donnees.seances.forEach((sess) => {
+    if (!dansPeriode(sess.date, periode)) return;
+    const table = (donnees._idVersInitiales || {})[sess.source] || {};
+    const sid = Object.keys(table).find((k) => table[k] === personne);
+    if (!sid || !(sess.studentIds || []).includes(sid)) return;
+
+    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    const intervenant = nomIntervenant(sess.source, sess.intervenantId);
+
+    ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
+      const obj = (sess.objectiveSnapshot || {})[oid];
+      const entry = (sess.data || {})[sid] && sess.data[sid][oid];
+      if (!obj || !entry) return;
+      const base = {
+        date: sess.date, seanceId: sess.id, atelier, intervenant,
+        objectif: obj.name, code: codeEflDe(donnees, obj.name),
+        type: TYPES_COTATION[obj.type] || obj.type,
+      };
+
+      if (obj.type === 'trials') {
+        (entry.trials || []).forEach((t, i) => {
+          const code = t && typeof t === 'object' ? t.code : t;
+          if (!code) return;
+          lignes.push({ ...base, unite: 'essai', repere: `essai ${i + 1}`, valeur: code });
+        });
+      } else if (obj.type === 'chaining') {
+        const steps = (obj.config && obj.config.steps) || [];
+        steps.forEach((st, i) => {
+          const code = (entry.steps || {})[st.id];
+          if (!code) return;
+          lignes.push({ ...base, unite: 'étape', repere: st.name || `étape ${i + 1}`, valeur: code });
+        });
+      } else if (obj.type === 'balance') {
+        const steps = (obj.config && obj.config.steps) || [];
+        const essais = Array.isArray(entry.trials) ? entry.trials : [{ steps: entry.steps || {} }];
+        essais.forEach((es, ie) => {
+          steps.forEach((st, i) => {
+            const e = (es.steps || {})[st.id];
+            if (!e || !e.outcome) return;
+            lignes.push({ ...base, unite: 'étape', repere: `essai ${ie + 1} · ${st.name || `étape ${i + 1}`}`, valeur: e.outcome });
+          });
+        });
+      } else if (obj.type === 'interval') {
+        Object.entries(entry.marks || {}).forEach(([cle, lid]) => {
+          if (!lid) return;
+          lignes.push({ ...base, unite: 'intervalle', repere: cle, valeur: lid });
+        });
+        (entry.segments || []).forEach((s) => {
+          if (!s.levelId) return;
+          lignes.push({ ...base, unite: 'segment saisi', repere: `${s.start || '?'}–${s.end || '?'}`, valeur: s.levelId });
+        });
+      } else if (obj.type === 'probe') {
+        const v = entry.guidance != null ? entry.guidance : entry.value;
+        if (v == null) return;
+        lignes.push({ ...base, unite: 'probe', repere: libelleCreneauProbe(entry.creneau) || 'probe', valeur: v });
+      } else {
+        /* occurrence / timer / latency : valeur brute déjà scalaire, rien à
+           décomposer en dessous — voir le commentaire de tête. */
+        const m = valeurCotation(obj, entry);
+        if (!m) return;
+        lignes.push({ ...base, unite: m.unite, repere: 'cotation', valeur: m.valeur });
+      }
+    });
+  });
+
+  return lignes.sort((a, b) => new Date(a.date) - new Date(b.date));
+}
 
 function telechargerFichier(blob, nom) {
   const url = URL.createObjectURL(blob);
@@ -1439,6 +1532,19 @@ function telechargerFichier(blob, nom) {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* Même patron que les exports CSV d'Explorer et de LecteurExcel (séparateur
+   `;`, guillemets doublés, BOM pour qu'Excel reconnaisse l'UTF-8) — copié
+   plutôt que factorisé avec eux, comme ils le sont déjà l'un de l'autre :
+   trois écrans, trois formes de lignes, rien à gagner à les faire dépendre
+   d'un formateur commun. Passe par `telechargerFichier`, contrairement aux
+   deux autres qui refont l'aller-retour `createObjectURL` chacun. */
+function telechargerCsv(enTete, rangees, nomFichier) {
+  const sep = ';';
+  const echapper = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const lignesCsv = [enTete, ...rangees].map((r) => r.map(echapper).join(sep));
+  telechargerFichier(new Blob(['\uFEFF' + lignesCsv.join('\n')], { type: 'text/csv;charset=utf-8' }), nomFichier);
 }
 
 /* Rasterise le graphique affiché en PNG, sans bibliothèque : on sérialise le
@@ -1719,6 +1825,64 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
           {avecLegende && <Legend wrapperStyle={{ fontSize: 11 }} />}
         </ComposedChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* Modale plein écran d'un graphique, partagée entre la fiche personne
+   (CarteObjectif) et la chronologie de crises (BlocsCrise) : un
+   agrandissement qui se contentait de changer la hauteur d'une carte
+   n'ouvrait sur rien de plus que ce qui était déjà visible autour. Un seul
+   composant plutôt que deux implémentations qui se ressembleraient sans
+   être partagées — le risque de divergence documenté dans CLAUDE.md pour
+   tout ce qui ressemble à BlocsCrise sans en être.
+   Reprend le patron de PaletteCommande (`fixed inset-0 z-50`, fond
+   `OVERLAY_BACKDROP`, clic dehors pour fermer) avec sa propre écoute
+   Échap : indépendante de celle de ManagerApp, qui ne gère que la palette
+   de commande et les raccourcis d'onglets, montée seulement tant que la
+   modale l'est.
+   `styleOptions`/`style`/`onStyle` et `courbes`/`onBasculerCourbe` sont
+   optionnels : la chronologie de crises n'a que deux styles, le bilan
+   d'objectif quatre — au lieu d'un menu fixé une fois pour toutes, chaque
+   appelant passe ses propres options et son propre état, la modale ne fait
+   qu'afficher les contrôles déjà en vigueur sur l'écran d'où elle vient. */
+function GrapheAgrandi({ titre, sousTitre, styleOptions, style, onStyle, courbes, onBasculerCourbe, onExporterPng, onFermer, children }) {
+  useEffect(() => {
+    const surTouche = (e) => { if (e.key === 'Escape') onFermer(); };
+    document.addEventListener('keydown', surTouche);
+    return () => document.removeEventListener('keydown', surTouche);
+  }, [onFermer]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 no-print"
+      style={{ backgroundColor: OVERLAY_BACKDROP }} onClick={onFermer}>
+      <div className="w-full max-w-5xl rounded-2xl border overflow-hidden shadow-lg flex flex-col"
+        style={{ backgroundColor: CARD, borderColor: BORDER, maxHeight: '90vh' }} onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b flex flex-wrap items-center gap-2" style={{ borderColor: BORDER }}>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold truncate" style={{ fontFamily: F_DISPLAY }}>{titre}</div>
+            {sousTitre && <div className="text-xs" style={{ color: INK_SOFT }}>{sousTitre}</div>}
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {styleOptions && styleOptions.map((g) => (
+              <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => onStyle(g.k)} />
+            ))}
+            {onExporterPng && (
+              <Btn variant="outline" className="text-xs py-1.5" onClick={onExporterPng}><Download size={13} /> PNG</Btn>
+            )}
+            <Btn variant="ghost" className="text-xs py-1.5" onClick={onFermer}>Fermer</Btn>
+          </div>
+        </div>
+        {courbes && (
+          <div className="px-4 py-2 border-b flex flex-wrap items-center gap-1.5" style={{ borderColor: BORDER }}>
+            <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+            {COURBES_LECTURE.map((c) => (
+              <Chip key={c.k} label={c.label} on={courbes.includes(c.k)} onClick={() => onBasculerCourbe(c.k)} />
+            ))}
+          </div>
+        )}
+        <div className="flex-1 overflow-auto p-4">{children}</div>
+      </div>
     </div>
   );
 }
@@ -2790,7 +2954,18 @@ function BarresCrise({ titre, donnees: d, couleur, note, valeur, suffixe }) {
 
 /* Corps du bilan : tout ce qui va de la chronologie aux conséquences, dans
    l'ordre de l'onglet. « config.blocs » décide de ce qui apparaît. */
-function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
+function BlocsCrise({ donnees, crises, periode, config, refChrono, onForme, onBasculerCourbe }) {
+  /* Agrandissement de la chronologie, en modale (GrapheAgrandi) — état local,
+     propre à ce bloc : contrairement aux objectifs (plusieurs cartes, une
+     seule agrandie à la fois, coordonnée par PersonnesScreen), il n'y a ici
+     qu'un seul graphique candidat, pas besoin de le faire remonter.
+     `onForme`/`onBasculerCourbe` sont optionnels : BilanCrises (rapport
+     imprimé) rend ce même composant sur une configuration figée, sans
+     bouton pour la modifier — la modale y reste utilisable en lecture,
+     simplement sans les contrôles qui n'ont pas de sens hors de l'écran
+     Crises. */
+  const [agrandi, setAgrandi] = useState(false);
+  const refChronoAgrandi = useRef(null);
   const actif = (k) => (config.blocs || TOUS_LES_BLOCS).includes(k);
   const gran = periode.granularite || 'semaine';
   /* Jours observés bornés à la période affichée : joursObserves balaie tout
@@ -2820,6 +2995,51 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
     Tendance: chronoTendance ? chronoTendance[i] : null,
     'Moyenne mobile': chronoMobile ? chronoMobile[i] : null,
   }));
+
+  /* Le graphique lui-même, posé dans une variable plutôt qu'écrit deux fois :
+     la version compacte de l'écran et la version agrandie de la modale
+     l'utilisent telle quelle, à une hauteur de conteneur différente — la
+     seule chose qui doit varier entre les deux. Réécrire ce ComposedChart
+     une seconde fois pour la modale est exactement le risque de divergence
+     que CLAUDE.md documente pour ce composant. */
+  const grapheChronoEl = (
+    <ResponsiveContainer width="100%" height="100%">
+      <ComposedChart data={donneesChrono} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+        <CartesianGrid stroke={BORDER} vertical={false} />
+        <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+        <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
+        <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        {chronoMoyenne != null && (
+          <ReferenceLine y={chronoMoyenne} stroke={INK_SOFT} strokeDasharray="2 3" strokeWidth={1.5}
+            label={{ value: `moy. ${chronoMoyenne}`, position: 'insideTopLeft', fontSize: 10, fill: INK_SOFT }} />
+        )}
+        {chronoMediane != null && (
+          <ReferenceLine y={chronoMediane} stroke={INK_SOFT} strokeDasharray="6 3" strokeWidth={1.5}
+            label={{ value: `méd. ${chronoMediane}`, position: 'insideBottomLeft', fontSize: 10, fill: INK_SOFT }} />
+        )}
+        {config.forme === 'courbes'
+          ? chrono.series.map((nom, i) => (
+            <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+              strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
+          ))
+          : chrono.series.map((nom, i) => (
+            <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
+              radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
+          ))}
+        {/* Encre du thème et pointillés, jamais PALETTE_SERIES :
+            elle est déjà prise par les séries de ce graphique, et
+            les barres n'étant pas en encre le contraste tient.
+            C'est l'inverse du choix fait dans `Graphique`, où la
+            série occupe le bleu et les lectures prennent violet et
+            ambre : une superposition doit contraster avec les
+            séries de SON graphique, et les deux n'ont pas les
+            mêmes. Ne pas « harmoniser » les deux endroits. */}
+        {chronoTendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+        {chronoMobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
 
   const minutesDe = (c) => Math.round((c.durationMs || 0) / 60000);
   const chronometrees = crises.filter((c) => (c.durationMs || 0) > 0);
@@ -2882,7 +3102,12 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
 
       {actif('chronologie') && (
         <Card className="mb-3">
-          <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>Évolution dans le temps</div>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Évolution dans le temps</div>
+            {chrono.donnees.length > 0 && (
+              <Btn variant="ghost" className="text-xs py-1 no-print" onClick={() => setAgrandi(true)}>Agrandir</Btn>
+            )}
+          </div>
           {chrono.donnees.length === 0 ? (
             <p className="text-xs text-center py-8" style={{ color: INK_SOFT }}>Aucun enregistrement sur cette période.</p>
           ) : (
@@ -2890,45 +3115,9 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
               {/* Un seul ComposedChart pour les deux formes : Recharts refuse
                   une <Line> de lecture dans un BarChart, et la branche
                   LineChart/BarChart ne différait que par le mark de ses
-                  séries. */}
-              <div style={{ height: 300 }} ref={refChrono}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={donneesChrono} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
-                    <CartesianGrid stroke={BORDER} vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    {chronoMoyenne != null && (
-                      <ReferenceLine y={chronoMoyenne} stroke={INK_SOFT} strokeDasharray="2 3" strokeWidth={1.5}
-                        label={{ value: `moy. ${chronoMoyenne}`, position: 'insideTopLeft', fontSize: 10, fill: INK_SOFT }} />
-                    )}
-                    {chronoMediane != null && (
-                      <ReferenceLine y={chronoMediane} stroke={INK_SOFT} strokeDasharray="6 3" strokeWidth={1.5}
-                        label={{ value: `méd. ${chronoMediane}`, position: 'insideBottomLeft', fontSize: 10, fill: INK_SOFT }} />
-                    )}
-                    {config.forme === 'courbes'
-                      ? chrono.series.map((nom, i) => (
-                        <Line key={nom} type="monotone" dataKey={nom} stroke={PALETTE_SERIES[i % PALETTE_SERIES.length]}
-                          strokeWidth={2.5} dot={{ r: 3 }} isAnimationActive={false} />
-                      ))
-                      : chrono.series.map((nom, i) => (
-                        <Bar key={nom} dataKey={nom} stackId="crises" fill={PALETTE_SERIES[i % PALETTE_SERIES.length]}
-                          radius={i === chrono.series.length - 1 ? [4, 4, 0, 0] : 0} isAnimationActive={false} />
-                      ))}
-                    {/* Encre du thème et pointillés, jamais PALETTE_SERIES :
-                        elle est déjà prise par les séries de ce graphique, et
-                        les barres n'étant pas en encre le contraste tient.
-                        C'est l'inverse du choix fait dans `Graphique`, où la
-                        série occupe le bleu et les lectures prennent violet et
-                        ambre : une superposition doit contraster avec les
-                        séries de SON graphique, et les deux n'ont pas les
-                        mêmes. Ne pas « harmoniser » les deux endroits. */}
-                    {chronoTendance && <Line type="linear" dataKey="Tendance" stroke={INK} strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
-                    {chronoMobile && <Line type="monotone" dataKey="Moyenne mobile" stroke={INK_SOFT} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
+                  séries. Voir `grapheChronoEl` ci-dessus : cette même
+                  instance sert aussi à la version agrandie, plus bas. */}
+              <div style={{ height: 300 }} ref={refChrono}>{grapheChronoEl}</div>
               <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
                 {config.mesure === 'duree' ? 'Minutes cumulées' : 'Nombre d’enregistrements'}, regroupé par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'}.
                 {chrono.regroupe && ' Les séries les moins fréquentes sont réunies sous « Autres ».'}
@@ -2944,6 +3133,19 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono }) {
             </>
           )}
         </Card>
+      )}
+
+      {agrandi && (
+        <GrapheAgrandi
+          titre="Évolution des crises dans le temps"
+          sousTitre={libellePeriode(periode)}
+          styleOptions={onForme ? [{ k: 'barres', label: 'Barres' }, { k: 'courbes', label: 'Courbes' }] : null}
+          style={config.forme} onStyle={onForme}
+          courbes={onBasculerCourbe ? (config.courbes || []) : null} onBasculerCourbe={onBasculerCourbe}
+          onExporterPng={() => exporterGraphePng(refChronoAgrandi.current, `crises-${nomSain(libellePeriode(periode))}.png`)}
+          onFermer={() => setAgrandi(false)}>
+          <div ref={refChronoAgrandi} style={{ height: '70vh' }}>{grapheChronoEl}</div>
+        </GrapheAgrandi>
       )}
 
       {actif('synthese') && (
@@ -3085,6 +3287,14 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
     config.mesure === 'duree' ? 'durée cumulée en minutes' : 'nombre d’enregistrements',
   ].join(' · ');
 
+  /* Même intention que `resumeGraphePersonnes` côté PersonnesScreen : dire
+     dans la bande collante repliée quel type de graphique et quelles
+     courbes sont en vigueur, sans avoir à déplier pour le savoir. */
+  const resumeGrapheCrises = (config.forme === 'courbes' ? 'Courbes' : 'Barres')
+    + ((config.courbes || []).length
+      ? ` · ${config.courbes.length} lecture${config.courbes.length > 1 ? 's' : ''} superposée${config.courbes.length > 1 ? 's' : ''}`
+      : '');
+
   if (!(donnees.crises || []).length) {
     return <Empty>Aucune crise ni observation importée.</Empty>;
   }
@@ -3140,7 +3350,34 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
         </div>
       )}
 
-      <div className="no-print"><SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant /></div>
+      {/* Type de graphique et courbes de tendance vivent dans le panneau
+         collant, même endroit et même mécanique que sur l'écran Personnes
+         (voir SelecteurPeriode) — le reste des réglages du bilan (mesure,
+         segmentation, contenu) reste dans la carte « Réglages du bilan »
+         ci-dessous, propre à cet écran. */}
+      <div className="no-print">
+        <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant
+          resumeExtra={resumeGrapheCrises}
+          extra={(
+            <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+              <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Type de graphique</span>
+                <Chip label="Barres" on={config.forme === 'barres'} onClick={() => maj({ forme: 'barres' })} />
+                <Chip label="Courbes" on={config.forme === 'courbes'} onClick={() => maj({ forme: 'courbes' })} />
+              </div>
+              {/* Cumulables : chacune bascule indépendamment des autres. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+                {COURBES_LECTURE.map((c) => (
+                  <Chip key={c.k} label={c.label} on={(config.courbes || []).includes(c.k)}
+                    onClick={() => maj({ courbes: (config.courbes || []).includes(c.k)
+                      ? config.courbes.filter((x) => x !== c.k)
+                      : [...(config.courbes || []), c.k] })} />
+                ))}
+              </div>
+            </div>
+          )} />
+      </div>
 
       <Card className="mb-3 no-print">
         <div className="flex flex-wrap items-center gap-2">
@@ -3176,29 +3413,14 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
         {reglagesOuverts && (
           <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
             <div className="flex flex-wrap items-center gap-1.5 mb-2">
-              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Graphique</span>
-              <Chip label="Barres" on={config.forme === 'barres'} onClick={() => maj({ forme: 'barres' })} />
-              <Chip label="Courbes" on={config.forme === 'courbes'} onClick={() => maj({ forme: 'courbes' })} />
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5 mb-2">
               <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesurer</span>
               <Chip label="Nombre" on={config.mesure === 'nombre'} onClick={() => maj({ mesure: 'nombre' })} />
               <Chip label="Durée cumulée (min)" on={config.mesure === 'duree'} onClick={() => maj({ mesure: 'duree' })} />
             </div>
-            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
               <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Découper par</span>
               {SEGMENTATIONS.map((sg) => (
                 <Chip key={sg.k} label={sg.label} on={config.segmentation === sg.k} onClick={() => maj({ segmentation: sg.k })} />
-              ))}
-            </div>
-            {/* Cumulables : chacune bascule indépendamment des autres. */}
-            <div className="flex flex-wrap items-center gap-1.5 mb-3">
-              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
-              {COURBES_LECTURE.map((c) => (
-                <Chip key={c.k} label={c.label} on={(config.courbes || []).includes(c.k)}
-                  onClick={() => maj({ courbes: (config.courbes || []).includes(c.k)
-                    ? config.courbes.filter((x) => x !== c.k)
-                    : [...(config.courbes || []), c.k] })} />
               ))}
             </div>
 
@@ -3234,7 +3456,11 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
         {retenues.length === 0 ? (
           <Empty>Aucun enregistrement sur cette période avec ces filtres.</Empty>
         ) : (
-          <BlocsCrise donnees={donnees} crises={retenues} periode={periode} config={config} refChrono={refChrono} />
+          <BlocsCrise donnees={donnees} crises={retenues} periode={periode} config={config} refChrono={refChrono}
+            onForme={(f) => maj({ forme: f })}
+            onBasculerCourbe={(k) => maj({ courbes: (config.courbes || []).includes(k)
+              ? config.courbes.filter((x) => x !== k)
+              : [...(config.courbes || []), k] })} />
         )}
       </div>
     </div>
@@ -3314,8 +3540,10 @@ function ApercuCrises({ donnees, personne, crises, periode, granularite, onOuvri
    sur les autres), agrandir (une courbe dense est illisible à 220 px), et
    exporter en image (pour coller dans un compte rendu sans passer par une
    capture d'écran). */
-function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourPdf, agrandi, surligne, onBasculerDeplie, onBasculerPdf, onAgrandir }) {
+function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourPdf, agrandi, surligne,
+  onBasculerDeplie, onBasculerPdf, onAgrandir, onStyle, onBasculerCourbe }) {
   const refGraphe = useRef(null);
+  const refGrapheAgrandi = useRef(null);
   const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
   const code = codeEflDe(donnees, ligne.objectif);
 
@@ -3341,8 +3569,17 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
        objectif. Ce qui part au document dépend de la case à cocher — pas du
        dépli, qui ne concerne que l'écran (voir lancerPdf côté
        PersonnesScreen, qui déplie les objectifs cochés juste avant
-       d'imprimer). */
-    <Card className={pourPdf ? '' : 'no-print'} style={surligne ? { borderColor: INK, borderWidth: 2 } : undefined}>
+       d'imprimer). La modale d'agrandissement (GrapheAgrandi) est un frère
+       de la carte, pas un enfant : elle a sa propre classe no-print et n'a
+       pas à hériter du style de bordure surligné.
+       `data-objectif` et `scrollMarginTop` : ancre du défilement direct
+       depuis le Tableau de bord (voir l'effet de scroll de PersonnesScreen)
+       — la marge compense la bande collante du sélecteur de période,
+       repliée au moment de l'arrivée, sans quoi la carte visée se retrouve
+       cachée derrière elle. */
+    <>
+    <Card data-objectif={ligne.objectif} className={pourPdf ? '' : 'no-print'}
+      style={{ scrollMarginTop: '4.5rem', ...(surligne ? { borderColor: INK, borderWidth: 2 } : null) }}>
       <div className="flex items-start gap-2.5">
         <button onClick={onBasculerPdf} title={pourPdf ? 'Retirer du PDF' : 'Inclure dans le PDF'}
           className="w-5 h-5 mt-0.5 rounded border flex items-center justify-center shrink-0 text-xs no-print"
@@ -3438,13 +3675,33 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
               d'occurrences. `ligne.threshold` est déjà nul quand aucun
               critère ne vaut pour cette série. */}
           <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
-            hauteur={agrandi ? 460 : surligne ? 300 : 220}
+            hauteur={surligne ? 300 : 220}
             unite={enMesure ? ligne.unite : '%'} />
         </div>
       ) : (
         <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
       ))}
     </Card>
+
+    {/* Agrandir n'ouvre plus une version plus haute de la même carte : la
+       modale reprend le graphique en grand avec ses contrôles (type de
+       graphique, courbes superposées, export PNG) — tout ce qui est
+       disponible sur la carte, pas seulement plus de place. */}
+    {agrandi && courbe.length > 0 && (
+      <GrapheAgrandi
+        titre={`${nomAffiche(donnees, personne)} · ${libelle}`}
+        sousTitre={libelleSeuil(ligne) || undefined}
+        styleOptions={STYLES_GRAPHIQUE} style={style} onStyle={onStyle}
+        courbes={courbes} onBasculerCourbe={onBasculerCourbe}
+        onExporterPng={() => exporterGraphePng(refGrapheAgrandi.current, `${nomSain(nomAffiche(donnees, personne))}-${nomSain(libelle)}.png`)}
+        onFermer={onAgrandir}>
+        <div ref={refGrapheAgrandi}>
+          <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
+            hauteur="70vh" unite={enMesure ? ligne.unite : '%'} />
+        </div>
+      </GrapheAgrandi>
+    )}
+    </>
   );
 }
 
@@ -3461,6 +3718,11 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     ...g,
     courbes: g.courbes.includes(k) ? g.courbes.filter((x) => x !== k) : [...g.courbes, k],
   }));
+  /* Résumé affiché dans la bande collante repliée du sélecteur de période,
+     pour dire quel réglage de graphique est en vigueur sans avoir à
+     déplier — même intention que `resumeReglages` côté CrisesScreen. */
+  const resumeGraphePersonnes = `${(STYLES_GRAPHIQUE.find((g) => g.k === style) || {}).label || ''}`
+    + (courbes.length ? ` · ${courbes.length} lecture${courbes.length > 1 ? 's' : ''} superposée${courbes.length > 1 ? 's' : ''}` : '');
   /* Objectifs dont la courbe est dépliée, et celui qu'on a agrandi. Repérés
      par leur nom : les identifiants d'objectif changent d'une tablette à
      l'autre, le nom est ce qui reste stable côté consolidation. Vue Objectifs
@@ -3490,6 +3752,22 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      déclenche qu'après le rendu qui suit le dépli. */
   const [impressionEnAttente, setImpressionEnAttente] = useState(false);
   const refObjectifs = useRef(null);
+  /* Objectif vers lequel défiler après un clic depuis le Tableau de bord —
+     posé par les deux effets qui déplient l'objectif ciblé, consommé par
+     l'effet de défilement plus bas une fois ce dépli passé par un rendu.
+     Même mécanique en deux temps que `impressionEnAttente` juste au-dessus,
+     pour la même raison : au moment où ces effets s'exécutent, le DOM
+     affiche encore l'état d'avant, la carte visée n'existe pas encore. */
+  const [scrollCible, setScrollCible] = useState(null);
+  /* Export du détail des cotations (JSON format Manager) de la personne et
+     de la période affichées. `exportDetail` porte le paquet déjà construit
+     et son nom de fichier, en attente d'une clé de chiffrement — même
+     mécanique à deux temps que l'export de GestionScreen (chiffré ou en
+     clair après confirmation explicite), gardée ici plutôt que dupliquée :
+     seuls `construirePaquetExport` et `encryptJSON`, déjà partagés, font le
+     travail ; ce qui est propre à cet écran tient dans ces deux états. */
+  const [exportDetail, setExportDetail] = useState(null);
+  const [cleExportDetail, setCleExportDetail] = useState('');
 
   /* Calculées avant le retour anticipé plus bas : les effets qui suivent
      doivent être appelés à chaque rendu, sans quoi l'ordre des hooks change
@@ -3507,14 +3785,36 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     setAgrandi(null);
     setNonRetenusPdf([]);
     setJourChoisi(null);
+    /* Amener directement sur l'objectif visé, sans exiger un défilement
+       manuel : la sous-vue passe à « Bilan des objectifs » (seule à
+       afficher les cartes) et le défilement est demandé pour le rendu qui
+       suivra le dépli ci-dessus. */
+    if (objectifOuvert) { setVue('objectifs'); setScrollCible(objectifOuvert); }
   }, [personne]);
 
   /* Navigation vers un objectif précis sans changement de personne (rare,
      mais possible) : le déplier en plus de ce qui l'est déjà, sans toucher au
      reste — contrairement à l'effet ci-dessus, qui repart de zéro. */
   useEffect(() => {
-    if (objectifOuvert) setDeplies((cur) => (cur.includes(objectifOuvert) ? cur : [...cur, objectifOuvert]));
+    if (!objectifOuvert) return;
+    setDeplies((cur) => (cur.includes(objectifOuvert) ? cur : [...cur, objectifOuvert]));
+    setVue('objectifs');
+    setScrollCible(objectifOuvert);
   }, [objectifOuvert]);
+
+  /* Défilement direct vers la carte visée : consomme `scrollCible` posé par
+     les deux effets ci-dessus, une fois que `deplies` (donc le DOM de la
+     carte) a eu un rendu qui suit son dépli — `refObjectifs` peut encore
+     valoir `null` juste après un changement de sous-vue, d'où la garde. Les
+     objectifs ne sont identifiés que par leur nom (voir plus haut) : mêmes
+     `data-objectif` posés sur chaque `<CarteObjectif>`. */
+  useEffect(() => {
+    if (!scrollCible || !refObjectifs.current) return;
+    const cible = Array.from(refObjectifs.current.querySelectorAll('[data-objectif]'))
+      .find((el) => el.dataset.objectif === scrollCible);
+    if (cible) cible.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setScrollCible(null);
+  }, [scrollCible, deplies]);
 
   /* Le clic sur PDF déplie d'abord les objectifs cochés (setDeplies), puis
      demande l'impression via ce drapeau : l'effet ne se déclenche qu'après
@@ -3528,6 +3828,41 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   }, [impressionEnAttente, deplies]);
 
   if (!donnees.personnes.length) return <Empty>Importez une sauvegarde pour commencer.</Empty>;
+
+  /* Export du détail des cotations, au niveau de l'essai/étape/intervalle —
+     personne et période affichées, en format Manager (réimportable par un
+     autre poste) ou CSV (tableur). PRODUCT.md : aucune donnée sensible ne
+     quitte le poste sans export explicite et chiffré — le JSON suit donc le
+     même garde-fou que l'export complet de GestionScreen (chiffré, ou en
+     clair après confirmation explicite) ; le CSV, destiné à un tableur
+     local, suit le patron déjà en vigueur pour les autres exports CSV de
+     l'application (jamais chiffré, comme eux). */
+  const nomFichierDetail = (ext) => `${nomSain(nomAffiche(donnees, personne))}-${nomSain(libellePeriode(periode))}.${ext}`;
+  function exporterDetailJson(chiffre) {
+    const paquet = construirePaquetExport(donnees, [personne], periode);
+    const nom = `manager-${nomFichierDetail('json')}`;
+    if (!chiffre) {
+      telechargerFichier(new Blob([JSON.stringify(paquet, null, 2)], { type: 'application/json' }), nom);
+      return;
+    }
+    setExportDetail({ paquet, nom });
+  }
+  async function confirmerExportDetailChiffre() {
+    if (cleExportDetail.length < 4) return;
+    const env = await encryptJSON(exportDetail.paquet, cleExportDetail);
+    telechargerFichier(new Blob([JSON.stringify(env)], { type: 'application/json' }), exportDetail.nom);
+    setExportDetail(null);
+    setCleExportDetail('');
+  }
+  function exporterDetailCsv() {
+    const detail = detailCotationsPersonne(donnees, personne, periode);
+    const enTete = ['Date', 'Séance', 'Atelier', 'Intervenant', 'Objectif', 'Code', 'Type', 'Unité', 'Repère', 'Valeur'];
+    const rangees = detail.map((l) => [
+      new Date(l.date).toLocaleDateString('fr-FR'), l.seanceId, l.atelier, l.intervenant,
+      l.objectif, l.code, l.type, l.unite, l.repere, l.valeur,
+    ]);
+    telechargerCsv(enTete, rangees, `detail-${nomFichierDetail('csv')}`);
+  }
 
   const siennes = lignes
     .filter((l) => l.initials === personne)
@@ -3627,9 +3962,36 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         })}
       </div>
 
+      {/* Type de graphique et courbes de tendance ne concernent que le bilan
+         des objectifs : passés à `extra` seulement dans cette sous-vue,
+         plutôt que rendus (et donc collants) sous les quatre autres, où ils
+         ne s'appliquent pas. */}
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'}
         avecComparaison collant
-        comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'} />
+        comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'}
+        resumeExtra={vue === 'objectifs' ? resumeGraphePersonnes : null}
+        extra={vue === 'objectifs' && (
+          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Type de graphique</span>
+              {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
+            </div>
+            {/* Lectures superposables, cumulables : chacune bascule seule. */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+              {COURBES_LECTURE.map((c) => (
+                <Chip key={c.k} label={c.label} on={courbes.includes(c.k)} onClick={() => basculerCourbe(c.k)} />
+              ))}
+            </div>
+            {courbes.length > 0 && (
+              <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+                Ces lectures décrivent la période affichée, elles ne la prolongent pas : une droite qui
+                monte vers le seuil ne dit pas à quelle date l'objectif sera acquis. Elles demandent au
+                moins trois points cotés.
+              </p>
+            )}
+          </div>
+        )} />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn onClick={() => onRapport(personne, siennes.map((l) => l.objectif))} className="text-sm">
@@ -3638,8 +4000,37 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         <Btn variant="outline" onClick={() => onRapportCrises(personne)} className="text-sm">
           <AlertTriangle size={14} /> Rapport de crise
         </Btn>
+        <Btn variant="outline" onClick={() => exporterDetailJson(true)} className="text-sm">
+          <Download size={14} /> Détail des cotations (Manager)
+        </Btn>
+        <Btn variant="ghost" onClick={() => {
+          if (window.confirm("Exporter sans chiffrement ?\n\nLe fichier sera lisible par quiconque y a accès.")) exporterDetailJson(false);
+        }} className="text-sm">
+          Sans chiffrement
+        </Btn>
+        <Btn variant="outline" onClick={exporterDetailCsv} className="text-sm">
+          <Download size={14} /> Détail des cotations (CSV)
+        </Btn>
         <span className="text-xs" style={{ color: INK_SOFT }}>Reprend cette personne et cette période.</span>
       </div>
+
+      {exportDetail && (
+        /* Même mécanique que l'export chiffré de GestionScreen, propre à
+           cet écran (voir la déclaration d'état plus haut) : le paquet est
+           déjà construit, il ne manque que la clé. */
+        <div className="mb-4 rounded-xl border p-3 max-w-md no-print" style={{ borderColor: BORDER, backgroundColor: PAPER }}>
+          <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Mot de passe protégeant ce fichier</div>
+          <input type="password" value={cleExportDetail} autoFocus onChange={(e) => setCleExportDetail(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') confirmerExportDetailChiffre(); }}
+            className="w-full rounded-xl border px-3 py-2.5 text-sm bg-transparent mb-2" style={{ borderColor: BORDER, color: INK }} />
+          <div className="flex gap-2">
+            <Btn onClick={confirmerExportDetailChiffre} disabled={cleExportDetail.length < 4} className="flex-1 text-sm">
+              Chiffrer et télécharger
+            </Btn>
+            <Btn variant="ghost" onClick={() => { setExportDetail(null); setCleExportDetail(''); }} className="text-sm">Annuler</Btn>
+          </div>
+        </div>
+      )}
 
       {vue === 'objectifs' && (() => {
         const retenusPdf = siennes.filter((l) => !nonRetenusPdf.includes(l.objectif));
@@ -3672,9 +4063,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
               ))}
             </div>
 
+            {/* Le type de graphique et les courbes de tendance vivent
+               désormais dans le panneau collant du sélecteur de période
+               ci-dessus (`extra`) — seules les actions propres à cette
+               liste restent ici. */}
             <div className="flex flex-wrap items-center gap-1.5 mb-3 no-print">
-              {STYLES_GRAPHIQUE.map((g) => <Chip key={g.k} label={g.label} on={style === g.k} onClick={() => setStyle(g.k)} />)}
-              <Btn variant="outline" className="text-xs py-1.5 ml-auto"
+              <Btn variant="outline" className="text-xs py-1.5"
                 onClick={lancerPdf} disabled={!retenusPdf.length}>
                 <Printer size={13} /> PDF ({retenusPdf.length})
               </Btn>
@@ -3684,21 +4078,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                 </Btn>
               )}
             </div>
-
-            {/* Lectures superposables, cumulables : chacune bascule seule. */}
-            <div className="flex flex-wrap items-center gap-1.5 mb-2 no-print">
-              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
-              {COURBES_LECTURE.map((c) => (
-                <Chip key={c.k} label={c.label} on={courbes.includes(c.k)} onClick={() => basculerCourbe(c.k)} />
-              ))}
-            </div>
-            {courbes.length > 0 && (
-              <p className="text-xs mb-3 no-print" style={{ color: INK_SOFT }}>
-                Ces lectures décrivent la période affichée, elles ne la prolongent pas : une droite qui
-                monte vers le seuil ne dit pas à quelle date l'objectif sera acquis. Elles demandent au
-                moins trois points cotés.
-              </p>
-            )}
 
             {siennes.length === 0 ? <Empty>Aucun objectif pour cette personne.</Empty> : (
               /* Zone exportée : seuls les objectifs cochés (case à gauche de
@@ -3718,7 +4097,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                 <div className="space-y-3">
                   {siennes.map((l) => (
                     <CarteObjectif key={l.objectif} ligne={l} donnees={donnees} personne={personne}
-                      style={style} courbes={courbes}
+                      style={style} courbes={courbes} onStyle={setStyle} onBasculerCourbe={basculerCourbe}
                       deplie={deplies.includes(l.objectif)}
                       pourPdf={!nonRetenusPdf.includes(l.objectif)}
                       agrandi={agrandi === l.objectif}
@@ -4772,6 +5151,52 @@ function LecteurExcel() {
 }
 
 /* ==================== Gestion ==================== */
+/* Paquet d'export au format Manager (`aba-manager-export`) — partagé entre
+   l'export complet de GestionScreen (personnes seules, tout l'historique)
+   et l'export de détail d'une personne sur une période (PersonnesScreen).
+   `periode` est optionnelle : absente, tout l'historique part comme avant.
+   Réglée, elle filtre les quatre tableaux datés par `dansPeriode` —
+   séances, crises, suivi ET stabilite, les quatre : même exigence
+   d'exhaustivité que les purges (CLAUDE.md), pour la même raison qu'un
+   tableau oublié laisse filer des données d'usager qu'on croit exclues. */
+function construirePaquetExport(donnees, initialesRetenues, periode) {
+  const garder = (initialesRetenues || []).length ? new Set(initialesRetenues) : null;
+  const ini = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+  const dansLaPeriode = (date) => !periode || dansPeriode(date, periode);
+  const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
+  /* Les classes retenues sont celles que gardent encore les personnes
+     sélectionnées : envoyer la liste complète enverrait le nom d'une classe
+     qui ne concerne aucune des personnes exportées. */
+  const classesGardees = new Set(personnes.map((p) => p.classeId).filter(Boolean));
+  const classes = (donnees.classes || []).filter((c) => classesGardees.has(c.id));
+  const seances = donnees.seances.filter((s) => (!garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid)))) && dansLaPeriode(s.date));
+  const crises = donnees.crises.filter((c) => (!garder || garder.has(ini(c.source, c.studentId))) && dansLaPeriode(c.date));
+  const stabilite = (donnees.stabilite || []).filter((r) => (!garder || garder.has(ini(r.source, r.studentId))) && dansLaPeriode(r.timestamp));
+  const suivi = (donnees.suivi || []).filter((r) => (!garder || garder.has(ini(r.source, r.studentId))) && dansLaPeriode(r.timestamp));
+  const alias = { personnes: {}, objectifs: {} };
+  Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
+  Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
+  const commentaires = {};
+  Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
+  /* Les codes de curriculum ne dépendent d'aucune personne : ils partent en
+     entier, même sur un export restreint à quelques personnes ou une
+     période resserrée. */
+  const codesEfl = { ...(donnees.codesEfl || {}) };
+
+  return {
+    format: 'aba-manager-export',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    personnes, classes, seances, crises, stabilite, suivi,
+    sources: donnees.sources,
+    _idVersInitiales: donnees._idVersInitiales,
+    _ateliers: donnees._ateliers,
+    _intervenants: donnees._intervenants,
+    _axesSuivi: donnees._axesSuivi,
+    alias, commentaires, codesEfl,
+  };
+}
+
 function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify }) {
   const [fichier, setFichier] = useState(null);
   const [enveloppe, setEnveloppe] = useState(null);
@@ -4892,41 +5317,10 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
     setEnCours(false);
   }
 
-  function construirePaquet(initialesRetenues) {
-    const garder = initialesRetenues.length ? new Set(initialesRetenues) : null;
-    const ini = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
-    const personnes = donnees.personnes.filter((p) => !garder || garder.has(p.initials));
-    /* Les classes retenues sont celles que gardent encore les personnes
-       sélectionnées : envoyer la liste complète enverrait le nom d'une classe
-       qui ne concerne aucune des personnes exportées. */
-    const classesGardees = new Set(personnes.map((p) => p.classeId).filter(Boolean));
-    const classes = (donnees.classes || []).filter((c) => classesGardees.has(c.id));
-    const seances = donnees.seances.filter((s) => !garder || (s.studentIds || []).some((sid) => garder.has(ini(s.source, sid))));
-    const crises = donnees.crises.filter((c) => !garder || garder.has(ini(c.source, c.studentId)));
-    const stabilite = (donnees.stabilite || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
-    const suivi = (donnees.suivi || []).filter((r) => !garder || garder.has(ini(r.source, r.studentId)));
-    const alias = { personnes: {}, objectifs: {} };
-    Object.entries(donnees.alias.personnes || {}).forEach(([k, v]) => { if (!garder || garder.has(k)) alias.personnes[k] = v; });
-    Object.entries(donnees.alias.objectifs || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) alias.objectifs[k] = v; });
-    const commentaires = {};
-    Object.entries(donnees.commentaires || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) commentaires[k] = v; });
-    /* Les codes de curriculum ne dépendent d'aucune personne : ils partent en
-       entier, même sur un export restreint à quelques personnes. */
-    const codesEfl = { ...(donnees.codesEfl || {}) };
-
-    return {
-      format: 'aba-manager-export',
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      personnes, classes, seances, crises, stabilite, suivi,
-      sources: donnees.sources,
-      _idVersInitiales: donnees._idVersInitiales,
-      _ateliers: donnees._ateliers,
-      _intervenants: donnees._intervenants,
-      _axesSuivi: donnees._axesSuivi,
-      alias, commentaires, codesEfl,
-    };
-  }
+  /* Export complet : tout l'historique, pas de période. Le détail borné à
+     une personne et une période vit dans PersonnesScreen, sur la même
+     fonction (`construirePaquetExport`). */
+  const construirePaquet = (initialesRetenues) => construirePaquetExport(donnees, initialesRetenues, null);
 
   function telecharger(blob, nom) {
     const url = URL.createObjectURL(blob);
