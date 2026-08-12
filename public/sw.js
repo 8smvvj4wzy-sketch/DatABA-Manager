@@ -5,7 +5,7 @@
    blanc plusieurs minutes.
 
    APRÈS CHAQUE MISE EN LIGNE : incrémentez CACHE_VERSION. */
-const CACHE_VERSION = 'v25';
+const CACHE_VERSION = 'v26';
 const CACHE_NAME = `aba-cadre-${CACHE_VERSION}`;
 const NETWORK_TIMEOUT_MS = 2500;
 
