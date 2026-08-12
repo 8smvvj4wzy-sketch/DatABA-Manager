@@ -3354,30 +3354,34 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
          collant, même endroit et même mécanique que sur l'écran Personnes
          (voir SelecteurPeriode) — le reste des réglages du bilan (mesure,
          segmentation, contenu) reste dans la carte « Réglages du bilan »
-         ci-dessous, propre à cet écran. */}
-      <div className="no-print">
-        <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant
-          resumeExtra={resumeGrapheCrises}
-          extra={(
-            <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
-              <div className="flex flex-wrap items-center gap-1.5 mb-2">
-                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Type de graphique</span>
-                <Chip label="Barres" on={config.forme === 'barres'} onClick={() => maj({ forme: 'barres' })} />
-                <Chip label="Courbes" on={config.forme === 'courbes'} onClick={() => maj({ forme: 'courbes' })} />
-              </div>
-              {/* Cumulables : chacune bascule indépendamment des autres. */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
-                {COURBES_LECTURE.map((c) => (
-                  <Chip key={c.k} label={c.label} on={(config.courbes || []).includes(c.k)}
-                    onClick={() => maj({ courbes: (config.courbes || []).includes(c.k)
-                      ? config.courbes.filter((x) => x !== c.k)
-                      : [...(config.courbes || []), c.k] })} />
-                ))}
-              </div>
+         ci-dessous, propre à cet écran.
+         Posé en enfant direct du conteneur de l'écran, sans div
+         intermédiaire : un `sticky` ne se déplace que dans les limites de
+         son parent, et un wrapper serré autour de lui a exactement sa
+         hauteur — la bande restait alors figée dans le flux, sans jamais
+         suivre le défilement. Le `no-print` que portait ce wrapper est déjà
+         sur la racine collante de SelecteurPeriode. */}
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant
+        resumeExtra={resumeGrapheCrises}
+        extra={(
+          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Type de graphique</span>
+              <Chip label="Barres" on={config.forme === 'barres'} onClick={() => maj({ forme: 'barres' })} />
+              <Chip label="Courbes" on={config.forme === 'courbes'} onClick={() => maj({ forme: 'courbes' })} />
             </div>
-          )} />
-      </div>
+            {/* Cumulables : chacune bascule indépendamment des autres. */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Superposer</span>
+              {COURBES_LECTURE.map((c) => (
+                <Chip key={c.k} label={c.label} on={(config.courbes || []).includes(c.k)}
+                  onClick={() => maj({ courbes: (config.courbes || []).includes(c.k)
+                    ? config.courbes.filter((x) => x !== c.k)
+                    : [...(config.courbes || []), c.k] })} />
+              ))}
+            </div>
+          </div>
+        )} />
 
       <Card className="mb-3 no-print">
         <div className="flex flex-wrap items-center gap-2">
