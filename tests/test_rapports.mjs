@@ -1,7 +1,17 @@
 let ok=0,ko=0;const t=(n,a,e)=>{const p=JSON.stringify(a)===JSON.stringify(e);console.log(`${p?'OK  ':'ECHEC'} ${n}`+(p?'':` → ${JSON.stringify(a)}`));p?ok++:ko++;};
 
 /* ==================== Sélection des blocs du bilan ==================== */
-const TOUS=['chronologie','synthese','intensite','jour','atelier','antecedent','comportement','consequence','fonction','avertissement'];
+/* La liste se lit dans src/App.jsx au lieu d'être recopiée : recopiée, elle a
+   survécu au retrait du bloc « Rappel sur l'interprétation » et le test
+   validait une liste que l'application ne proposait plus. */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'App.jsx'), 'utf8');
+const declaration = source.slice(source.indexOf('const BLOCS_CRISE = ['));
+const TOUS = [...declaration.slice(0, declaration.indexOf('];')).matchAll(/\bk: '([^']+)'/g)].map((m) => m[1]);
+t('la liste des blocs est bien lue dans src/App.jsx', TOUS.length > 0 && TOUS[0], 'chronologie');
+t("le rappel sur l'interprétation n'est plus un bloc", TOUS.includes('avertissement'), false);
 const actif=(cfg,k)=>(cfg.blocs||TOUS).includes(k);
 const basculer=(cfg,k)=>({...cfg,blocs:(cfg.blocs||[]).includes(k)?cfg.blocs.filter(x=>x!==k):[...(cfg.blocs||[]),k]});
 

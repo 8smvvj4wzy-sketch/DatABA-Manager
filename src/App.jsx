@@ -559,6 +559,14 @@ function analyserObjectif(seances, tableParSource, obj) {
   const points = [];
   const mesures = [];
   let unite = null;
+  /* Historique de phase et phase en cours : lus sur le snapshot de la séance
+     la plus récente. L'historique est cumulatif côté tablette — le dernier
+     snapshot les porte toutes —, alors qu'un snapshot ancien ignore les
+     changements survenus depuis. Retenus avant même de savoir si la séance
+     porte une cotation exploitable : un objectif sélectionné mais non coté
+     renseigne quand même sa phase. */
+  let dernierSnap = null;
+  let dateDernierSnap = null;
   seances.forEach((sess) => {
     const sid = tableParSource[sess.source];
     if (!sid) return;
@@ -566,6 +574,10 @@ function analyserObjectif(seances, tableParSource, obj) {
     if (!oid || !((sess.selectedObjectives || {})[sid] || []).includes(oid)) return;
     const entry = (sess.data || {})[sid] && sess.data[sid][oid];
     const snap = sess.objectiveSnapshot[oid];
+    if (!dateDernierSnap || new Date(sess.date) >= new Date(dateDernierSnap)) {
+      dernierSnap = snap;
+      dateDernierSnap = sess.date;
+    }
 
     /* Les mesures brutes vivent à part des points en pourcentage. Les mélanger
        fausserait toutes les moyennes d'autonomie du reste de l'application :
@@ -607,6 +619,8 @@ function analyserObjectif(seances, tableParSource, obj) {
     points,
     mesures,
     unite,
+    phaseHistory: (dernierSnap && dernierSnap.phaseHistory) || [],
+    phase: (dernierSnap && dernierSnap.activePhaseName) || null,
     threshold: critere ? critere.threshold : null,
     needed: critere ? critere.needed : null,
     unit: critere ? critere.unit : null,
@@ -1139,11 +1153,6 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
                 className="rounded-lg border px-2 py-1.5 text-sm" style={{ borderColor: BORDER, color: INK, backgroundColor: CARD }} />
             </div>
           )}
-          <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-            Un écart entre deux périodes montre ce qui a bougé, pas ce qui l'a fait bouger : un
-            changement de rythme, d'intervenant ou de saison se lit dans le même chiffre qu'un effet
-            de l'accompagnement.
-          </p>
           {/* Le réglage est proposé sur tout un écran, mais ne sert pas sous
              toutes ses sous-vues (le croisement, par exemple) : le dire
              plutôt que de laisser deviner pourquoi rien ne change. */}
@@ -1748,12 +1757,30 @@ function imprimerZone(element) {
 /* Nom de fichier sans caractère qui gêne un système de fichiers */
 const nomSain = (s) => String(s || '').replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'graphique';
 
+/* Repères de changement de phase, même règle que DatABA (ObjectiveChart) : la
+   verticale se pose sur le premier point postérieur au changement, seul point
+   de la courbe où elle est lisible. Deux cas rendent zéro repère plutôt qu'un
+   repère faux — la première entrée de l'historique n'est pas datée (c'est la
+   phase d'origine, elle ne marque aucun changement), et un changement
+   postérieur au dernier point coté n'a rien à marquer sur cette période.
+   L'index plutôt que l'étiquette : la mise en forme des étiquettes appartient
+   au graphique, pas au calcul. */
+function reperesDePhase(points, historique) {
+  return (historique || [])
+    .filter((ph) => ph && ph.date)
+    .map((ph) => {
+      const index = (points || []).findIndex((p) => new Date(p.date) >= new Date(ph.date));
+      return index < 0 ? null : { id: ph.id, name: ph.name, index };
+    })
+    .filter(Boolean);
+}
+
 /* Un seul ComposedChart pour les quatre styles, au lieu de quatre conteneurs
    distincts : Recharts refuse une <Line> dans un BarChart ou un ScatterChart,
    donc superposer une courbe de lecture imposait de toute façon ce
    regroupement. ApercuCrises fait déjà exactement ça pour ses barres et sa
    tendance. */
-function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes = [] }) {
+function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes = [], phases = [] }) {
   const valeurs = points.map((p) => p.value);
   const actif = (k) => courbes.includes(k);
   /* Les quatre lectures partagent le seuil de trois points de tendanceLineaire :
@@ -1778,7 +1805,10 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
      laisse alors recharts choisir l'échelle. */
   const enPourcent = unite === '%';
   const etiquette = enPourcent ? 'Résultat' : 'Moyenne du jour';
-  const marge = { top: 8, right: 8, bottom: 4, left: -14 };
+  const reperes = reperesDePhase(points, phases);
+  /* Le nom de phase se pose au-dessus de la verticale : sans marge haute, il
+     sort du cadre sur les graphiques courts du rapport imprimé. */
+  const marge = { top: reperes.length ? 20 : 8, right: 8, bottom: 4, left: -14 };
   return (
     <div style={{ height: hauteur }}>
       <ResponsiveContainer width="100%" height="100%">
@@ -1790,6 +1820,14 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
           <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
             formatter={(v, nom) => [`${v} ${unite}`, nom]} />
           {seuil != null && <ReferenceLine y={seuil} stroke={ACQUIS} strokeDasharray="4 4" strokeWidth={1.5} />}
+          {/* Changements de phase : des verticales, en encre du thème et non en
+              accent — elles datent le suivi, elles ne désignent pas un état.
+              Même tracé que sur la courbe de DatABA, pour qu'un éducateur et
+              un cadre lisent le même graphique. */}
+          {reperes.map((r) => (
+            <ReferenceLine key={r.id} x={donnees[r.index].label} stroke={INK} strokeDasharray="3 3" strokeWidth={1.5}
+              label={{ value: r.name, position: 'top', fontSize: 10, fill: INK_SOFT }} />
+          ))}
           {/* Moyenne et médiane sont des horizontales : ReferenceLine, le même
               primitif que le seuil, plutôt qu'une série constante de plus. */}
           {moyenne != null && (
@@ -2593,7 +2631,6 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
                   </div>
                   <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
                     Un accord d'au moins 80 % est l'usage courant pour considérer des relevés fiables.
-                    En dessous, mieux vaut reprendre ensemble les définitions avant de poursuivre.
                   </p>
                 </Card>
                 <div className="space-y-1.5">
@@ -2853,7 +2890,6 @@ const BLOCS_CRISE = [
   { k: 'comportement', label: 'Comportements' },
   { k: 'consequence', label: 'Conséquences' },
   { k: 'fonction', label: 'Fonctions supposées' },
-  { k: 'avertissement', label: 'Rappel sur l’interprétation' },
 ];
 const TOUS_LES_BLOCS = BLOCS_CRISE.map((b) => b.k);
 
@@ -3128,7 +3164,7 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono, onForme, onBa
                 une période sans aucune trace — vacances, absence — n'apparaît pas, faute de pouvoir
                 la distinguer d'un vrai zéro.
                 {(chronoTendance || chronoMobile || chronoMoyenne != null || chronoMediane != null)
-                  && " Les lectures superposées portent sur le total de chaque période, toutes séries confondues, et décrivent la période affichée sans la prolonger."}
+                  && " Les lectures superposées portent sur le total de chaque période, toutes séries confondues."}
               </p>
             </>
           )}
@@ -3215,13 +3251,6 @@ function BlocsCrise({ donnees, crises, periode, config, refChrono, onForme, onBa
       {actif('comportement') && <BarresCrise titre="Comportements" donnees={enListe(parComportement)} couleur={CRISE} valeur={valeur} suffixe={suffixe} />}
       {actif('consequence') && <BarresCrise titre="Conséquences" donnees={enListe(parConsequence)} couleur={CRISE} valeur={valeur} suffixe={suffixe} />}
       {actif('fonction') && <BarresCrise titre="Fonctions supposées" donnees={enListe(parFonction)} couleur={INK} valeur={valeur} suffixe={suffixe} />}
-
-      {actif('avertissement') && (
-        <p className="text-xs" style={{ color: INK_SOFT }}>
-          Ces répartitions décrivent ce qui a été observé et coché. Elles orientent une hypothèse,
-          elles ne l'établissent pas : une analyse fonctionnelle reste du ressort du professionnel.
-        </p>
-      )}
     </>
   );
 }
@@ -3679,7 +3708,7 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
               d'occurrences. `ligne.threshold` est déjà nul quand aucun
               critère ne vaut pour cette série. */}
           <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
-            hauteur={surligne ? 300 : 220}
+            hauteur={surligne ? 300 : 220} phases={ligne.phaseHistory}
             unite={enMesure ? ligne.unite : '%'} />
         </div>
       ) : (
@@ -3701,7 +3730,7 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
         onFermer={onAgrandir}>
         <div ref={refGrapheAgrandi}>
           <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
-            hauteur="70vh" unite={enMesure ? ligne.unite : '%'} />
+            hauteur="70vh" phases={ligne.phaseHistory} unite={enMesure ? ligne.unite : '%'} />
         </div>
       </GrapheAgrandi>
     )}
@@ -3989,9 +4018,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
             </div>
             {courbes.length > 0 && (
               <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-                Ces lectures décrivent la période affichée, elles ne la prolongent pas : une droite qui
-                monte vers le seuil ne dit pas à quelle date l'objectif sera acquis. Elles demandent au
-                moins trois points cotés.
+                Ces lectures demandent au moins trois points cotés.
               </p>
             )}
           </div>
@@ -4211,9 +4238,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         return (
           <>
             <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-              Ce que montre ce suivi est un état déclaré par l'équipe à un instant donné, pas une mesure de
-              performance : un axe qui bascule souvent peut refléter un contexte qui change autant qu'une évolution
-              de la personne. Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
+              Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
               changement d'état : une durée pas encore connue n'entre pas dans un pourcentage.
             </p>
 
@@ -4301,10 +4326,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
-              Une évolution parallèle n'établit aucun lien de cause à effet : le graphique sert à
-              repérer un moment à examiner, pas à conclure.
-            </p>
           </Card>
         )
       )}
@@ -4895,13 +4916,14 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
                   {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
+                  {l.phase && ` · phase ${l.phase}`}
                 </div>
 
                 {(() => {
                   const enMesure = !l.points.length && (l.mesures || []).length > 0;
                   if (!enMesure) {
                     return avecGraphiques && l.points.length > 0 ? (
-                      <div className="mb-3"><Graphique points={l.points} style={style} courbes={courbes} seuil={l.threshold} hauteur={180} /></div>
+                      <div className="mb-3"><Graphique points={l.points} style={style} courbes={courbes} seuil={l.threshold} hauteur={180} phases={l.phaseHistory} /></div>
                     ) : null;
                   }
                   const journalieres = moyennesParJour(l.mesures);
@@ -4925,7 +4947,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                       </div>
                       {avecGraphiques && journalieres.length > 0 && (
                         <div className="mb-3">
-                          <Graphique points={journalieres} style={style} courbes={courbes} seuil={null} hauteur={180} unite={l.unite} />
+                          <Graphique points={journalieres} style={style} courbes={courbes} seuil={null} hauteur={180} unite={l.unite} phases={l.phaseHistory} />
                         </div>
                       )}
                     </>

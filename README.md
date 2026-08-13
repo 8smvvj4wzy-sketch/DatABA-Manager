@@ -74,6 +74,14 @@ petit) et **PNG** pour l'enregistrer en image et la coller dans un compte rendu.
 > résolution pour rester net à l'impression. Les polices du site n'y sont pas
 > embarquées : les étiquettes sortent dans une police système approchante.
 
+Un **changement de phase** — passage de la ligne de base à l'intervention, puis
+au maintien — trace une **verticale datée** portant le nom de la phase, comme
+sur la courbe de la tablette. Elle se pose sur la première séance postérieure au
+changement, la seule où elle est lisible. On la retrouve dans « Agrandir », dans
+le PNG et dans le rapport imprimé, où la phase en cours s'affiche par ailleurs à
+côté du critère. Une phase changée après la dernière séance de la période ne
+trace rien : il n'y a pas encore de point à marquer.
+
 Deux boutons de rapport : **Générer un rapport** reprend la personne, ses
 objectifs et la période ; **Rapport de crise** ouvre le même document centré
 sur le bilan des crises.

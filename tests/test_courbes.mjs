@@ -33,10 +33,10 @@ function extraire(nom) {
   throw new Error(`Fin de déclaration introuvable : ${nom}`);
 }
 
-const NOMS = ['moyenneMobile', 'medianeDe', 'moyenneDe', 'tendanceLineaire'];
+const NOMS = ['moyenneMobile', 'medianeDe', 'moyenneDe', 'tendanceLineaire', 'reperesDePhase'];
 const code = [NOMS.map(extraire).join('\n'), `return { ${NOMS.join(', ')} };`].join('\n');
 // eslint-disable-next-line no-new-func
-const { moyenneMobile, medianeDe, moyenneDe, tendanceLineaire } = new Function(code)();
+const { moyenneMobile, medianeDe, moyenneDe, tendanceLineaire, reperesDePhase } = new Function(code)();
 
 /* ==================== moyenneMobile ==================== */
 t('fenêtre de 3 : les bords restent inconnus',
@@ -79,6 +79,42 @@ t('à trois points, les quatre répondent',
   [tendanceLineaire(trois) !== null, moyenneMobile(trois) !== null,
     medianeDe(trois) !== null, moyenneDe(trois) !== null],
   [true, true, true, true]);
+
+/* ==================== reperesDePhase ====================
+   La verticale se pose sur le premier point postérieur au changement. Deux
+   silences valent mieux qu'un repère faux : la phase d'origine n'est pas
+   datée, et un changement postérieur au dernier point coté ne marque rien
+   sur la période affichée. */
+const pts = [
+  { date: '2026-03-02T09:00:00.000Z', value: 40 },
+  { date: '2026-03-09T09:00:00.000Z', value: 55 },
+  { date: '2026-03-16T09:00:00.000Z', value: 70 },
+];
+t('la phase d’origine, sans date, ne marque rien',
+  reperesDePhase(pts, [{ id: 'a', name: 'Ligne de base', date: null }]), []);
+t('un changement entre deux points marque le point suivant',
+  reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' }]),
+  [{ id: 'b', name: 'Intervention', index: 1 }]);
+t('un changement tombant sur une séance marque cette séance',
+  reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-03-09T09:00:00.000Z' }]),
+  [{ id: 'b', name: 'Intervention', index: 1 }]);
+t('un changement antérieur à la période marque le premier point',
+  reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-01-05T00:00:00.000Z' }]),
+  [{ id: 'b', name: 'Intervention', index: 0 }]);
+t('un changement postérieur au dernier point ne marque rien',
+  reperesDePhase(pts, [{ id: 'c', name: 'Maintien', date: '2026-04-01T00:00:00.000Z' }]), []);
+t('historique complet : seuls les changements datés ressortent',
+  reperesDePhase(pts, [
+    { id: 'a', name: 'Ligne de base', date: null },
+    { id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' },
+    { id: 'c', name: 'Maintien', date: '2026-03-16T09:00:00.000Z' },
+  ]),
+  [{ id: 'b', name: 'Intervention', index: 1 }, { id: 'c', name: 'Maintien', index: 2 }]);
+t('objectif sans historique', reperesDePhase(pts, []), []);
+t('historique absent — objectif importé d’une version antérieure',
+  reperesDePhase(pts, undefined), []);
+t('aucun point coté sur la période',
+  reperesDePhase([], [{ id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' }]), []);
 
 console.log(`\n${ok} réussis, ${ko} échecs`);
 process.exit(ko ? 1 : 0);
