@@ -32,11 +32,22 @@ function extraire(nom) {
   }
   throw new Error(`Fin de déclaration introuvable : ${nom}`);
 }
+function extraireLigne(nom) {
+  const re = new RegExp(`^const ${nom} = (.+);$`, 'm');
+  const m = source.match(re);
+  if (!m) throw new Error(`Constante introuvable (ligne unique) dans src/App.jsx : ${nom}`);
+  return m[1];
+}
 
-const NOMS = ['moyenneMobile', 'medianeDe', 'moyenneDe', 'tendanceLineaire', 'reperesDePhase'];
-const code = [NOMS.map(extraire).join('\n'), `return { ${NOMS.join(', ')} };`].join('\n');
+const NOMS = ['moyenneMobile', 'medianeDe', 'moyenneDe', 'tendanceLineaire', 'reperesDePhase', 'placerEtiquettesReperes'];
+const code = [
+  `const LARGEUR_TRACE_REF = ${extraireLigne('LARGEUR_TRACE_REF')};`,
+  `const PX_PAR_CARACTERE = ${extraireLigne('PX_PAR_CARACTERE')};`,
+  NOMS.map(extraire).join('\n'),
+  `return { ${NOMS.join(', ')} };`,
+].join('\n');
 // eslint-disable-next-line no-new-func
-const { moyenneMobile, medianeDe, moyenneDe, tendanceLineaire, reperesDePhase } = new Function(code)();
+const { moyenneMobile, medianeDe, moyenneDe, tendanceLineaire, reperesDePhase, placerEtiquettesReperes } = new Function(code)();
 
 /* ==================== moyenneMobile ==================== */
 t('fenêtre de 3 : les bords restent inconnus',
@@ -94,13 +105,13 @@ t('la phase d’origine, sans date, ne marque rien',
   reperesDePhase(pts, [{ id: 'a', name: 'Ligne de base', date: null }]), []);
 t('un changement entre deux points marque le point suivant',
   reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' }]),
-  [{ id: 'b', name: 'Intervention', index: 1 }]);
+  [{ id: 'b', name: 'Intervention', repere: false, index: 1 }]);
 t('un changement tombant sur une séance marque cette séance',
   reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-03-09T09:00:00.000Z' }]),
-  [{ id: 'b', name: 'Intervention', index: 1 }]);
+  [{ id: 'b', name: 'Intervention', repere: false, index: 1 }]);
 t('un changement antérieur à la période marque le premier point',
   reperesDePhase(pts, [{ id: 'b', name: 'Intervention', date: '2026-01-05T00:00:00.000Z' }]),
-  [{ id: 'b', name: 'Intervention', index: 0 }]);
+  [{ id: 'b', name: 'Intervention', repere: false, index: 0 }]);
 t('un changement postérieur au dernier point ne marque rien',
   reperesDePhase(pts, [{ id: 'c', name: 'Maintien', date: '2026-04-01T00:00:00.000Z' }]), []);
 t('historique complet : seuls les changements datés ressortent',
@@ -109,12 +120,39 @@ t('historique complet : seuls les changements datés ressortent',
     { id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' },
     { id: 'c', name: 'Maintien', date: '2026-03-16T09:00:00.000Z' },
   ]),
-  [{ id: 'b', name: 'Intervention', index: 1 }, { id: 'c', name: 'Maintien', index: 2 }]);
+  [{ id: 'b', name: 'Intervention', repere: false, index: 1 }, { id: 'c', name: 'Maintien', repere: false, index: 2 }]);
 t('objectif sans historique', reperesDePhase(pts, []), []);
 t('historique absent — objectif importé d’une version antérieure',
   reperesDePhase(pts, undefined), []);
 t('aucun point coté sur la période',
   reperesDePhase([], [{ id: 'b', name: 'Intervention', date: '2026-03-05T00:00:00.000Z' }]), []);
+t('le champ repere est transporté, pour distinguer le tracé',
+  reperesDePhase(pts, [{ id: 'r', name: 'Guidance dégressive', date: '2026-03-05T00:00:00.000Z', repere: true }]),
+  [{ id: 'r', name: 'Guidance dégressive', repere: true, index: 1 }]);
+
+/* ==================== placerEtiquettesReperes ====================
+   Même règle que DatABA (tests/test_phases.mjs) : ancrage selon la position
+   sur le tracé, empilement sur deux lignes au plus pour deux repères
+   rapprochés, troncature au-delà de 18 caractères. */
+t('un repère au premier point est ancré à gauche',
+  placerEtiquettesReperes([{ id: 'a', name: 'Intervention', repere: false, index: 0 }], 5)[0].ancre, 'start');
+t('un repère au dernier point est ancré à droite',
+  placerEtiquettesReperes([{ id: 'b', name: 'Intervention', repere: false, index: 4 }], 5)[0].ancre, 'end');
+t('un repère au centre, avec un nom court, est centré',
+  placerEtiquettesReperes([{ id: 'c', name: 'Interv.', repere: false, index: 2 }], 5)[0].ancre, 'middle');
+t('un nom long est tronqué à 18 caractères',
+  placerEtiquettesReperes([{ id: 'd', name: 'Renforcement différé progressif', repere: false, index: 2 }], 5)[0].texte.length, 18);
+t('deux repères proches se répartissent sur deux lignes',
+  placerEtiquettesReperes([
+    { id: 'e1', name: 'Intervention', repere: false, index: 2 },
+    { id: 'e2', name: 'Maintien', repere: false, index: 3 },
+  ], 10).map((p) => p.ligne), [0, 1]);
+t('un troisième chevauchement consécutif revient en ligne 0',
+  placerEtiquettesReperes([
+    { id: 'f1', name: 'Ligne de base', repere: false, index: 1 },
+    { id: 'f2', name: 'Intervention', repere: false, index: 2 },
+    { id: 'f3', name: 'Maintien', repere: false, index: 3 },
+  ], 10).map((p) => p.ligne), [0, 1, 0]);
 
 console.log(`\n${ok} réussis, ${ko} échecs`);
 process.exit(ko ? 1 : 0);
