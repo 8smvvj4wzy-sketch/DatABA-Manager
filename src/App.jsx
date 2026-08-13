@@ -1770,9 +1770,36 @@ function reperesDePhase(points, historique) {
     .filter((ph) => ph && ph.date)
     .map((ph) => {
       const index = (points || []).findIndex((p) => new Date(p.date) >= new Date(ph.date));
-      return index < 0 ? null : { id: ph.id, name: ph.name, index };
+      return index < 0 ? null : { id: ph.id, name: ph.name, repere: !!ph.repere, index };
     })
     .filter(Boolean);
+}
+
+/* Position et empilement des étiquettes de repère, même règle que DatABA
+   (src/App.jsx, ObjectiveChart) : une estimation à 5,6 px/caractère (IBM Plex
+   Sans, 10 px) rapportée à une largeur de tracé de référence de 360 px, sans
+   mesure réelle du SVG rendu — Manager en affiche plusieurs tailles (180 px
+   dans les cartes, 300 ou 70vh en plein écran), aucune ne descend sous cette
+   référence. Le compromis assumé : basculer un peu trop tôt sur deux lignes
+   sur un grand graphique plutôt que laisser deux noms se chevaucher sur un
+   petit. */
+const LARGEUR_TRACE_REF = 360;
+const PX_PAR_CARACTERE = 5.6;
+function placerEtiquettesReperes(reperes, nbPoints) {
+  const dernierParLigne = [null, null];
+  return reperes.map((r) => {
+    const texte = r.name.length > 18 ? `${r.name.slice(0, 17)}…` : r.name;
+    const demi = Math.min(0.45, (texte.length * PX_PAR_CARACTERE) / 2 / LARGEUR_TRACE_REF);
+    const pos = nbPoints > 1 ? r.index / (nbPoints - 1) : 0.5;
+    const ancre = pos - demi < 0 ? 'start' : pos + demi > 1 ? 'end' : 'middle';
+    const debut = ancre === 'start' ? pos : ancre === 'end' ? pos - 2 * demi : pos - demi;
+    const fin = ancre === 'start' ? pos + 2 * demi : ancre === 'end' ? pos : pos + demi;
+    let ligne = 0;
+    if (dernierParLigne[0] != null && debut < dernierParLigne[0]) ligne = 1;
+    if (ligne === 1 && dernierParLigne[1] != null && debut < dernierParLigne[1]) ligne = 0;
+    dernierParLigne[ligne] = fin;
+    return { ...r, texte, ancre, ligne };
+  });
 }
 
 /* Un seul ComposedChart pour les quatre styles, au lieu de quatre conteneurs
@@ -1805,10 +1832,11 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
      laisse alors recharts choisir l'échelle. */
   const enPourcent = unite === '%';
   const etiquette = enPourcent ? 'Résultat' : 'Moyenne du jour';
-  const reperes = reperesDePhase(points, phases);
+  const reperes = placerEtiquettesReperes(reperesDePhase(points, phases), points.length);
+  const deuxLignes = reperes.some((r) => r.ligne === 1);
   /* Le nom de phase se pose au-dessus de la verticale : sans marge haute, il
      sort du cadre sur les graphiques courts du rapport imprimé. */
-  const marge = { top: reperes.length ? 20 : 8, right: 8, bottom: 4, left: -14 };
+  const marge = { top: reperes.length ? (deuxLignes ? 32 : 20) : 8, right: 8, bottom: 4, left: -14 };
   return (
     <div style={{ height: hauteur }}>
       <ResponsiveContainer width="100%" height="100%">
@@ -1823,10 +1851,26 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
           {/* Changements de phase : des verticales, en encre du thème et non en
               accent — elles datent le suivi, elles ne désignent pas un état.
               Même tracé que sur la courbe de DatABA, pour qu'un éducateur et
-              un cadre lisent le même graphique. */}
+              un cadre lisent le même graphique. Tirets longs pour un
+              changement de phase, pointillé fin pour un repère de procédure :
+              même encre pour les deux, aucune couleur ajoutée — lisible en
+              thème sombre comme à l'impression. */}
           {reperes.map((r) => (
-            <ReferenceLine key={r.id} x={donnees[r.index].label} stroke={INK} strokeDasharray="3 3" strokeWidth={1.5}
-              label={{ value: r.name, position: 'top', fontSize: 10, fill: INK_SOFT }} />
+            <ReferenceLine key={r.id} x={donnees[r.index].label}
+              stroke={r.repere ? INK_SOFT : INK}
+              strokeDasharray={r.repere ? '1 3' : '5 3'}
+              strokeWidth={r.repere ? 1 : 1.5}
+              label={({ viewBox }) => (
+                <text
+                  x={viewBox.x + (r.ancre === 'start' ? 2 : r.ancre === 'end' ? -2 : 0)}
+                  y={viewBox.y - (r.ligne ? 17 : 6)}
+                  textAnchor={r.ancre}
+                  fontSize={10}
+                  fontFamily={F_BODY}
+                  fill={r.repere ? INK_SOFT : INK}
+                >{r.texte}</text>
+              )}
+            />
           ))}
           {/* Moyenne et médiane sont des horizontales : ReferenceLine, le même
               primitif que le seuil, plutôt qu'une série constante de plus. */}
