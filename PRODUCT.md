@@ -87,9 +87,10 @@ un contenu de démonstration ou de maquette.
   chiffré.
 - Les outils de croisement montrent des pistes à vérifier, jamais des
   preuves de causalité — un écart sur un atelier peut venir de l'heure à
-  laquelle il est programmé. Le texte d'accompagnement le dit à chaque vue,
-  et plus encore pour un croisement par intervenant : il se lit vite comme
-  une évaluation de professionnel, ce qu'il n'est pas.
+  laquelle il est programmé. La contrainte porte sur ce que l'outil calcule
+  et présente, pas sur un texte à afficher : pas de rappel d'interprétation
+  dans l'interface. Les textes d'accompagnement expliquent le fonctionnement
+  de l'outil, jamais la méthode de celui qui lit.
 - Pas de listes de vérification de fidélité procédurale embarquées :
   la supervision humaine du programme d'intervention ne se remplace pas par
   des cases à cocher — même principe que DatABA.

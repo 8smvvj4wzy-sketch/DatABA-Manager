@@ -119,4 +119,13 @@ rouge.
 
 Les outils de croisement montrent des pistes à vérifier, jamais des preuves de
 causalité — un écart sur un atelier peut venir de l'heure à laquelle il est
-programmé. Le texte d'accompagnement doit le dire, à chaque vue.
+programmé. La contrainte porte sur ce que l'outil calcule et sur la façon dont
+il le présente, pas sur un texte à afficher : **aucun rappel d'interprétation
+dans l'interface**. Les vues s'adressent à des cadres pédagogiques, à qui on
+n'explique ni la différence entre corrélation et causalité, ni ce qu'est une
+analyse fonctionnelle.
+
+Les textes d'accompagnement restent, mais ils expliquent le **fonctionnement de
+l'outil** : ce qu'une vue prend en compte, ce qu'elle écarte, comment un chiffre
+est calculé, pourquoi une période vide n'apparaît pas. Jamais la méthode de
+celui qui lit.
