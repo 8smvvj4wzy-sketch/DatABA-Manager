@@ -35,7 +35,7 @@ function extraireLigne(nom) {
   return m[1];
 }
 
-const NOMS = ['fusionnerClasses', 'fusionnerImport', 'nomClasseDe'];
+const NOMS = ['fusionnerParId', 'fusionnerClasses', 'fusionnerImport', 'nomClasseDe'];
 const code = [
   `const VIDE = ${extraire('VIDE').replace(/^const VIDE = /, '')}`,
   NOMS.map(extraire).join('\n'),

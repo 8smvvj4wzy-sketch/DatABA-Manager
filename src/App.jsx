@@ -230,6 +230,11 @@ const VIDE = {
      fusionnerImport. Les axes sont stockés par source : deux tablettes
      peuvent avoir des critères différents pour le même identifiant d'axe. */
   suivi: [], _axesSuivi: {},
+  /* Compteurs d'occurrence, table de noms indexée par source comme `_ateliers`
+     et `_intervenants`. Côté DatABA ils sont définis sur la personne
+     (`students[].compteurs`) et leurs appuis voyagent dans `suivi`, mêlés aux
+     relevés d'état — voir `compteursDePersonne` pour ce qui les sépare. */
+  _compteurs: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code de curriculum attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -254,6 +259,7 @@ function normaliser(d) {
     stabilite: d.stabilite || [],
     suivi: d.suivi || [],
     _axesSuivi: d._axesSuivi || {},
+    _compteurs: d._compteurs || {},
     classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
@@ -304,6 +310,43 @@ function fusionnerClasses(actuelles, backup) {
   return Array.from(parId.values());
 }
 
+/* Fusion d'une liste datée (séances, crises, relevés) par identifiant.
+
+   Le fichier importé gagne : un identifiant déjà connu voit son enregistrement
+   REMPLACÉ par la version entrante, à sa place dans la liste. C'est ce qui fait
+   remonter une séance re-cotée, une crise dont la durée a été renseignée après
+   coup, un relevé corrigé — avant, la version d'origine restait et l'import
+   annonçait « 0 nouvelle », ce qui se lit comme « rien de neuf ».
+
+   Contrepartie assumée : aucune date de version n'est comparée, donc réimporter
+   un fichier PLUS ANCIEN que ce qui est déjà consolidé fait régresser les
+   enregistrements concernés. La purge par source reste le recours.
+
+   Les ajouts vont à la fin, les remplacements restent en place : l'historique
+   ne se réordonne pas à chaque import. */
+function fusionnerParId(actuels, entrants, transformer) {
+  const liste = actuels.slice();
+  const index = new Map(liste.map((x, i) => [x.id, i]));
+  let nouveaux = 0;
+  let majs = 0;
+  (entrants || []).forEach((brut) => {
+    if (!brut) return;
+    const x = transformer ? transformer(brut) : brut;
+    const i = index.get(x.id);
+    if (i === undefined) {
+      index.set(x.id, liste.length);
+      liste.push(x);
+      nouveaux += 1;
+    } else {
+      /* Un enregistrement identique n'est pas une mise à jour : le dire
+         gonflerait le compte à chaque réimport du même fichier. */
+      if (JSON.stringify(liste[i]) !== JSON.stringify(x)) majs += 1;
+      liste[i] = x;
+    }
+  });
+  return { liste, nouveaux, majs };
+}
+
 function fusionnerImport(actuel, backup, nomSource) {
   const personnes = actuel.personnes.slice();
   const parInitiales = new Map(personnes.map((p) => [p.initials, p]));
@@ -331,17 +374,26 @@ function fusionnerImport(actuel, backup, nomSource) {
   const idVersInitiales = Object.fromEntries((backup.students || []).map((s) => [s.id, s.initials]));
   const ateliersSource = Object.fromEntries((backup.ateliers || []).map((a) => [a.id, a.name]));
   const intervenantsSource = Object.fromEntries((backup.intervenants || []).map((i) => [i.id, i.name]));
+  /* Compteurs d'occurrence, deux origines. `backup.compteurs` est le tableau
+     plat que reconstruit l'import inter-Manager ; `students[].compteurs` est
+     la forme native de DatABA, qui prime quand les deux sont là. Un compteur
+     naît sans nom côté DatABA (champ vide à placeholder) : on fige ici le même
+     repli que lui, pour ne pas afficher une ligne muette. Un identifiant absent
+     de cette table se lira « Compteur retiré » — les deux cas restent
+     distincts, ce qu'un repli unique ne permettrait pas. */
+  const compteursSource = {
+    ...Object.fromEntries((backup.compteurs || []).map((c) => [c.id, c.nom])),
+    ...Object.fromEntries((backup.students || []).flatMap((s) => (s.compteurs || [])
+      .map((c) => [c.id, (c.nom || '').trim() || 'Compteur sans nom']))),
+  };
 
-  const dejaLa = new Set(actuel.seances.map((s) => s.id));
-  const nouvelles = (backup.sessions || []).filter((s) => !dejaLa.has(s.id));
-  const seances = [
-    ...actuel.seances.filter((s) => !nouvelles.some((n) => n.id === s.id)),
-    ...nouvelles,
-  ].map((s) => ({ ...s, source: s.source || nomSource }));
+  const fusionSeances = fusionnerParId(actuel.seances, backup.sessions,
+    (s) => ({ ...s, source: s.source || nomSource }));
+  const seances = fusionSeances.liste;
 
-  const crisesLa = new Set(actuel.crises.map((c) => c.id));
-  const nouvellesCrises = (backup.crises || []).filter((c) => !crisesLa.has(c.id));
-  const crises = [...actuel.crises, ...nouvellesCrises].map((c) => ({ ...c, source: c.source || nomSource }));
+  const fusionCrises = fusionnerParId(actuel.crises, backup.crises,
+    (c) => ({ ...c, source: c.source || nomSource }));
+  const crises = fusionCrises.liste;
 
   /* Relevés de suivi continu. Attention au champ `source` : côté DatABA il
      dit d'où vient le relevé (une pastille de suivi), ici il désigne la
@@ -360,20 +412,18 @@ function fusionnerImport(actuel, backup, nomSource) {
   let stabilite = actuelleStabilite;
   let suivi = actuelSuivi;
   let nbNouveauxReleves;
+  let nbRelevesMisAJour;
+  const renommerSource = (r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource });
   if (Array.isArray(backup.suivi)) {
-    const suiviLa = new Set(actuelSuivi.map((r) => r.id));
-    const nouveauxSuivi = backup.suivi
-      .filter((r) => r && !suiviLa.has(r.id))
-      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
-    suivi = [...actuelSuivi, ...nouveauxSuivi];
-    nbNouveauxReleves = nouveauxSuivi.length;
+    const f = fusionnerParId(actuelSuivi, backup.suivi, renommerSource);
+    suivi = f.liste;
+    nbNouveauxReleves = f.nouveaux;
+    nbRelevesMisAJour = f.majs;
   } else {
-    const stabiliteLa = new Set(actuelleStabilite.map((r) => r.id));
-    const nouveauxReleves = (backup.stabilite || [])
-      .filter((r) => r && !stabiliteLa.has(r.id))
-      .map((r) => ({ ...r, origine: r.origine || r.source || null, source: nomSource }));
-    stabilite = [...actuelleStabilite, ...nouveauxReleves];
-    nbNouveauxReleves = nouveauxReleves.length;
+    const f = fusionnerParId(actuelleStabilite, backup.stabilite, renommerSource);
+    stabilite = f.liste;
+    nbNouveauxReleves = f.nouveaux;
+    nbRelevesMisAJour = f.majs;
   }
 
   return {
@@ -397,9 +447,16 @@ function fusionnerImport(actuel, backup, nomSource) {
     _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
     collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
-    nbNouvellesSeances: nouvelles.length,
-    nbNouvellesCrises: nouvellesCrises.length,
+    _compteurs: { ...(actuel._compteurs || {}), [nomSource]: { ...((actuel._compteurs || {})[nomSource] || {}), ...compteursSource } },
+    nbNouvellesSeances: fusionSeances.nouveaux,
+    nbNouvellesCrises: fusionCrises.nouveaux,
     nbNouveauxReleves,
+    /* Mises à jour d'enregistrements déjà consolidés, comptées à part des
+       ajouts : un réimport enrichi annonçait « 0 nouvelle », ce qui se lisait
+       comme « rien de neuf » alors que le fichier portait des corrections. */
+    nbSeancesMisesAJour: fusionSeances.majs,
+    nbCrisesMisesAJour: fusionCrises.majs,
+    nbRelevesMisAJour,
   };
 }
 
@@ -822,6 +879,23 @@ function construireFaits(donnees, lignes) {
     });
   });
 
+  /* Un fait par appui de compteur d'occurrence. Table à part, et non une
+     colonne de plus sur `suivi` : un appui est ponctuel, il n'a pas de durée à
+     cumuler, et le mêler aux segments obligerait chaque mesure à savoir
+     laquelle des deux natures elle regarde. */
+  const compteurs = [];
+  (donnees.personnes || []).forEach((p) => {
+    compteursDePersonne(donnees, p.initials).forEach((r) => {
+      compteurs.push({
+        date: new Date(r.timestamp).toISOString(),
+        personne: p.initials,
+        compteur: r.nomCompteur,
+        atelier: nomAtelier(donnees, r.source, r.atelierId),
+        intervenant: nomIntervenant(r.source, r.intervenantId),
+      });
+    });
+  });
+
   /* Un fait par personne × objectif, daté de sa cotation la plus récente :
      l'état d'acquisition est une valeur globale (construireLignes), pas un
      événement daté, mais l'ancrer ainsi permet de croiser « objectifs actifs
@@ -845,7 +919,7 @@ function construireFaits(donnees, lignes) {
       };
     });
 
-  return { cotations, crises, suivi, objectifs };
+  return { cotations, crises, suivi, compteurs, objectifs };
 }
 
 /* `timer` et `latency` ne figurent plus dans les TYPES de DatABA (retirés au
@@ -859,6 +933,11 @@ const TYPES_COTATION = {
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
+/* Nom d'un compteur d'occurrence, même patron. Le repli dit « retiré » et non
+   « sans nom » : un compteur sans nom a été enregistré comme tel à l'import
+   (voir fusionnerImport), donc arriver ici signifie que l'identifiant n'est
+   plus dans la configuration de la tablette. */
+const nomCompteurDe = (d, source, id) => (id && ((d._compteurs || {})[source] || {})[id]) || 'Compteur retiré';
 
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
@@ -908,18 +987,39 @@ function axeEtCritereDuReleve(donnees, releve, estV4) {
   return { nomAxe: 'Suivi de stabilité', meta: metaCritereSuivi(CRITERES_STABILITE_V3, releve.etat), cle: releve.etat };
 }
 
+/* Un appui de compteur d'occurrence voyage dans `suivi`, au milieu des relevés
+   d'état, mais il n'en est pas un : il est ponctuel. Il n'a ni axe, ni critère,
+   ni durée jusqu'au suivant. Le laisser passer dans segmentsJournee lui
+   inventait un état qui dure jusqu'à l'appui d'après — huit appuis sur
+   « demandes » sortaient en sept segments d'une durée jamais observée, tous
+   confondus sur un axe fantôme « Suivi retiré » puisque leur `suiviId` est
+   absent. D'où la séparation à la source : suiviDePersonne les écarte,
+   compteursDePersonne les prend. */
+const estReleveCompteur = (r) => !!r && r.kind === 'compteur';
+
 /* Relevés de suivi continu d'une personne, v4 et v3 réunis et triés du plus
    récent au plus ancien. Chaque entrée porte de quoi s'afficher sans
    redemander l'axe. */
 function suiviDePersonne(donnees, initiales) {
   const estDeLaPersonne = (r) => ((donnees._idVersInitiales || {})[r.source] || {})[r.studentId] === initiales;
   const v4 = (donnees.suivi || [])
-    .filter(estDeLaPersonne)
+    .filter((r) => estDeLaPersonne(r) && !estReleveCompteur(r))
     .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, true), estV4: true }));
   const v3 = (donnees.stabilite || [])
     .filter(estDeLaPersonne)
     .map((r) => ({ ...r, ...axeEtCritereDuReleve(donnees, r, false), estV4: false }));
   return [...v4, ...v3].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
+/* Appuis de compteur d'occurrence d'une personne, résolus et triés du plus
+   récent au plus ancien — symétrique de suiviDePersonne. Un compteur n'existe
+   qu'en v4 : le format v3 (`stabilite`) n'en a jamais porté. */
+function compteursDePersonne(donnees, initiales) {
+  return (donnees.suivi || [])
+    .filter((r) => estReleveCompteur(r)
+      && ((donnees._idVersInitiales || {})[r.source] || {})[r.studentId] === initiales)
+    .map((r) => ({ ...r, nomCompteur: nomCompteurDe(donnees, r.source, r.compteurId) }))
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
 /* Jour local d'un horodatage, en « AAAA-MM-JJ » — repris de DatABA
@@ -960,8 +1060,13 @@ function joursObserves(donnees, initiales) {
     if (initiales && iniDe(c.source, c.studentId) !== initiales) return;
     ajouter(c.date);
   });
+  /* Les appuis de compteur comptent comme trace de présence au même titre
+     qu'un relevé d'état, mais ils ne passent plus par suiviDePersonne : il faut
+     donc les ajouter explicitement, sans quoi une journée où seul un compteur a
+     servi disparaîtrait des jours observés. */
   if (initiales) {
     suiviDePersonne(donnees, initiales).forEach((r) => ajouter(r.timestamp));
+    compteursDePersonne(donnees, initiales).forEach((r) => ajouter(r.timestamp));
   } else {
     [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => ajouter(r.timestamp));
   }
@@ -1109,6 +1214,40 @@ function chronologieSuivi(segments, granularite, mesure) {
           part: total ? Math.round((v.brut / total) * 100) : null,
         };
       });
+      return { cle: t.cle, label: etiquetteAgregation(t.cle, granularite), series };
+    });
+}
+
+/* Clé de série d'un compteur. Espace de clés distinct de celui des critères :
+   `cleSerieSuivi` met toujours un nom d'axe avant le séparateur, jamais le
+   préfixe réservé ci-dessous. */
+const cleSerieCompteur = (id) => `compteur||${id}`;
+
+/* Chronologie des appuis d'un compteur d'occurrence, même forme de sortie que
+   `chronologieSuivi` pour que le graphique mêle les deux sans conversion.
+
+   Pas de `part` : un compteur n'a aucun dénominateur qui veuille dire quelque
+   chose — ni durée totale, ni ensemble de critères qui se partageraient un
+   temps. Le seul chiffre juste est le nombre d'appuis. */
+function chronologieCompteurs(releves, granularite) {
+  const tranches = new Map();
+  (releves || []).forEach((r) => {
+    const t0 = new Date(r.timestamp).getTime();
+    if (Number.isNaN(t0)) return;
+    const cle = cleAgregation(t0, granularite);
+    if (!tranches.has(cle)) tranches.set(cle, { cle, series: new Map() });
+    const t = tranches.get(cle);
+    const k = cleSerieCompteur(r.compteurId);
+    if (!t.series.has(k)) {
+      t.series.set(k, { compteurId: r.compteurId, nomCompteur: r.nomCompteur, valeur: 0, part: null });
+    }
+    t.series.get(k).valeur += 1;
+  });
+  return Array.from(tranches.values())
+    .sort((a, b) => a.cle - b.cle)
+    .map((t) => {
+      const series = {};
+      t.series.forEach((v, k) => { series[k] = { ...v }; });
       return { cle: t.cle, label: etiquetteAgregation(t.cle, granularite), series };
     });
 }
@@ -3940,7 +4079,16 @@ function SuiviContinuVue({ donnees, personne, periode }) {
   const referencePeriode = periodeComparee(periode);
   const relevesRef = referencePeriode ? tousReleves.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
 
-  if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
+  /* Les appuis de compteur d'occurrence vivent dans la même table que les
+     relevés d'état mais n'en sont pas : ils se comptent, ils ne durent pas.
+     Deux flux séparés jusqu'au bout, réunis seulement dans le graphique. */
+  const tousCompteurs = compteursDePersonne(donnees, personne);
+  const relevesCompteur = tousCompteurs.filter((r) => dansPeriode(r.timestamp, periode));
+  const compteursRef = referencePeriode ? tousCompteurs.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
+
+  if (!releves.length && !relevesCompteur.length) {
+    return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
+  }
 
   /* Une carte par axe : le nombre d'axes n'est pas borné côté DatABA. */
   const parAxeMap = (liste) => {
@@ -3954,10 +4102,26 @@ function SuiviContinuVue({ donnees, personne, periode }) {
   const parAxe = parAxeMap(releves);
   const parAxeRef = parAxeMap(relevesRef);
 
+  /* Regroupement par identifiant et non par nom : deux compteurs peuvent
+     porter le même intitulé sur deux tablettes différentes. */
+  const parCompteurMap = (liste) => {
+    const m = new Map();
+    liste.forEach((r) => {
+      if (!m.has(r.compteurId)) m.set(r.compteurId, { compteurId: r.compteurId, nom: r.nomCompteur, releves: [] });
+      m.get(r.compteurId).releves.push(r);
+    });
+    return m;
+  };
+  const parCompteur = parCompteurMap(relevesCompteur);
+  const parCompteurRef = parCompteurMap(compteursRef);
+
   /* Journées cotées sur la période, la plus récente en tête : c'est parmi
      elles que se choisit la frise. Le choix explicite est ignoré s'il ne fait
-     plus partie de la période affichée. */
-  const jours = Array.from(new Set(releves.map((r) => jourLocal(r.timestamp)))).sort().reverse();
+     plus partie de la période affichée. Une journée où seul un compteur a
+     servi en fait partie — elle n'aura pas de frise, mais elle a bien un
+     total. */
+  const jours = Array.from(new Set([...releves, ...relevesCompteur].map((r) => jourLocal(r.timestamp))))
+    .filter(Boolean).sort().reverse();
   const jourAffiche = jourChoisi && jours.includes(jourChoisi) ? jourChoisi : jours[0];
   const iJour = jours.indexOf(jourAffiche);
   const minutes = (ms) => Math.round(ms / 60000);
@@ -3970,17 +4134,35 @@ function SuiviContinuVue({ donnees, personne, periode }) {
   const gran = periode.granularite || 'jour';
 
   /* Un critère ne figure dans les menus que s'il a au moins un segment borné :
-     un critère qu'on ne peut ni cumuler ni compter n'aurait pas de courbe. */
+     un critère qu'on ne peut ni cumuler ni compter n'aurait pas de courbe. Les
+     compteurs, eux, n'ont qu'à exister. Le type préfixe la valeur d'option :
+     les deux espaces de clés ne peuvent alors pas se confondre, et la lecture
+     se fait sur le premier « : ». */
   const optionsMap = new Map();
   segments.forEach((s) => {
     if (s.ms == null) return;
     const k = cleSerieSuivi(s.nomAxe, s.cle);
-    if (!optionsMap.has(k)) optionsMap.set(k, { valeur: k, nomAxe: s.nomAxe, cle: s.cle, meta: s.meta });
+    if (!optionsMap.has(k)) {
+      optionsMap.set(k, { valeur: `critere:${k}`, type: 'critere', k, nomAxe: s.nomAxe, cle: s.cle, meta: s.meta });
+    }
   });
-  const options = Array.from(optionsMap.values());
-  const axesDesOptions = Array.from(new Set(options.map((o) => o.nomAxe)));
-  const nomCritere = (o) => (o.meta === CRITERE_INCONNU_SUIVI ? `${o.meta.l} (${o.cle})` : o.meta.l);
-  const nomSerie = (o) => (axesDesOptions.length > 1 ? `${nomCritere(o)} · ${o.nomAxe}` : nomCritere(o));
+  const optionsCriteres = Array.from(optionsMap.values());
+  const optionsCompteurs = Array.from(parCompteur.values()).map((c, i) => ({
+    valeur: `compteur:${c.compteurId}`,
+    type: 'compteur',
+    k: cleSerieCompteur(c.compteurId),
+    compteurId: c.compteurId,
+    nom: c.nom,
+    /* Un compteur n'a pas de couleur côté DatABA : il prend la palette
+       catégorielle des séries, comme les chronologies de crise. */
+    couleur: PALETTE_SERIES[i % PALETTE_SERIES.length],
+  }));
+  const options = [...optionsCriteres, ...optionsCompteurs];
+  const axesDesOptions = Array.from(new Set(optionsCriteres.map((o) => o.nomAxe)));
+  const nomCritere = (o) => (o.type === 'compteur' ? o.nom
+    : (o.meta === CRITERE_INCONNU_SUIVI ? `${o.meta.l} (${o.cle})` : o.meta.l));
+  const nomSerie = (o) => (o.type === 'compteur' || axesDesOptions.length <= 1
+    ? nomCritere(o) : `${nomCritere(o)} · ${o.nomAxe}`);
 
   const valide = (k) => options.some((o) => o.valeur === k);
   const hausseEff = valide(critereHausse) ? critereHausse : (options[0] || {}).valeur;
@@ -3990,22 +4172,46 @@ function SuiviContinuVue({ donnees, personne, periode }) {
   const optHausse = options.find((o) => o.valeur === hausseEff);
   const optBaisse = options.find((o) => o.valeur === baisseEff);
 
-  /* Le sens attendu d'une hausse, pour colorer les écarts de la répartition —
-     uniquement pour les critères explicitement désignés. Ailleurs, le
-     comportement d'avant : une hausse reste neutre-favorable faute de savoir. */
+  /* Le sens attendu d'une hausse, pour colorer les écarts de la répartition et
+     des compteurs — uniquement pour les séries explicitement désignées.
+     Ailleurs, le comportement d'avant : une hausse reste neutre-favorable
+     faute de savoir. */
   const sensAttendu = {};
   if (valide(critereHausse)) sensAttendu[critereHausse] = true;
   if (valide(critereBaisse)) sensAttendu[critereBaisse] = false;
+  const favorablePour = (valeurOption) => sensAttendu[valeurOption] !== false;
 
-  const suffixe = unite === 'pct' ? ' %' : (mesure === 'occurrences' ? '' : ' min');
-  const tranches = chronologieSuivi(segments, gran, mesure);
+  /* Un compteur n'a ni durée à cumuler ni total de référence : dès qu'il est
+     l'une des deux séries, la mesure et l'unité sont contraintes plutôt que de
+     laisser choisir un réglage qui ne s'appliquerait qu'à moitié — deux unités
+     différentes sur un axe Y unique ne se lisent pas. */
+  const avecCompteur = (optHausse && optHausse.type === 'compteur') || (optBaisse && optBaisse.type === 'compteur');
+  const mesureEff = avecCompteur ? 'occurrences' : mesure;
+  const uniteEff = avecCompteur ? 'nombre' : unite;
+
+  const suffixe = uniteEff === 'pct' ? ' %' : (mesureEff === 'occurrences' ? '' : ' min');
+
+  /* Les deux chronologies partagent la clé de tranche de `cleAgregation` :
+     elles se réunissent sans conversion. L'union, et non l'une des deux : une
+     tranche où seul le compteur a servi doit exister. */
+  const parTranche = new Map();
+  const absorber = (liste) => liste.forEach((t) => {
+    if (!parTranche.has(t.cle)) parTranche.set(t.cle, { cle: t.cle, label: t.label, series: {} });
+    Object.assign(parTranche.get(t.cle).series, t.series);
+  });
+  absorber(chronologieSuivi(segments, gran, mesureEff));
+  absorber(chronologieCompteurs(relevesCompteur, gran));
+  const tranches = Array.from(parTranche.values()).sort((a, b) => a.cle - b.cle);
+
   /* Une tranche où l'axe du critère n'a rien de borné laisse un trou, pas un
      zéro : le critère n'y était pas à zéro, il n'y a rien eu d'observé sur son
-     axe. Un zéro n'est écrit que si l'axe, lui, a été observé. */
+     axe. Un compteur, lui, est bien à zéro : la tranche existe parce que
+     quelque chose y a été observé, et n'avoir pas appuyé est une information. */
   const valeurSerie = (t, opt) => {
     if (!opt) return null;
-    const s = t.series[opt.valeur];
-    if (s) return unite === 'pct' ? s.part : s.valeur;
+    const s = t.series[opt.k];
+    if (opt.type === 'compteur') return s ? s.valeur : 0;
+    if (s) return uniteEff === 'pct' ? s.part : s.valeur;
     return Object.values(t.series).some((x) => x.nomAxe === opt.nomAxe) ? 0 : null;
   };
   const donneesGraphe = tranches.map((t) => ({
@@ -4031,14 +4237,35 @@ function SuiviContinuVue({ donnees, personne, periode }) {
   const croisement = croisementTendances(fitHausse, fitBaisse);
   const trancheCroisement = croisement ? donneesGraphe[communes[Math.round(croisement.index)]] : null;
 
-  /* Deux critères peuvent porter la même couleur (deux axes réglés
-     séparément côté DatABA) : les deux courbes seraient alors
-     indiscernables. La seconde bascule sur la palette catégorielle. */
-  const couleurHausse = optHausse ? optHausse.meta.color : INK_SOFT;
-  const couleurBaisseBrute = optBaisse ? optBaisse.meta.color : INK_SOFT;
+  /* Deux séries peuvent porter la même couleur (deux axes réglés séparément
+     côté DatABA, ou un compteur tombé sur la teinte d'un critère) : les deux
+     courbes seraient alors indiscernables. La seconde bascule sur la palette
+     catégorielle. */
+  const couleurDe = (o) => (o ? (o.type === 'compteur' ? o.couleur : o.meta.color) : INK_SOFT);
+  const couleurHausse = couleurDe(optHausse);
+  const couleurBaisseBrute = couleurDe(optBaisse);
   const couleurBaisse = couleurBaisseBrute === couleurHausse
     ? (PALETTE_SERIES.find((c) => c !== couleurHausse) || CAT_SLATE)
     : couleurBaisseBrute;
+
+  /* Les mêmes groupes servent aux deux menus : les écrire une fois évite que
+     l'un gagne un jour une option que l'autre n'aurait pas. */
+  const groupesOptions = (
+    <>
+      {axesDesOptions.map((a) => (
+        <optgroup key={a} label={a}>
+          {optionsCriteres.filter((o) => o.nomAxe === a).map((o) => (
+            <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
+          ))}
+        </optgroup>
+      ))}
+      {optionsCompteurs.length > 0 && (
+        <optgroup label="Compteurs d'occurrence">
+          {optionsCompteurs.map((o) => <option key={o.valeur} value={o.valeur}>{o.nom}</option>)}
+        </optgroup>
+      )}
+    </>
+  );
 
   return (
     <>
@@ -4104,7 +4331,7 @@ function SuiviContinuVue({ donnees, personne, periode }) {
                   <div className="space-y-1.5">
                     {repar.lignes.map((l) => {
                       const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
-                      const favorable = sensAttendu[cleSerieSuivi(nomAxeVal, l.cle)] !== false;
+                      const favorable = favorablePour(`critere:${cleSerieSuivi(nomAxeVal, l.cle)}`);
                       return (
                         <div key={String(l.cle)} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
                           <span className="flex items-center gap-1.5 min-w-0">
@@ -4143,59 +4370,87 @@ function SuiviContinuVue({ donnees, personne, periode }) {
                 </Card>
               );
             })}
+
+            {/* Compteurs d'occurrence : pas de frise, un appui n'a pas de
+                largeur. Trois chiffres qui se lisent seuls — le total de la
+                période, celui de la journée affichée pour rester en phase avec
+                les frises ci-dessus, et le nombre de journées d'usage, sans
+                lequel une hausse du total ne se distingue pas d'un simple
+                surcroît de jours cotés. */}
+            {Array.from(parCompteur.values()).map((c) => {
+              const total = c.releves.length;
+              const ref = parCompteurRef.get(c.compteurId);
+              const duJour = c.releves.filter((r) => jourLocal(r.timestamp) === jourAffiche).length;
+              const journees = new Set(c.releves.map((r) => jourLocal(r.timestamp))).size;
+              const favorable = favorablePour(`compteur:${c.compteurId}`);
+              return (
+                <Card key={`compteur-${c.compteurId}`}>
+                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                    {c.nom} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· compteur d'occurrence</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs" style={{ fontFamily: F_MONO }}>
+                    <span className="flex items-center gap-1.5">
+                      <span>{total} occ. sur la période</span>
+                      {referencePeriode && <Ecart valeur={total} reference={ref ? ref.releves.length : 0} hausseFavorable={favorable} />}
+                    </span>
+                    <span style={{ color: INK_SOFT }}>
+                      {duJour} le {libelleJour(jourAffiche, true)}
+                    </span>
+                    <span style={{ color: INK_SOFT }}>
+                      {journees} journée{journees !== 1 ? 's' : ''} d'usage
+                    </span>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         </>
       )}
 
       {mode === 'graphique' && (
         options.length < 2 ? (
-          <Empty>Il faut deux critères avec au moins une durée connue pour les comparer.</Empty>
+          <Empty>Il faut deux séries — critères de suivi ou compteurs d'occurrence — pour les comparer.</Empty>
         ) : (
           <Card>
             <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
               <div>
-                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Critère à faire augmenter</div>
+                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>À faire augmenter</div>
                 <select value={hausseEff} onChange={(e) => setCritereHausse(e.target.value)}
                   className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
-                  {axesDesOptions.map((a) => (
-                    <optgroup key={a} label={a}>
-                      {options.filter((o) => o.nomAxe === a).map((o) => (
-                        <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
-                      ))}
-                    </optgroup>
-                  ))}
+                  {groupesOptions}
                 </select>
               </div>
               <div>
-                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Critère à faire diminuer</div>
+                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>À faire diminuer</div>
                 <select value={baisseEff} onChange={(e) => setCritereBaisse(e.target.value)}
                   className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
-                  {axesDesOptions.map((a) => (
-                    <optgroup key={a} label={a}>
-                      {options.filter((o) => o.nomAxe === a).map((o) => (
-                        <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
-                      ))}
-                    </optgroup>
-                  ))}
+                  {groupesOptions}
                 </select>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 mb-3">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
-                <Chip label="Durée" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
-                <Chip label="Occurrences" on={mesure === 'occurrences'} onClick={() => setMesure('occurrences')} />
+            {avecCompteur ? (
+              <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+                Un compteur d'occurrence n'a ni durée ni total de référence : les deux séries
+                sont lues en nombre, sur un seul axe.
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-center gap-3 mb-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
+                  <Chip label="Durée" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
+                  <Chip label="Occurrences" on={mesure === 'occurrences'} onClick={() => setMesure('occurrences')} />
+                </div>
+                <BasculeUnite unite={unite} setUnite={setUnite} />
               </div>
-              <BasculeUnite unite={unite} setUnite={setUnite} />
-            </div>
+            )}
 
             <div style={{ height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={donneesGraphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
                   <CartesianGrid stroke={BORDER} vertical={false} />
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                  <YAxis domain={unite === 'pct' ? [0, 100] : undefined} allowDecimals={false}
+                  <YAxis domain={uniteEff === 'pct' ? [0, 100] : undefined} allowDecimals={false}
                     tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
                   <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
                     formatter={(v) => `${v}${suffixe}`} />
@@ -4225,17 +4480,18 @@ function SuiviContinuVue({ donnees, personne, periode }) {
 
             <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
               {!fitHausse || !fitBaisse ? (
-                <div>Les tendances demandent au moins trois tranches où les deux critères sont connus.</div>
+                <div>Les tendances demandent au moins trois tranches où les deux séries sont connues.</div>
               ) : trancheCroisement ? (
                 <div>Les deux tendances se croisent au niveau de <span style={{ fontFamily: F_MONO, color: INK }}>{trancheCroisement.label}</span>.</div>
               ) : (
                 <div>Les deux tendances ne se croisent pas sur la période affichée ; elles ne sont pas prolongées au-delà.</div>
               )}
               <div>
-                {unite === 'pct'
-                  ? `Chaque part est calculée sur ${mesure === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
-                  : `Chaque point cumule ${mesure === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
+                {uniteEff === 'pct'
+                  ? `Chaque part est calculée sur ${mesureEff === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
+                  : `Chaque point cumule ${mesureEff === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
                 {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
+                {optionsCompteurs.length > 0 && " Un compteur, lui, compte ses appuis : n'avoir pas appuyé sur une tranche observée vaut bien zéro."}
               </div>
             </div>
           </Card>
@@ -4738,6 +4994,9 @@ const MESURES = [
      la bascule Nombre/Pourcentage du tableau de bord et des crises, pas une
      part relative à la ligne ou à la colonne. */
   { k: 'suiviPart', label: 'Suivi continu : part du temps borné', source: 'suivi', agg: 'part', champ: 'minutes', suffixe: ' %', hausseFavorable: true },
+  /* Les compteurs d'occurrence ont leur propre table de faits : un appui est
+     ponctuel, il se compte et ne se cumule pas en durée. */
+  { k: 'compteurOccurrences', label: 'Suivi continu : occurrences comptées', source: 'compteurs', agg: 'compte', hausseFavorable: true },
   { k: 'objAcquis', label: "Objectifs acquis (nombre)", source: 'objectifs', agg: 'somme', champ: 'acquis', hausseFavorable: true },
   { k: 'objPartAcquis', label: 'Objectifs acquis (part du total)', source: 'objectifs', agg: 'part', champ: 'acquis', suffixe: ' %', hausseFavorable: true },
   { k: 'autonomieEvolution', label: "Évolution de l'autonomie (première à dernière cotation)", source: 'objectifs', agg: 'moyenne', champ: 'evolution', suffixe: ' pts', hausseFavorable: true },
@@ -4751,14 +5010,15 @@ const MESURES = [
 const DIMENSIONS = [
   { k: 'aucune', label: 'Aucune', get: () => 'Total' },
   { k: 'personne', label: 'Personne', get: (f) => f.personne },
-  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi'] },
-  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi'] },
+  { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi', 'compteurs'] },
   { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—', sources: ['cotations', 'objectifs'] },
   { k: 'type', label: 'Type', get: (f) => f.type || '—', sources: ['cotations', 'crises', 'objectifs'] },
   { k: 'phase', label: 'Phase', get: (f) => f.phase || '—', sources: ['cotations'] },
   { k: 'intensite', label: 'Intensité', get: (f) => f.intensite || '—', sources: ['crises'] },
   { k: 'axe', label: 'Axe de suivi', get: (f) => f.axe || '—', sources: ['suivi'] },
   { k: 'critere', label: 'Critère de suivi', get: (f) => f.critere || '—', sources: ['suivi'] },
+  { k: 'compteur', label: "Compteur d'occurrence", get: (f) => f.compteur || '—', sources: ['compteurs'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
@@ -5603,6 +5863,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
     sources: donnees.sources,
     _idVersInitiales: donnees._idVersInitiales,
     _ateliers: donnees._ateliers,
+    _compteurs: donnees._compteurs,
     _intervenants: donnees._intervenants,
     _axesSuivi: donnees._axesSuivi,
     alias, commentaires, codesEfl,
@@ -5663,6 +5924,12 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
         students: Object.entries(table).map(([id, initials]) => ({ id, initials, classeId: classeIdDe[initials] || null })),
         classes: paquet.classes || [],
         ateliers: Object.entries((paquet._ateliers || {})[src] || {}).map(([id, name]) => ({ id, name })),
+        /* Tableau plat plutôt que `students[].compteurs` : la reconstruction
+           ci-dessus ne sait pas à quelle personne rattacher quel compteur, et
+           fusionnerImport n'en a pas besoin — sa table est indexée par source,
+           pas par personne. Sans cette ligne, un aller-retour Manager → Manager
+           perdrait les noms de compteurs. */
+        compteurs: Object.entries((paquet._compteurs || {})[src] || {}).map(([id, nom]) => ({ id, nom })),
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
@@ -5885,6 +6152,8 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         delete inter[src];
                         const axes = { ...(d._axesSuivi || {}) };
                         delete axes[src];
+                        const compt = { ...(d._compteurs || {}) };
+                        delete compt[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
@@ -5895,6 +6164,7 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         return {
                           ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
                           _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
+                          _compteurs: compt,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -6504,7 +6774,12 @@ function ManagerApp() {
   function purger(transformer) {
     setDonnees((d) => {
       const suite = transformer(d);
-      return { ...suite, nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined, collisionsInitiales: undefined };
+      return {
+        ...suite,
+        nbNouvellesSeances: undefined, nbNouvellesCrises: undefined, nbNouveauxReleves: undefined,
+        nbSeancesMisesAJour: undefined, nbCrisesMisesAJour: undefined, nbRelevesMisAJour: undefined,
+        collisionsInitiales: undefined,
+      };
     });
     notify('Données purgées');
   }
@@ -6512,9 +6787,16 @@ function ManagerApp() {
   function onImported(fusion) {
     setDonnees(fusion);
     if (fusion.nbNouvellesSeances != null) {
+      /* Les mises à jour se disent à part des ajouts : réimporter un fichier
+         complété n'apporte parfois aucun enregistrement neuf, seulement des
+         corrections sur des enregistrements déjà là. Sans ce second compte, le
+         message annonçait « 0 nouvelle » — indiscernable d'un import qui n'a
+         effectivement rien apporté. */
+      const majs = (fusion.nbSeancesMisesAJour || 0) + (fusion.nbCrisesMisesAJour || 0) + (fusion.nbRelevesMisAJour || 0);
       notify(
         `${fusion.nbNouvellesSeances} nouvelle(s) séance(s), ${fusion.nbNouvellesCrises} nouvelle(s) crise(s)`
         + (fusion.nbNouveauxReleves ? `, ${fusion.nbNouveauxReleves} relevé(s) de suivi continu` : '')
+        + (majs ? ` · ${majs} enregistrement(s) mis à jour` : '')
         /* Deux personnes de classes différentes, mêmes initiales : la fusion
            les a réunies en une seule sans pouvoir les distinguer. Signalé
            plutôt que résolu — voir fusionnerImport. */
