@@ -1007,10 +1007,133 @@ function repartitionCriteres(segments) {
   });
   return {
     totalMs: total,
+    /* Nombre de segments bornés : le dénominateur des occurrences. Il diffère
+       de `segments.length` — un relevé jamais borné ne compte pas plus ici que
+       dans les durées, sans quoi les deux lectures ne parleraient pas du même
+       ensemble de faits. */
+    totalN: bornes.length,
     nonBornes: segments.length - bornes.length,
     lignes: Array.from(parCritere.values())
-      .map((e) => ({ ...e, part: total ? Math.round((e.ms / total) * 100) : null }))
+      .map((e) => ({
+        ...e,
+        part: total ? Math.round((e.ms / total) * 100) : null,
+        partN: bornes.length ? Math.round((e.n / bornes.length) * 100) : null,
+      }))
       .sort((a, b) => b.ms - a.ms),
+  };
+}
+
+/* Tous les segments de suivi continu d'une personne, tous axes et toutes
+   journées confondus, chacun étiqueté de son axe. Reçoit les relevés déjà
+   résolus par `suiviDePersonne`.
+
+   Le découpage se fait par (axe, jour) : deux axes se chevauchent dans le temps
+   sans se borner l'un l'autre, et une journée ne se prolonge pas dans la
+   suivante — sans ce double regroupement, le dernier relevé du lundi serait
+   borné par le premier du mardi et produirait un segment de quatorze heures
+   qui n'a jamais été observé. Même construction que celle de `construireFaits`,
+   ramenée ici pour que la fiche personne et la table de faits lisent la même
+   chose. Les segments non bornés sont conservés (`ms: null`) : c'est à
+   l'appelant de les écarter d'un calcul, et à `repartitionCriteres` de les
+   compter à part. */
+function segmentsSuivi(releves) {
+  const parAxeJour = new Map();
+  (releves || []).forEach((r) => {
+    const jour = jourLocal(r.timestamp);
+    if (jour == null) return;
+    const cle = `${r.nomAxe}||${jour}`;
+    if (!parAxeJour.has(cle)) parAxeJour.set(cle, { nomAxe: r.nomAxe, releves: [] });
+    parAxeJour.get(cle).releves.push(r);
+  });
+  const tous = [];
+  parAxeJour.forEach(({ nomAxe, releves: rs }) => {
+    const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    segmentsJournee(triees).forEach((s) => tous.push({ ...s, nomAxe }));
+  });
+  return tous.sort((a, b) => a.debut - b.debut);
+}
+
+/* Clé de série d'un critère : un même libellé peut exister sur deux axes
+   différents (« Calme » sur l'axe humeur et sur l'axe activité) sans désigner
+   la même chose. L'axe fait donc partie de l'identité. Même séparateur que le
+   croisement d'ExplorerScreen, pour une clé composite qui se relit. */
+const cleSerieSuivi = (nomAxe, cle) => `${nomAxe}||${cle}`;
+
+/* Chronologie du suivi continu, tranche par tranche — l'équivalent de
+   `chronologieCrises` pour les segments de suivi.
+
+   `mesure` vaut 'duree' (chaque segment pèse ses minutes) ou 'occurrences'
+   (chaque segment pèse 1) : un critère peut occuper peu de temps en revenant
+   souvent, ou l'inverse.
+
+   La part est rapportée au total de **son propre axe sur sa propre tranche**,
+   jamais au total général : les axes sont indépendants et se chevauchent dans
+   le temps, additionner leurs durées donnerait un dénominateur qui ne
+   correspond à aucune durée réelle. Deux critères d'un même axe se partagent
+   donc bien 100 %, deux critères d'axes différents sont chacun rapportés au
+   leur.
+
+   Les segments non bornés sont exclus, même règle que partout ailleurs, et une
+   tranche qui n'en contient aucun n'est pas créée : elle sortirait comme un
+   zéro qu'elle n'est pas. */
+function chronologieSuivi(segments, granularite, mesure) {
+  const occurrences = mesure === 'occurrences';
+  /* Cumul en unité brute (millisecondes ou nombre de segments), converti en
+     minutes seulement à la sortie : arrondir chaque segment avant de sommer
+     ferait disparaître les segments de moins de trente secondes et la somme
+     des minutes cesserait d'égaler la durée du tout. */
+  const poids = (s) => (occurrences ? 1 : s.ms);
+  const tranches = new Map();
+  (segments || []).forEach((s) => {
+    if (s.ms == null) return;
+    const cle = cleAgregation(s.debut, granularite);
+    if (!tranches.has(cle)) tranches.set(cle, { cle, series: new Map(), totauxAxe: new Map() });
+    const t = tranches.get(cle);
+    const p = poids(s);
+    const k = cleSerieSuivi(s.nomAxe, s.cle);
+    if (!t.series.has(k)) t.series.set(k, { nomAxe: s.nomAxe, cle: s.cle, meta: s.meta, brut: 0 });
+    t.series.get(k).brut += p;
+    t.totauxAxe.set(s.nomAxe, (t.totauxAxe.get(s.nomAxe) || 0) + p);
+  });
+  return Array.from(tranches.values())
+    .sort((a, b) => a.cle - b.cle)
+    .map((t) => {
+      const series = {};
+      t.series.forEach((v, k) => {
+        const total = t.totauxAxe.get(v.nomAxe) || 0;
+        series[k] = {
+          nomAxe: v.nomAxe,
+          cle: v.cle,
+          meta: v.meta,
+          valeur: occurrences ? v.brut : Math.round(v.brut / 60000),
+          part: total ? Math.round((v.brut / total) * 100) : null,
+        };
+      });
+      return { cle: t.cle, label: etiquetteAgregation(t.cle, granularite), series };
+    });
+}
+
+/* Croisement de deux droites de tendance, à partir des séries ajustées que
+   `tendanceLineaire` a déjà produites — pas de second calcul de moindres
+   carrés, et donc pas de risque de divergence entre le trait affiché et le
+   point annoncé.
+
+   Rien n'est extrapolé : un croisement au-delà du dernier point observé ou
+   avant le premier ne renvoie rien. Annoncer « elles se croiseront en mars »
+   sur la foi d'une droite prolongée serait donner une date que personne n'a
+   observée. Deux droites parallèles ne se croisent pas non plus. */
+function croisementTendances(fitA, fitB) {
+  if (!fitA || !fitB || fitA.length !== fitB.length || fitA.length < 3) return null;
+  const n = fitA.length;
+  const penteA = (fitA[n - 1] - fitA[0]) / (n - 1);
+  const penteB = (fitB[n - 1] - fitB[0]) / (n - 1);
+  const dp = penteA - penteB;
+  if (!dp) return null;
+  const index = (fitB[0] - fitA[0]) / dp;
+  if (!Number.isFinite(index) || index < 0 || index > n - 1) return null;
+  return {
+    index: Math.round(index * 100) / 100,
+    valeur: Math.round((fitA[0] + penteA * index) * 100) / 100,
   };
 }
 
@@ -3786,6 +3909,342 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
    conditionnellement, un réglage d'affichage posé en état local repart de sa
    valeur initiale à chaque aller-retour — même raison que `unite` du tableau
    de bord et `config` du bilan de crise. */
+/* ==================== Suivi continu d'une personne ====================
+   Deux lectures des mêmes relevés, exclusives à l'écran : la frise d'une
+   journée avec la répartition sur la période, et la chronologie de deux
+   critères opposés avec leurs droites de tendance.
+
+   Composant à part plutôt que bloc de rendu dans PersonnesScreen : il lui faut
+   son propre état (mode, critères choisis, mesure, journée affichée), qu'une
+   IIFE dans un rendu ne peut pas porter. Monté avec `key={personne}` : changer
+   de personne repart d'un état neuf, sans effet de remise à zéro. */
+function SuiviContinuVue({ donnees, personne, periode }) {
+  const [mode, setMode] = useState('frise');
+  /* Journée affichée dans la frise. null = pas de choix explicite, la dernière
+     journée cotée sert de défaut — dérivé au moment du rendu, pas par un
+     effet, pour que le choix survive à un changement de période tant que la
+     journée y reste. */
+  const [jourChoisi, setJourChoisi] = useState(null);
+  /* Les deux critères comparés dans le graphique. Vides tant que rien n'a été
+     choisi : le graphique en propose deux par défaut pour ne pas s'ouvrir à
+     blanc, mais tant que ce n'est pas un choix, il ne sert pas à colorer les
+     écarts de la répartition — dire d'une hausse qu'elle est bonne ou mauvaise
+     demande que quelqu'un l'ait dit. */
+  const [critereHausse, setCritereHausse] = useState('');
+  const [critereBaisse, setCritereBaisse] = useState('');
+  const [mesure, setMesure] = useState('duree');
+  const [unite, setUnite] = useState('pct');
+
+  const tousReleves = suiviDePersonne(donnees, personne);
+  const releves = tousReleves.filter((r) => dansPeriode(r.timestamp, periode));
+  const referencePeriode = periodeComparee(periode);
+  const relevesRef = referencePeriode ? tousReleves.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
+
+  if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
+
+  /* Une carte par axe : le nombre d'axes n'est pas borné côté DatABA. */
+  const parAxeMap = (liste) => {
+    const m = new Map();
+    liste.forEach((r) => {
+      if (!m.has(r.nomAxe)) m.set(r.nomAxe, []);
+      m.get(r.nomAxe).push(r);
+    });
+    return m;
+  };
+  const parAxe = parAxeMap(releves);
+  const parAxeRef = parAxeMap(relevesRef);
+
+  /* Journées cotées sur la période, la plus récente en tête : c'est parmi
+     elles que se choisit la frise. Le choix explicite est ignoré s'il ne fait
+     plus partie de la période affichée. */
+  const jours = Array.from(new Set(releves.map((r) => jourLocal(r.timestamp)))).sort().reverse();
+  const jourAffiche = jourChoisi && jours.includes(jourChoisi) ? jourChoisi : jours[0];
+  const iJour = jours.indexOf(jourAffiche);
+  const minutes = (ms) => Math.round(ms / 60000);
+  const libelleJour = (j, court) => new Date(`${j}T12:00:00`).toLocaleDateString('fr-FR',
+    court ? { weekday: 'short', day: '2-digit', month: '2-digit' }
+      : { weekday: 'short', day: '2-digit', month: 'long', year: 'numeric' });
+
+  /* --- Données du graphique --- */
+  const segments = segmentsSuivi(releves);
+  const gran = periode.granularite || 'jour';
+
+  /* Un critère ne figure dans les menus que s'il a au moins un segment borné :
+     un critère qu'on ne peut ni cumuler ni compter n'aurait pas de courbe. */
+  const optionsMap = new Map();
+  segments.forEach((s) => {
+    if (s.ms == null) return;
+    const k = cleSerieSuivi(s.nomAxe, s.cle);
+    if (!optionsMap.has(k)) optionsMap.set(k, { valeur: k, nomAxe: s.nomAxe, cle: s.cle, meta: s.meta });
+  });
+  const options = Array.from(optionsMap.values());
+  const axesDesOptions = Array.from(new Set(options.map((o) => o.nomAxe)));
+  const nomCritere = (o) => (o.meta === CRITERE_INCONNU_SUIVI ? `${o.meta.l} (${o.cle})` : o.meta.l);
+  const nomSerie = (o) => (axesDesOptions.length > 1 ? `${nomCritere(o)} · ${o.nomAxe}` : nomCritere(o));
+
+  const valide = (k) => options.some((o) => o.valeur === k);
+  const hausseEff = valide(critereHausse) ? critereHausse : (options[0] || {}).valeur;
+  const baisseEff = valide(critereBaisse) && critereBaisse !== hausseEff
+    ? critereBaisse
+    : (options.find((o) => o.valeur !== hausseEff) || {}).valeur;
+  const optHausse = options.find((o) => o.valeur === hausseEff);
+  const optBaisse = options.find((o) => o.valeur === baisseEff);
+
+  /* Le sens attendu d'une hausse, pour colorer les écarts de la répartition —
+     uniquement pour les critères explicitement désignés. Ailleurs, le
+     comportement d'avant : une hausse reste neutre-favorable faute de savoir. */
+  const sensAttendu = {};
+  if (valide(critereHausse)) sensAttendu[critereHausse] = true;
+  if (valide(critereBaisse)) sensAttendu[critereBaisse] = false;
+
+  const suffixe = unite === 'pct' ? ' %' : (mesure === 'occurrences' ? '' : ' min');
+  const tranches = chronologieSuivi(segments, gran, mesure);
+  /* Une tranche où l'axe du critère n'a rien de borné laisse un trou, pas un
+     zéro : le critère n'y était pas à zéro, il n'y a rien eu d'observé sur son
+     axe. Un zéro n'est écrit que si l'axe, lui, a été observé. */
+  const valeurSerie = (t, opt) => {
+    if (!opt) return null;
+    const s = t.series[opt.valeur];
+    if (s) return unite === 'pct' ? s.part : s.valeur;
+    return Object.values(t.series).some((x) => x.nomAxe === opt.nomAxe) ? 0 : null;
+  };
+  const donneesGraphe = tranches.map((t) => ({
+    label: t.label,
+    hausse: valeurSerie(t, optHausse),
+    baisse: valeurSerie(t, optBaisse),
+  }));
+
+  /* Les deux tendances se calculent sur les seules tranches où les deux
+     critères sont connus : comparer deux droites ajustées sur des supports
+     différents ferait dire à leur croisement une chose qu'aucune des deux ne
+     dit. */
+  const communes = [];
+  donneesGraphe.forEach((d, i) => { if (d.hausse != null && d.baisse != null) communes.push(i); });
+  const fitHausse = tendanceLineaire(communes.map((i) => donneesGraphe[i].hausse));
+  const fitBaisse = tendanceLineaire(communes.map((i) => donneesGraphe[i].baisse));
+  if (fitHausse && fitBaisse) {
+    communes.forEach((i, k) => {
+      donneesGraphe[i].tHausse = fitHausse[k];
+      donneesGraphe[i].tBaisse = fitBaisse[k];
+    });
+  }
+  const croisement = croisementTendances(fitHausse, fitBaisse);
+  const trancheCroisement = croisement ? donneesGraphe[communes[Math.round(croisement.index)]] : null;
+
+  /* Deux critères peuvent porter la même couleur (deux axes réglés
+     séparément côté DatABA) : les deux courbes seraient alors
+     indiscernables. La seconde bascule sur la palette catégorielle. */
+  const couleurHausse = optHausse ? optHausse.meta.color : INK_SOFT;
+  const couleurBaisseBrute = optBaisse ? optBaisse.meta.color : INK_SOFT;
+  const couleurBaisse = couleurBaisseBrute === couleurHausse
+    ? (PALETTE_SERIES.find((c) => c !== couleurHausse) || CAT_SLATE)
+    : couleurBaisseBrute;
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-1.5 mb-3">
+        <Chip label="Frise du jour" on={mode === 'frise'} onClick={() => setMode('frise')} />
+        <Chip label="Graphique" on={mode === 'graphique'} onClick={() => setMode('graphique')} />
+      </div>
+
+      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+        Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
+        changement d'état : une durée pas encore connue n'entre pas dans un pourcentage.
+      </p>
+
+      {mode === 'frise' && (
+        <>
+          {/* Une pastille par jour coté devenait illisible dès quelques
+              semaines de relevés : la ligne ci-dessous tient la même
+              information quelle que soit la quantité de données, et ne
+              propose que des journées réellement cotées. */}
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <Btn variant="outline" className="text-xs px-2 py-1.5"
+              disabled={iJour >= jours.length - 1}
+              onClick={() => setJourChoisi(jours[iJour + 1])} title="Journée cotée précédente">
+              <ChevronLeft size={14} />
+            </Btn>
+            <select value={jourAffiche} onChange={(e) => setJourChoisi(e.target.value)}
+              className="rounded-lg border px-2 py-1.5 text-xs"
+              style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }}>
+              {jours.map((j) => <option key={j} value={j}>{libelleJour(j, false)}</option>)}
+            </select>
+            <Btn variant="outline" className="text-xs px-2 py-1.5"
+              disabled={iJour <= 0}
+              onClick={() => setJourChoisi(jours[iJour - 1])} title="Journée cotée suivante">
+              <ChevronRight size={14} />
+            </Btn>
+            <span className="text-xs" style={{ color: INK_SOFT }}>
+              {jours.length} journée{jours.length !== 1 ? 's' : ''} cotée{jours.length !== 1 ? 's' : ''} sur la période
+            </span>
+          </div>
+
+          <div className="space-y-4">
+            {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => {
+              const rsJour = rs.filter((r) => jourLocal(r.timestamp) === jourAffiche)
+                .slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+              const segmentsJour = segmentsJournee(rsJour);
+              const repar = repartitionCriteres(segmentsSuivi(rs));
+              const reparRef = referencePeriode ? repartitionCriteres(segmentsSuivi(parAxeRef.get(nomAxeVal) || [])) : null;
+              return (
+                <Card key={nomAxeVal}>
+                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''} sur la période</span>
+                  </div>
+
+                  {segmentsJour.length > 0 ? (
+                    <div className="mb-4"><FriseSuivi segments={segmentsJour} /></div>
+                  ) : (
+                    <div className="text-xs mb-4" style={{ color: INK_SOFT }}>Rien de coté ce jour-là sur cet axe.</div>
+                  )}
+
+                  <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>
+                    Sur la période{referencePeriode ? ` · écart vs ${libelleComparaison(periode)}` : ''}
+                  </div>
+                  <div className="space-y-1.5">
+                    {repar.lignes.map((l) => {
+                      const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
+                      const favorable = sensAttendu[cleSerieSuivi(nomAxeVal, l.cle)] !== false;
+                      return (
+                        <div key={String(l.cle)} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
+                          <span className="flex items-center gap-1.5 min-w-0">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
+                            <span className="truncate">
+                              {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
+                            </span>
+                          </span>
+                          {/* Durée et occurrences côte à côte : un critère peut
+                              peser peu de temps en revenant souvent. Chacun avec
+                              sa part et son écart, pour lire la même période sous
+                              les deux angles. */}
+                          <span className="flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0" style={{ fontFamily: F_MONO }}>
+                            <span className="flex items-center gap-1.5">
+                              <span>{minutes(l.ms)} min</span>
+                              {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" hausseFavorable={favorable} />}
+                              {l.part != null && <span style={{ color: INK_SOFT }}>{l.part} %</span>}
+                              {referencePeriode && l.part != null && <Ecart valeur={l.part} reference={ref ? ref.part : null} unite=" pts" hausseFavorable={favorable} />}
+                            </span>
+                            <span className="flex items-center gap-1.5">
+                              <span>{l.n} occ.</span>
+                              {referencePeriode && <Ecart valeur={l.n} reference={ref ? ref.n : null} hausseFavorable={favorable} />}
+                              {l.partN != null && <span style={{ color: INK_SOFT }}>{l.partN} %</span>}
+                              {referencePeriode && l.partN != null && <Ecart valeur={l.partN} reference={ref ? ref.partN : null} unite=" pts" hausseFavorable={favorable} />}
+                            </span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {repar.nonBornes > 0 && (
+                      <div className="text-xs" style={{ color: INK_SOFT }}>
+                        {repar.nonBornes} relevé{repar.nonBornes !== 1 ? 's' : ''} sans durée connue, exclu{repar.nonBornes !== 1 ? 's' : ''} de ces chiffres.
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {mode === 'graphique' && (
+        options.length < 2 ? (
+          <Empty>Il faut deux critères avec au moins une durée connue pour les comparer.</Empty>
+        ) : (
+          <Card>
+            <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+              <div>
+                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Critère à faire augmenter</div>
+                <select value={hausseEff} onChange={(e) => setCritereHausse(e.target.value)}
+                  className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
+                  {axesDesOptions.map((a) => (
+                    <optgroup key={a} label={a}>
+                      {options.filter((o) => o.nomAxe === a).map((o) => (
+                        <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>Critère à faire diminuer</div>
+                <select value={baisseEff} onChange={(e) => setCritereBaisse(e.target.value)}
+                  className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
+                  {axesDesOptions.map((a) => (
+                    <optgroup key={a} label={a}>
+                      {options.filter((o) => o.nomAxe === a).map((o) => (
+                        <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 mb-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
+                <Chip label="Durée" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
+                <Chip label="Occurrences" on={mesure === 'occurrences'} onClick={() => setMesure('occurrences')} />
+              </div>
+              <BasculeUnite unite={unite} setUnite={setUnite} />
+            </div>
+
+            <div style={{ height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={donneesGraphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
+                  <CartesianGrid stroke={BORDER} vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+                  <YAxis domain={unite === 'pct' ? [0, 100] : undefined} allowDecimals={false}
+                    tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
+                    formatter={(v) => `${v}${suffixe}`} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {trancheCroisement && (
+                    <ReferenceLine x={trancheCroisement.label} stroke={INK_SOFT} strokeDasharray="3 3" />
+                  )}
+                  <Line dataKey="hausse" name={optHausse ? nomSerie(optHausse) : ''} stroke={couleurHausse}
+                    strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
+                  <Line dataKey="baisse" name={optBaisse ? nomSerie(optBaisse) : ''} stroke={couleurBaisse}
+                    strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
+                  {/* Tendances : même couleur que leur série, en pointillé fin.
+                      C'est ce qui les rattache à l'une ou à l'autre — avec deux
+                      séries, une couleur de contraste ne dirait plus de quelle
+                      courbe la droite parle. */}
+                  {fitHausse && (
+                    <Line dataKey="tHausse" name={`Tendance · ${optHausse ? nomCritere(optHausse) : ''}`} stroke={couleurHausse}
+                      strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
+                  )}
+                  {fitBaisse && (
+                    <Line dataKey="tBaisse" name={`Tendance · ${optBaisse ? nomCritere(optBaisse) : ''}`} stroke={couleurBaisse}
+                      strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
+                  )}
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
+              {!fitHausse || !fitBaisse ? (
+                <div>Les tendances demandent au moins trois tranches où les deux critères sont connus.</div>
+              ) : trancheCroisement ? (
+                <div>Les deux tendances se croisent au niveau de <span style={{ fontFamily: F_MONO, color: INK }}>{trancheCroisement.label}</span>.</div>
+              ) : (
+                <div>Les deux tendances ne se croisent pas sur la période affichée ; elles ne sont pas prolongées au-delà.</div>
+              )}
+              <div>
+                {unite === 'pct'
+                  ? `Chaque part est calculée sur ${mesure === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
+                  : `Chaque point cumule ${mesure === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
+                {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
+              </div>
+            </div>
+          </Card>
+        )
+      )}
+    </>
+  );
+}
+
 function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises }) {
   const [vue, setVue] = useState('objectifs');
   const style = graphe.style;
@@ -3816,12 +4275,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
   const [classeFiltre, setClasseFiltre] = useState('');
-  /* Journée affichée dans la frise de suivi continu. null = pas de choix
-     explicite, la dernière journée cotée sert de défaut — calculé par
-     dérivation au moment du rendu (voir vue === 'suivi'), pas par un effet :
-     un effet ici tournerait après le retour anticipé plus bas selon que la
-     personne a ou non des relevés, et changerait l'ordre des hooks. */
-  const [jourChoisi, setJourChoisi] = useState(null);
   /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
      cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
      peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
@@ -3861,7 +4314,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
     setDeplies(objectifOuvert ? [objectifOuvert] : []);
     setAgrandi(null);
     setNonRetenusPdf([]);
-    setJourChoisi(null);
+    /* L'état du suivi continu (journée affichée, critères comparés) n'est pas
+       remis à zéro ici : SuiviContinuVue est monté avec `key={personne}` et
+       repart neuf de lui-même. */
     /* Amener directement sur l'objectif visé, sans exiger un défilement
        manuel : la sous-vue passe à « Bilan des objectifs » (seule à
        afficher les cartes) et le défilement est demandé pour le rendu qui
@@ -4043,7 +4498,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
          des objectifs : passés à `extra` seulement dans cette sous-vue,
          plutôt que rendus (et donc collants) sous les quatre autres, où ils
          ne s'appliquent pas. */}
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement'}
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement' || vue === 'suivi'}
         avecComparaison collant
         comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'}
         resumeExtra={vue === 'objectifs' ? resumeGraphePersonnes : null}
@@ -4233,122 +4688,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         </>
       )}
 
-      {vue === 'suivi' && (() => {
-        const tousReleves = suiviDePersonne(donnees, personne);
-        const releves = tousReleves.filter((r) => dansPeriode(r.timestamp, periode));
-        if (!releves.length) return <Empty>Aucun relevé de suivi continu sur la période.</Empty>;
-
-        const referencePeriode = periodeComparee(periode);
-        const relevesRef = referencePeriode ? tousReleves.filter((r) => dansPeriode(r.timestamp, referencePeriode)) : [];
-
-        /* Une carte par axe : le nombre d'axes n'est pas borné côté DatABA. */
-        const parAxeMap = (liste) => {
-          const m = new Map();
-          liste.forEach((r) => {
-            if (!m.has(r.nomAxe)) m.set(r.nomAxe, []);
-            m.get(r.nomAxe).push(r);
-          });
-          return m;
-        };
-        const parAxe = parAxeMap(releves);
-        const parAxeRef = parAxeMap(relevesRef);
-
-        /* Segments de toutes les journées d'un axe, mises bout à bout : c'est
-           ce qui nourrit la répartition par critère sur la période entière,
-           quand la frise elle-même n'en montre qu'une. */
-        const segmentsAxe = (relevesAxe) => {
-          const parJour = new Map();
-          relevesAxe.forEach((r) => {
-            const j = jourLocal(r.timestamp);
-            if (!parJour.has(j)) parJour.set(j, []);
-            parJour.get(j).push(r);
-          });
-          let tous = [];
-          parJour.forEach((rs) => {
-            const triees = rs.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-            tous = tous.concat(segmentsJournee(triees));
-          });
-          return tous;
-        };
-
-        /* Journées cotées sur la période, toutes colonnes confondues, la plus
-           récente en tête : c'est parmi elles que se choisit la frise. Le
-           choix explicite (jourChoisi) est ignoré s'il ne fait plus partie de
-           la période affichée — dérivé au rendu, pas par un effet. */
-        const jours = Array.from(new Set(releves.map((r) => jourLocal(r.timestamp)))).sort().reverse();
-        const jourAffiche = jourChoisi && jours.includes(jourChoisi) ? jourChoisi : jours[0];
-        const minutes = (ms) => Math.round(ms / 60000);
-
-        return (
-          <>
-            <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-              Les durées ci-dessous excluent les relevés jamais bornés par une clôture ou un
-              changement d'état : une durée pas encore connue n'entre pas dans un pourcentage.
-            </p>
-
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {jours.map((j) => (
-                <button key={j} onClick={() => setJourChoisi(j)}
-                  className="rounded-lg px-2.5 py-1.5 text-xs border"
-                  style={{ borderColor: j === jourAffiche ? ACCENT : BORDER,
-                    backgroundColor: j === jourAffiche ? ACCENT_WASH : 'transparent',
-                    color: j === jourAffiche ? ACCENT : INK_SOFT, fontFamily: F_MONO }}>
-                  {new Date(`${j}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })}
-                </button>
-              ))}
-            </div>
-
-            <div className="space-y-4">
-              {Array.from(parAxe.entries()).map(([nomAxeVal, rs]) => {
-                const rsJour = rs.filter((r) => jourLocal(r.timestamp) === jourAffiche)
-                  .slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-                const segments = segmentsJournee(rsJour);
-                const repar = repartitionCriteres(segmentsAxe(rs));
-                const reparRef = referencePeriode ? repartitionCriteres(segmentsAxe(parAxeRef.get(nomAxeVal) || [])) : null;
-                return (
-                  <Card key={nomAxeVal}>
-                    <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
-                      {nomAxeVal} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· {rs.length} relevé{rs.length !== 1 ? 's' : ''} sur la période</span>
-                    </div>
-
-                    {segments.length > 0 ? (
-                      <div className="mb-4"><FriseSuivi segments={segments} /></div>
-                    ) : (
-                      <div className="text-xs mb-4" style={{ color: INK_SOFT }}>Rien de coté ce jour-là sur cet axe.</div>
-                    )}
-
-                    <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>Sur la période</div>
-                    <div className="space-y-1.5">
-                      {repar.lignes.map((l) => {
-                        const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
-                        return (
-                          <div key={String(l.cle)} className="flex items-center justify-between gap-2 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
-                            <span className="flex items-center gap-1.5 min-w-0">
-                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
-                              <span className="truncate">
-                                {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
-                              </span>
-                            </span>
-                            <span className="flex items-center gap-2 shrink-0" style={{ fontFamily: F_MONO }}>
-                              <span>{minutes(l.ms)} min{l.part != null ? ` · ${l.part} %` : ''}</span>
-                              {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" />}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      {repar.nonBornes > 0 && (
-                        <div className="text-xs" style={{ color: INK_SOFT }}>
-                          {repar.nonBornes} relevé{repar.nonBornes !== 1 ? 's' : ''} sans durée connue, exclu{repar.nonBornes !== 1 ? 's' : ''} de ces chiffres.
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                );
-              })}
-            </div>
-          </>
-        );
-      })()}
+      {vue === 'suivi' && (
+        <SuiviContinuVue key={personne} donnees={donnees} personne={personne} periode={periode} />
+      )}
 
       {vue === 'croisement' && (
         croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
