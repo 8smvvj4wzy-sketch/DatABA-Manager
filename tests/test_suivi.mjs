@@ -36,10 +36,13 @@ function extraireLigne(nom) {
 }
 
 const NOMS = [
-  'fusionnerImport', 'fusionnerClasses', 'idPourSource',
+  'fusionnerParId', 'fusionnerImport', 'fusionnerClasses', 'idPourSource',
   'axeDe', 'metaCritereSuivi', 'axeEtCritereDuReleve', 'suiviDePersonne',
+  'compteursDePersonne',
 ];
 const code = [
+  `const estReleveCompteur = ${extraireLigne('estReleveCompteur')};`,
+  `const nomCompteurDe = ${extraireLigne('nomCompteurDe')};`,
   `const ACQUIS = '#0F8B6C'; const EN_COURS = '#D69A2D'; const NON_ACQUIS = '#A8402F'; const INK_SOFT = '#6B7280'; const CAT_INDIGO = '#3B5BDB';`,
   `const CRITERE_INCONNU_SUIVI = ${extraireLigne('CRITERE_INCONNU_SUIVI')};`,
   extraire('VIDE'),
@@ -137,6 +140,19 @@ const historique = suiviDePersonne(donneesMixtes, 'L.M.');
 t('les deux formats apparaissent dans le même historique', historique.length, 2);
 t('trié du plus récent au plus ancien', historique.map((r) => r.id), ['r1', 'r0']);
 t('une personne sans relevé n a pas d historique', suiviDePersonne(donneesMixtes, 'X.X.'), []);
+
+/* Un appui de compteur d'occurrence partage la table `suivi` avec les relevés
+   d'état sans en être un : il n'a ni axe ni critère, et le laisser entrer ici
+   lui faisait inventer une durée jusqu'à l'appui suivant. Couverture complète
+   dans test_compteurs.mjs — cette assertion garde la porte fermée du côté du
+   suivi lui-même. */
+const avecCompteur = {
+  ...donneesMixtes,
+  suivi: [...donneesMixtes.suivi,
+    { id: 'k1', studentId: 'a1', timestamp: '2026-05-04T09:00:00.000Z', compteurId: 'c1', kind: 'compteur', source: 'tabA' }],
+};
+t('un appui de compteur n entre pas dans l historique de suivi',
+  suiviDePersonne(avecCompteur, 'L.M.').map((r) => r.id), ['r1', 'r0']);
 
 console.log(`\n${ok} réussis, ${ko} en échec`);
 process.exit(ko ? 1 : 0);

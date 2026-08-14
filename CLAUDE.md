@@ -13,7 +13,7 @@ disent, ils ne se lissent pas.
 
 ## Architecture
 
-Tout tient dans `src/App.jsx` (~6 800 lignes). Assumé, ne pas proposer de
+Tout tient dans `src/App.jsx` (~6 900 lignes). Assumé, ne pas proposer de
 découpage sans que je le demande.
 
 Données consolidées : un seul bloc JSON dans `localStorage`, chiffré, sous la
@@ -40,7 +40,7 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 22 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 23 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
@@ -69,6 +69,22 @@ rouge.
   les mêmes relevés dans les deux clés (alias de compatibilité côté DatABA) ;
   les additionner les dupliquerait. `fusionnerImport` regarde si `backup.suivi`
   est défini (même vide) avant de retomber sur `backup.stabilite`.
+- **Un relevé `kind: 'compteur'` n'est pas un état.** Les compteurs
+  d'occurrence de DatABA (« demandes ») voyagent dans `suivi`, mêlés aux
+  relevés d'état, mais un appui est ponctuel : il n'a ni axe, ni critère, ni
+  durée jusqu'au suivant. `suiviDePersonne` les écarte, `compteursDePersonne`
+  les prend, et rien de ce qui passe par `segmentsJournee` ne doit en voir.
+  Les avoir laissés entrer donnait huit appuis « demandes » sous forme de sept
+  segments d'une durée jamais observée, tous confondus sur un axe fantôme
+  « Suivi retiré ». Leur nom vient de `students[].compteurs` à l'import, rangé
+  dans `_compteurs` par source comme `_ateliers` — une nouvelle table par
+  source doit être ajoutée aussi à la purge par source, à
+  `construirePaquetExport` et au backup synthétique d'`integrerManager`.
+- **Le fichier importé gagne.** `fusionnerParId` remplace un enregistrement
+  déjà connu par sa version entrante — c'est ce qui fait remonter une séance
+  re-cotée ou une crise complétée après coup. Contrepartie assumée :
+  réimporter un fichier plus ancien que ce qui est consolidé fait régresser
+  les enregistrements concernés, aucune date de version n'étant comparée.
 - **`BlocsCrise` est partagé** entre l'écran et l'impression. Ne pas en créer
   une seconde version pour l'impression : deux blocs de rendu qui se
   ressemblent finissent par diverger, et c'est déjà arrivé — un bloc

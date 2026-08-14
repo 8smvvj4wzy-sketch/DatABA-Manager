@@ -38,6 +38,12 @@ function extraire(nom) {
   }
   throw new Error(`Fin de déclaration introuvable : ${nom}`);
 }
+function extraireLigne(nom) {
+  const re = new RegExp(`^const ${nom} = (.+);$`, 'm');
+  const m = source.match(re);
+  if (!m) throw new Error(`Constante introuvable (ligne unique) dans src/App.jsx : ${nom}`);
+  return m[1];
+}
 
 /* `nomAtelier` et `nomAffiche` ne sont pas extraits mais remplacés par des
    doublures : ce sont des constantes fléchées d'une seule ligne, et
@@ -45,11 +51,13 @@ function extraire(nom) {
    les déclarations suivantes. Seule la segmentation par intensité est
    exercée ici, ces deux-là ne servent qu'aux autres découpages. */
 const NOMS = [
-  'jourLocal', 'joursObserves', 'suiviDePersonne', 'axeEtCritereDuReleve',
+  'jourLocal', 'joursObserves', 'suiviDePersonne', 'compteursDePersonne', 'axeEtCritereDuReleve',
   'axeDe', 'metaCritereSuivi', 'cleAgregation',
   'etiquetteAgregation', 'valeursSegment', 'chronologieCrises',
 ];
 const code = [
+  `const estReleveCompteur = ${extraireLigne('estReleveCompteur')};`,
+  `const nomCompteurDe = ${extraireLigne('nomCompteurDe')};`,
   `const INK_SOFT = '#6B7280'; const ACQUIS = '#0F8B6C'; const EN_COURS = '#D69A2D';`,
   `const NON_ACQUIS = '#A8402F'; const CAT_INDIGO = '#3B5BDB'; const SERIES_MAX = 6;`,
   `const CRITERE_INCONNU_SUIVI = { k: null, l: 'Critère retiré', color: INK_SOFT };`,
