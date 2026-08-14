@@ -13,7 +13,7 @@ disent, ils ne se lissent pas.
 
 ## Architecture
 
-Tout tient dans `src/App.jsx` (~4 900 lignes). Assumé, ne pas proposer de
+Tout tient dans `src/App.jsx` (~6 800 lignes). Assumé, ne pas proposer de
 découpage sans que je le demande.
 
 Données consolidées : un seul bloc JSON dans `localStorage`, chiffré, sous la
@@ -40,7 +40,7 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 15 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 22 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
