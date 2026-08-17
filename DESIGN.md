@@ -164,9 +164,17 @@ pas d'attribution unique valable partout :
   `PALETTE_SERIES` (indigo, corail, ambre, teal, violet, cyan), donc les
   lectures superposées y restent en `ink` et `ink-soft` pointillés — le
   contraste tient puisque les barres, elles, sont colorées.
+- **Graphiques du suivi continu** (`SuiviContinuVue`) : chaque série prend la
+  couleur de son critère ou de son compteur — la couleur vient de la donnée,
+  comme la pastille de la frise et de la répartition — sauf collision avec
+  une couleur déjà prise dans la même sélection, où elle bascule sur
+  `PALETTE_SERIES`. Chaque tendance reprend la couleur de **sa propre série**,
+  en pointillé fin : avec plusieurs séries choisies librement (pas deux fixes
+  comme dans `Graphique`), c'est l'appariement tendance↔courbe qui prime sur
+  le contraste — une couleur de lecture unique ne dirait plus de laquelle
+  chaque droite parle.
 
-Ne pas « harmoniser » ces deux attributions : elles diffèrent pour une
-raison.
+Ne pas « harmoniser » ces attributions : elles diffèrent pour une raison.
 
 ### Named Rules
 Les deux règles nommées de DatABA s'appliquent ici à l'identique : **Règle
