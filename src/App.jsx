@@ -412,6 +412,12 @@ function fusionnerImport(actuel, backup, nomSource) {
      un export ultérieur qui aurait perdu un code ne doit pas rendre muettes
      les cotations passées qui s'en servent. Le fichier entrant gagne sur un
      code déjà connu — c'est lui qui porte le drapeau `independent` à jour. */
+  const axesSource = (() => {
+    const parId = new Map(((actuel._axesSuivi || {})[nomSource] || []).map((a) => [a.id, a]));
+    (backup.axesSuivi || []).forEach((a) => { if (a && a.id) parId.set(a.id, a); });
+    return Array.from(parId.values());
+  })();
+
   const guidancesSource = (() => {
     const parCode = new Map(((actuel._guidances || {})[nomSource] || []).map((g) => [g.code, g]));
     (backup.guidances || []).forEach((g) => {
@@ -478,7 +484,13 @@ function fusionnerImport(actuel, backup, nomSource) {
        autres l'ont maintenant. */
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: { ...((actuel._idVersInitiales || {})[nomSource] || {}), ...idVersInitiales } },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: { ...((actuel._ateliers || {})[nomSource] || {}), ...ateliersSource } },
-    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
+    /* Fusionnés par id, comme les quatre autres tables par source. Le
+       remplacement pur était le seul écart du lot : un second export de la
+       même tablette dont un axe avait été retiré faisait basculer tous les
+       relevés passés qui s'y rattachaient en « Suivi retiré », alors qu'ils
+       restaient bien en base. Le fichier entrant gagne sur un axe déjà connu,
+       c'est lui qui porte les critères à jour. */
+    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: axesSource },
     collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
     _compteurs: { ...(actuel._compteurs || {}), [nomSource]: { ...((actuel._compteurs || {})[nomSource] || {}), ...compteursSource } },
@@ -1068,6 +1080,7 @@ function construireFaits(donnees, lignes) {
            hors du taux, elle, mais parce que ce n'est pas un pourcentage. */
         const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
         const score = m && m.unite === '%' ? m.valeur : null;
+        const app = mesuresAppoint(entry);
         cotations.push({
           seanceId: sess.id,
           date: sess.date,
@@ -1078,6 +1091,12 @@ function construireFaits(donnees, lignes) {
           type: (TYPES_COTATION[obj.type] || obj.type),
           phase: obj.activePhaseName || 'Non renseignée',
           score,
+          /* Mesures d'appoint : sur la table des cotations et non à part, elles
+             n'existent que rattachées à l'une d'elles. null quand rien n'a été
+             validé — `agreger` écarte les null, la case reste donc vide plutôt
+             que de compter un zéro qui n'a pas été mesuré. */
+          compteurAppoint: app ? app.compteur : null,
+          chronoAppointMin: minutesAppoint(app),
         });
       });
     });
@@ -1089,6 +1108,14 @@ function construireFaits(donnees, lignes) {
       date: c.date,
       personne: table[c.studentId] || 'Non renseignée',
       atelier: nomAtelier(donnees, c.source, c.atelierId),
+      /* DatABA note plusieurs intervenants sur une crise (`intervenantIds`).
+         Le champ arrivait bien à l'import et n'était lu nulle part : les
+         séances et les relevés portaient leur intervenant dans les faits, les
+         crises non, si bien que le croisement crises × intervenant était le
+         seul à ne pas exister. Plusieurs noms sont joints plutôt que réduits au
+         premier — écarter les autres inventerait une attribution unique que la
+         tablette n'a pas faite. */
+      intervenant: (c.intervenantIds || []).map((id) => nomIntervenant(c.source, id)).join(', ') || 'Non renseigné',
       type: (c.kind || 'crise') === 'abc' ? 'Observation' : 'Crise',
       intensite: c.intensite ? `${c.intensite} · ${INTENSITES[c.intensite].label}` : 'Non renseignée',
       intensiteNum: c.intensite || null,
@@ -1126,6 +1153,7 @@ function construireFaits(donnees, lignes) {
           intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
           axe,
           critere: seg.meta.l,
+          origine: libelleOrigineReleve(porteur && porteur.origine),
           minutes: Math.round(seg.ms / 60000),
         });
       });
@@ -1145,6 +1173,7 @@ function construireFaits(donnees, lignes) {
         compteur: r.nomCompteur,
         atelier: nomAtelier(donnees, r.source, r.atelierId),
         intervenant: nomIntervenant(r.source, r.intervenantId),
+        origine: libelleOrigineReleve(r.origine),
       });
     });
   });
@@ -1278,6 +1307,14 @@ function axeEtCritereDuReleve(donnees, releve, estV4) {
    absent. D'où la séparation à la source : suiviDePersonne les écarte,
    compteursDePersonne les prend. */
 const estReleveCompteur = (r) => !!r && r.kind === 'compteur';
+
+/* Geste qui a produit un relevé, côté DatABA : un appui sur la pastille de
+   suivi, la clôture de la journée, ou une saisie a posteriori. Le champ arrive
+   sous le nom `source` et `fusionnerImport` le renomme `origine`, `source`
+   désignant ici la tablette. Il était conservé depuis toujours et n'apparaissait
+   nulle part : un axe de croisement de plus, pas une donnée de plus. */
+const ORIGINES_RELEVE = { pastille: 'Pastille', cloture: 'Clôture de journée', manuel: 'Saisie manuelle' };
+const libelleOrigineReleve = (o) => ORIGINES_RELEVE[o] || 'Non renseignée';
 
 /* Relevés de suivi continu d'une personne, v4 et v3 réunis et triés du plus
    récent au plus ancien. Chaque entrée porte de quoi s'afficher sans
@@ -2000,6 +2037,46 @@ function valeurCotation(obj, entry, guidances) {
   return null;
 }
 
+/* Compteur et chronomètre d'appoint, que DatABA attache à n'importe quelle
+   cotation quel que soit son mode (widget `MesuresAuxiliaires`, activé par
+   `config.avecCompteur` / `avecChrono`). Ce ne sont pas des scores : ils
+   accompagnent la cotation sans la remplacer, et n'entrent donc ni dans
+   `points` ni dans `mesures`.
+
+   `valideA` fait foi, exactement comme dans `mesuresExport` côté DatABA : il
+   distingue « pas encore mesuré » (null) de « mesuré à zéro », et lire
+   `total` sans lui ferait apparaître un zéro partout où le widget n'a jamais
+   servi. Rend null quand rien n'a été validé — l'appelant n'affiche alors
+   rien du tout. */
+function mesuresAppoint(entry) {
+  const c = entry && entry.mesures && entry.mesures.compteur;
+  const h = entry && entry.mesures && entry.mesures.chrono;
+  const compteur = c && c.valideA ? (c.total || 0) : null;
+  const secondes = h && h.valideA ? Math.round((h.elapsedMs || 0) / 1000) : null;
+  if (compteur == null && secondes == null) return null;
+  return { compteur, secondes };
+}
+
+/* Durée d'appoint en minutes, pour la table de faits et les mesures d'Explorer
+   — les durées de suivi continu y sont déjà en minutes, mélanger les unités
+   dans une même colonne d'un tableau croisé n'aurait pas de sens. */
+const minutesAppoint = (m) => (m && m.secondes != null ? Math.round(m.secondes / 60) : null);
+
+/* Libellé court d'une mesure d'appoint, pour l'afficher à côté de la cotation
+   qu'elle accompagne. Les secondes restent des secondes ici : à l'échelle
+   d'une cotation, arrondir 40 secondes à 1 minute perdrait la mesure. */
+function libelleAppoint(m) {
+  if (!m) return null;
+  const bouts = [];
+  if (m.compteur != null) bouts.push(`compteur ${m.compteur}`);
+  if (m.secondes != null) {
+    bouts.push(m.secondes >= 60
+      ? `chrono ${Math.floor(m.secondes / 60)} min ${String(m.secondes % 60).padStart(2, '0')} s`
+      : `chrono ${m.secondes} s`);
+  }
+  return bouts.join(' · ');
+}
+
 /* Détail des cotations d'une personne sur une période, au niveau de
    l'essai/étape/intervalle — pas du score agrégé de la séance
    (`construireFaits` s'arrête là). Une ligne par élément brut pour les
@@ -2019,17 +2096,24 @@ function detailCotationsPersonne(donnees, personne, periode) {
     const sid = Object.keys(table).find((k) => table[k] === personne);
     if (!sid || !(sess.studentIds || []).includes(sid)) return;
 
-    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    const atelier = libelleSeance(donnees, sess);
     const intervenant = nomIntervenant(sess.source, sess.intervenantId);
 
     ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
       const obj = (sess.objectiveSnapshot || {})[oid];
       const entry = (sess.data || {})[sid] && sess.data[sid][oid];
       if (!obj || !entry) return;
+      /* Mesures d'appoint portées sur chaque ligne du détail, comme le fait
+         déjà l'export CSV de DatABA : elles valent pour la cotation entière,
+         pas pour l'essai, mais les répéter est le seul moyen de les faire
+         voyager dans un tableau à plat. Vides quand rien n'a été validé. */
+      const app = mesuresAppoint(entry);
       const base = {
         date: sess.date, seanceId: sess.id, atelier, intervenant,
         objectif: obj.name, code: codeEflDe(donnees, obj.name),
         type: TYPES_COTATION[obj.type] || obj.type,
+        compteurAppoint: app && app.compteur != null ? app.compteur : '',
+        chronoAppoint: app && app.secondes != null ? app.secondes : '',
       };
 
       if (obj.type === 'trials') {
@@ -3358,6 +3442,11 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                      l'occurrence. La valeur est rendue avec son unité : un
                      compteur à douze n'est pas un score de douze pour cent. */
                   const m = valeurCotation(obj, entry, guidancesDe(donnees, seance.source));
+                  /* Compteur et chrono d'appoint : saisis en séance sur
+                     n'importe quel mode, ils n'arrivaient nulle part ici. À
+                     côté de la cotation, jamais à sa place — ce n'est pas un
+                     score. */
+                  const appoint = libelleAppoint(mesuresAppoint(entry));
                   return (
                     <div key={oid} className="flex items-baseline justify-between gap-2 text-xs py-0.5">
                       <span className="min-w-0 break-words">
@@ -3372,6 +3461,7 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                         {obj.type === 'probe' && entry && libelleCreneauProbe(entry.creneau) && (
                           <span style={{ color: INK_SOFT }}> · {libelleCreneauProbe(entry.creneau)}</span>
                         )}
+                        {appoint && <span style={{ color: INK_SOFT }}> · {appoint}</span>}
                       </span>
                       <span className="shrink-0" style={{ fontFamily: F_MONO, color: m == null ? INK_SOFT : INK }}>
                         {m == null ? 'non coté' : `${m.valeur} ${m.unite}`}
@@ -5266,10 +5356,16 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   }
   function exporterDetailCsv() {
     const detail = detailCotationsPersonne(donnees, personne, periode);
-    const enTete = ['Date', 'Séance', 'Atelier', 'Intervenant', 'Objectif', 'Code', 'Type', 'Unité', 'Repère', 'Valeur'];
+    /* Les deux dernières colonnes sont les mesures d'appoint de la cotation —
+       mêmes cellules que l'export CSV de DatABA, vides tant que rien n'a été
+       validé. Elles valent pour la cotation entière et non pour l'essai : les
+       lignes d'une même cotation les répètent. */
+    const enTete = ['Date', 'Séance', 'Atelier', 'Intervenant', 'Objectif', 'Code', 'Type', 'Unité', 'Repère', 'Valeur',
+      "Compteur d'appoint", "Chrono d'appoint (s)"];
     const rangees = detail.map((l) => [
       new Date(l.date).toLocaleDateString('fr-FR'), l.seanceId, l.atelier, l.intervenant,
       l.objectif, l.code, l.type, l.unite, l.repere, l.valeur,
+      l.compteurAppoint, l.chronoAppoint,
     ]);
     telechargerCsv(enTete, rangees, `detail-${nomFichierDetail('csv')}`);
   }
@@ -5606,6 +5702,14 @@ const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
   { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %', hausseFavorable: true },
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  /* Compteur et chronomètre d'appoint, saisis en séance à côté de la cotation.
+     « D'appoint » est dans le libellé et pas seulement dans le commentaire :
+     ce que compte le widget est décidé objectif par objectif, si bien qu'une
+     somme prise sur une dimension qui mélange les objectifs additionne des
+     grandeurs sans rapport. Croisées par Objectif, ou par Personne × Objectif,
+     les deux mesures rendent un chiffre homogène. */
+  { k: 'compteurAppoint', label: "Compteur d'appoint (somme)", source: 'cotations', agg: 'somme', champ: 'compteurAppoint', hausseFavorable: true },
+  { k: 'chronoAppoint', label: "Chronomètre d'appoint (durée cumulée)", source: 'cotations', agg: 'somme', champ: 'chronoAppointMin', suffixe: ' min', hausseFavorable: true },
   { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte', hausseFavorable: false },
   { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
   { k: 'dureeMoyenneCrise', label: 'Durée moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
@@ -5633,7 +5737,7 @@ const DIMENSIONS = [
   { k: 'aucune', label: 'Aucune', get: () => 'Total' },
   { k: 'personne', label: 'Personne', get: (f) => f.personne },
   { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
-  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi', 'compteurs'] },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
   { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—', sources: ['cotations', 'objectifs'] },
   { k: 'type', label: 'Type', get: (f) => f.type || '—', sources: ['cotations', 'crises', 'objectifs'] },
   { k: 'phase', label: 'Phase', get: (f) => f.phase || '—', sources: ['cotations'] },
@@ -5641,6 +5745,10 @@ const DIMENSIONS = [
   { k: 'axe', label: 'Axe de suivi', get: (f) => f.axe || '—', sources: ['suivi'] },
   { k: 'critere', label: 'Critère de suivi', get: (f) => f.critere || '—', sources: ['suivi'] },
   { k: 'compteur', label: "Compteur d'occurrence", get: (f) => f.compteur || '—', sources: ['compteurs'] },
+  /* Geste qui a produit le relevé : pastille, clôture de journée, saisie
+     manuelle. Ne concerne que les deux tables de relevés — une cotation de
+     séance et une crise ne se font pas à la pastille. */
+  { k: 'origineReleve', label: 'Geste de relevé', get: (f) => f.origine || 'Non renseignée', sources: ['suivi', 'compteurs'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
@@ -6490,6 +6598,11 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
      premier séparateur. */
   const objectifsSuivi = {};
   Object.entries(donnees.objectifsSuivi || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) objectifsSuivi[k] = v; });
+  /* Rapports enregistrés : ils ne partaient pas du tout, si bien qu'un
+     transfert Manager → Manager les perdait tous en silence. Filtrés sur les
+     personnes retenues comme les alias et les commentaires — un rapport dont
+     le sujet n'est pas exporté n'aurait rien à rouvrir à l'arrivée. */
+  const rapports = (donnees.rapports || []).filter((r) => !garder || garder.has(r.personne));
 
   return {
     format: 'aba-manager-export',
@@ -6503,7 +6616,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
     _intervenants: donnees._intervenants,
     _axesSuivi: donnees._axesSuivi,
     _guidances: donnees._guidances,
-    alias, commentaires, codesEfl, objectifsSuivi,
+    alias, commentaires, codesEfl, objectifsSuivi, rapports,
   };
 }
 
@@ -6591,6 +6704,9 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
       commentaires: { ...(cumul.commentaires || {}), ...(paquet.commentaires || {}) },
       codesEfl: { ...(cumul.codesEfl || {}), ...(paquet.codesEfl || {}) },
       objectifsSuivi: { ...(cumul.objectifsSuivi || {}), ...(paquet.objectifsSuivi || {}) },
+      /* Rapports enregistrés, dédupliqués par id : le paquet gagne sur un
+         rapport déjà connu, comme partout ailleurs à l'import. */
+      rapports: fusionnerParId(cumul.rapports || [], paquet.rapports || []).liste,
     };
     onImported(cumul);
     setFichier(null); setEnveloppe(null); setPassphrase('');
@@ -6805,11 +6921,26 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
                         const encore = new Set();
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
+                        /* Et ses dictionnaires avec elle. La purge par personne
+                           les traitait déjà, celle-ci les laissait derrière :
+                           libellés, commentaires et réglages de suivi promus
+                           survivaient à la disparition de leur sujet, puis
+                           ressuscitaient si les mêmes initiales revenaient à un
+                           import ultérieur — sur une autre personne. */
+                        const survit = (k) => encore.has(k.split('|')[0]);
+                        const alias = {
+                          personnes: Object.fromEntries(Object.entries(d.alias.personnes || {}).filter(([k]) => encore.has(k))),
+                          objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => survit(k))),
+                        };
+                        const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => survit(k)));
+                        const objectifsSuivi = Object.fromEntries(Object.entries(d.objectifsSuivi || {}).filter(([k]) => survit(k)));
+                        const rapports = (d.rapports || []).filter((r) => encore.has(r.personne));
                         return {
                           ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
                           _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
                           _compteurs: compt,
                           _guidances: guid,
+                          alias, commentaires, objectifsSuivi, rapports,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -6856,12 +6987,16 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                       delete alias.personnes[pp.initials];
                       const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
                       const objectifsSuivi = Object.fromEntries(Object.entries(d.objectifsSuivi || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
+                      /* Les rapports enregistrés manquaient au lot : un rapport
+                         dont le sujet vient d'être supprimé s'ouvrait encore,
+                         sur une fiche vide. */
+                      const rapports = (d.rapports || []).filter((r) => r.personne !== pp.initials);
                       const idVers = {};
                       Object.entries(d._idVersInitiales || {}).forEach(([src, t]) => {
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, stabilite, suivi, alias, commentaires, objectifsSuivi,
+                        ...d, seances, crises, stabilite, suivi, alias, commentaires, objectifsSuivi, rapports,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
