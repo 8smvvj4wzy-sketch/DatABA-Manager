@@ -217,7 +217,7 @@ t('sans critère : aucune suite', suiteAuSeuil(pbs, null), 0);
 
 const NOMS2 = [
   'objectiveScoreValue', 'parseHM', 'partNiveauCible', 'valeurCotation',
-  'libelleSeuil', 'libelleCritere', 'analyserObjectif', 'libelleCreneauProbe',
+  'libelleSeuil', 'libelleCritere', 'etatDeSerie', 'analyserObjectif', 'libelleCreneauProbe',
 ];
 const code2 = [
   `const TYPES_POURCENT = ${extraireLigne('TYPES_POURCENT')};`,

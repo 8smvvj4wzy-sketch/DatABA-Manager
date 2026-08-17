@@ -249,6 +249,18 @@ const VIDE = {
      libellés vivent déjà à part et suivent d'eux-mêmes, si bien qu'un rapport
      rouvert reflète les cotations les plus récentes plutôt qu'un figé. */
   rapports: [],
+  /* Critères de suivi continu et compteurs promus en objectif. DatABA ne sait
+     pas dire qu'un axe ou un compteur sert à coter un objectif — un axe n'a
+     que ses critères, un compteur que son nom, aucun seuil d'acquisition — et
+     pourtant ces deux modes cotent bien des objectifs réels (les demandes
+     spontanées au compteur, l'estompage de l'éducateur au suivi). Le choix se
+     fait donc ici, par personne, et il est persisté avec les données.
+
+     Clé : `<initiales>|critere:<nomAxe>||<cle>` ou `<initiales>|compteur:<id>`,
+     le même espace de clés que les séries du graphique.
+     Valeur : { actif, unite, seuil, jours, sens }. `seuil` à null = aucun
+     critère d'acquisition, l'objectif reste « Suivi en mesure ». */
+  objectifsSuivi: {},
 };
 
 function normaliser(d) {
@@ -264,6 +276,7 @@ function normaliser(d) {
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
     rapports: d.rapports || [],
+    objectifsSuivi: d.objectifsSuivi || {},
   };
 }
 async function chargerDonnees() {
@@ -670,7 +683,6 @@ function analyserObjectif(seances, tableParSource, obj) {
      sur un compteur, et classerait « non acquis » un suivi que personne n'a
      demandé de juger. */
   const critere = crit && (crit.pourcent || crit.explicite) ? crit : null;
-  const serie = critere && !critere.pourcent ? mesures : points;
 
   const base = {
     points,
@@ -686,6 +698,21 @@ function analyserObjectif(seances, tableParSource, obj) {
     prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
   };
 
+  return { ...base, ...etatDeSerie(points, mesures, critere) };
+}
+
+/* La cascade d'états, à part de ce qui l'alimente : un objectif coté en séance
+   (analyserObjectif) et un critère de suivi continu promu en objectif
+   (lignesSuiviContinu) doivent la traverser à l'identique, sinon les mêmes
+   chiffres donneraient deux verdicts selon leur provenance.
+
+   Reçoit les deux séries déjà triées et le critère déjà résolu (null = aucun
+   seuil applicable). Rend `etat`, `streak`, et selon le cas `jours` ou
+   `moyenne` — exactement les champs que les consommateurs de `lignes`
+   attendent en plus de la base. */
+function etatDeSerie(points, mesures, critere) {
+  const serie = critere && !critere.pourcent ? mesures : points;
+
   /* Dormance : lue sur la cotation la plus récente, quelle que soit la série
      qui la porte. Un objectif coté hier en mesure brute n'est pas dormant
      parce que sa dernière valeur en pourcentage remonte à un mois. */
@@ -699,11 +726,18 @@ function analyserObjectif(seances, tableParSource, obj) {
      critère applicable n'a rien à comparer à un seuil d'acquisition. Le
      classer « Non acquis » comme avant était faux : il n'était pas raté, il
      n'était pas mesuré sur cette échelle. Il garde donc son propre état, et
-     seule l'absence de cotation récente peut encore le rendre dormant. */
-  if (!serie.length) {
-    if (!points.length && !mesures.length) return { ...base, etat: 'non_acquis', streak: 0 };
-    if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak: 0, jours };
-    return { ...base, etat: 'mesure', streak: 0 };
+     seule l'absence de cotation récente peut encore le rendre dormant.
+
+     `!critere` est ajouté à la garde pour un critère de suivi continu promu
+     en objectif sans seuil réglé (voir lignesSuiviContinu) : sa série peut
+     très bien être non vide et pourtant n'avoir jamais été jugée — c'est un
+     cas qu'un objectif de séance ne produisait pas (un critère y est toujours
+     résolu, au pire par défaut), donc sans conséquence sur les objectifs
+     existants. */
+  if (!critere || !serie.length) {
+    if (!points.length && !mesures.length) return { etat: 'non_acquis', streak: 0 };
+    if (jours >= DORMANT_JOURS) return { etat: 'dormant', streak: 0, jours };
+    return { etat: 'mesure', streak: 0 };
   }
 
   const streak = suiteAuSeuil(serie, critere);
@@ -711,9 +745,9 @@ function analyserObjectif(seances, tableParSource, obj) {
      s'exprime en jours. C'est aussi celle que regarde le plateau. */
   const serieJugee = serieCritere(serie, critere);
 
-  if (critere && streak >= critere.needed) return { ...base, etat: 'acquis', streak };
-  if (jours >= DORMANT_JOURS) return { ...base, etat: 'dormant', streak, jours };
-  if (critere && critere.needed > 1 && streak >= critere.needed - 1) return { ...base, etat: 'bientot', streak };
+  if (critere && streak >= critere.needed) return { etat: 'acquis', streak };
+  if (jours >= DORMANT_JOURS) return { etat: 'dormant', streak, jours };
+  if (critere && critere.needed > 1 && streak >= critere.needed - 1) return { etat: 'bientot', streak };
   /* Plateau : réservé aux critères en pourcentage. PLATEAU_ECART_MAX vaut
      20 points de pourcentage — sur un comptage brut, « à 20 près » ne veut
      rien dire. L'écart passe par ecartAuSeuil, sans quoi il serait calculé à
@@ -722,9 +756,9 @@ function analyserObjectif(seances, tableParSource, obj) {
     const cinq = serieJugee.slice(-5);
     const moyenne = Math.round(cinq.reduce((a, p) => a + p.value, 0) / cinq.length);
     const ecart = ecartAuSeuil(moyenne, critere);
-    if (ecart > 0 && ecart <= PLATEAU_ECART_MAX) return { ...base, etat: 'plateau', streak, moyenne };
+    if (ecart > 0 && ecart <= PLATEAU_ECART_MAX) return { etat: 'plateau', streak, moyenne };
   }
-  return { ...base, etat: 'en_cours', streak };
+  return { etat: 'en_cours', streak };
 }
 
 /* Créneaux d'un Probe à deux prises par jour : matin avant 13 h, en heure
@@ -751,6 +785,20 @@ function libelleCritere(ligne) {
   const n = ligne.needed;
   const pluriel = n > 1 ? 's' : '';
   return `${seuil} sur ${n} ${ligne.unit === 'days' ? `jour${pluriel}` : `séance${pluriel}`}`;
+}
+
+/* Une ligne restreinte à une période, sur ses deux séries. `mesures` restait
+   non filtré avant l'arrivée du suivi continu promu en objectif : une carte
+   en mode mesure affichait alors tout son historique quelle que soit la
+   période choisie, pendant que `points` la respectait déjà. Même fonction
+   pour le Tableau de bord et la fiche personne, pour que les deux lisent la
+   même période de la même façon. */
+function filtrerLignePeriode(ligne, periode) {
+  return {
+    ...ligne,
+    points: ligne.points.filter((pt) => dansPeriode(pt.date, periode)),
+    mesures: ligne.mesures.filter((m) => dansPeriode(m.date, periode)),
+  };
 }
 
 function construireLignes(donnees) {
@@ -785,6 +833,159 @@ function construireLignes(donnees) {
       });
     });
   });
+  return [...lignes, ...lignesSuiviContinu(donnees, lignes)];
+}
+
+/* Unités d'un critère de suivi continu promu en objectif. `pourcent` décide de
+   la série d'accueil : une part de temps est bornée 0-100 et rejoint `points`
+   comme n'importe quelle cotation en pourcentage, le reste rejoint `mesures`.
+   C'est la règle qu'applique déjà analyserObjectif — l'aiguillage se fait sur
+   l'unité, pas sur le type — et non une convention nouvelle. */
+const UNITES_OBJECTIF_SUIVI = {
+  part: { label: 'Part du temps borné', unite: '%', pourcent: true },
+  minutes: { label: 'Minutes cumulées', unite: 'min', pourcent: false },
+  episodes: { label: "Nombre d'épisodes", unite: 'épisodes', pourcent: false },
+  occurrences: { label: "Nombre d'appuis", unite: 'occurrences', pourcent: false },
+};
+const cleObjectifSuivi = (initiales, cleSerie) => `${initiales}|${cleSerie}`;
+
+/* Valeur d'une journée pour un critère, dans l'unité demandée. Les segments
+   non bornés sont exclus comme partout ailleurs, et une journée qui n'en a
+   aucun ne rend rien : ce n'est pas un zéro, rien n'y a été mesuré. */
+function valeurJourSuivi(segmentsDuJour, cle, unite) {
+  const bornes = segmentsDuJour.filter((s) => s.ms != null);
+  if (!bornes.length) return null;
+  const siens = bornes.filter((s) => s.cle === cle);
+  if (unite === 'episodes') return siens.length;
+  const ms = siens.reduce((a, s) => a + s.ms, 0);
+  if (unite === 'minutes') return Math.round(ms / 60000);
+  const total = bornes.reduce((a, s) => a + s.ms, 0);
+  return total ? Math.round((ms / total) * 100) : null;
+}
+
+/* Lignes d'objectif issues du suivi continu et des compteurs, pour les seuls
+   couples personne × série que l'utilisateur a explicitement promus.
+
+   `dejaCotes` sert à l'identité : `objectif` est un NOM, et ce nom est la clé
+   React, l'ancre DOM du défilement, la clé d'alias, de code de curriculum et
+   de commentaire. Si un objectif coté en séance porte déjà ce nom chez la même
+   personne, deux lignes distinctes partageraient tout cela — le nom promu est
+   alors suffixé, et seulement dans ce cas. */
+function lignesSuiviContinu(donnees, dejaCotes) {
+  const reglages = donnees.objectifsSuivi || {};
+  if (!Object.keys(reglages).length) return [];
+  const pris = new Set((dejaCotes || []).map((l) => `${l.initials}|${l.objectif}`));
+  const lignes = [];
+
+  (donnees.personnes || []).forEach((p) => {
+    const segments = segmentsSuivi(suiviDePersonne(donnees, p.initials));
+    const appuis = compteursDePersonne(donnees, p.initials);
+
+    /* Segments regroupés par (axe, jour) : la part d'un critère se calcule sur
+       le temps borné de SON axe dans SA journée, jamais sur le total. */
+    const parAxeJour = new Map();
+    segments.forEach((s) => {
+      const j = jourLocal(s.debut);
+      if (j == null) return;
+      const k = `${s.nomAxe}||${j}`;
+      if (!parAxeJour.has(k)) parAxeJour.set(k, []);
+      parAxeJour.get(k).push(s);
+    });
+
+    const ajouter = (cleReg, cleSerie, nom, type, journalieres, reglage) => {
+      const meta = UNITES_OBJECTIF_SUIVI[reglage.unite] || UNITES_OBJECTIF_SUIVI.occurrences;
+      journalieres.sort((a, b) => new Date(a.date) - new Date(b.date));
+      const points = meta.pourcent ? journalieres : [];
+      const mesures = meta.pourcent ? [] : journalieres;
+      /* Un seuil réglé ici est explicite par construction : personne ne l'a
+         hérité d'un défaut, quelqu'un l'a saisi. Sans seuil, aucun critère —
+         l'objectif reste « Suivi en mesure », lu à son évolution. */
+      const critere = reglage.seuil == null ? null : {
+        threshold: reglage.seuil,
+        needed: reglage.jours || 1,
+        unit: 'days',
+        sens: reglage.sens === 'max' ? 'max' : 'min',
+        pourcent: meta.pourcent,
+        explicite: true,
+      };
+      let objectif = nom;
+      if (pris.has(`${p.initials}|${objectif}`)) {
+        objectif = `${nom} (${type === 'compteur' ? 'compteur' : 'suivi continu'})`;
+      }
+      lignes.push({
+        initials: p.initials,
+        objectif,
+        type,
+        points,
+        mesures,
+        unite: meta.pourcent ? null : meta.unite,
+        phaseHistory: [],
+        phase: null,
+        threshold: critere ? critere.threshold : null,
+        needed: critere ? critere.needed : null,
+        unit: critere ? critere.unit : null,
+        sens: critere ? critere.sens : null,
+        critPourcent: critere ? critere.pourcent : null,
+        prioritaire: false,
+        /* Marque de provenance : la sous-vue Suivi continu s'en sert pour dire
+           qu'une série alimente aussi le bilan, et le Tableau de bord pour ne
+           pas annoncer « séances » là où il s'agit de journées. `cleSuivi` est
+           la clé de réglage d'origine (celle d'`objectifsSuivi`) : c'est ce
+           qui permet à la sous-vue Suivi continu de retrouver l'état de la
+           ligne qu'un réglage vient de produire, sans reconstituer le nom. */
+        origineSuivi: type,
+        cleSuivi: cleReg,
+        ...etatDeSerie(points, mesures, critere),
+      });
+    };
+
+    Object.entries(reglages).forEach(([cle, reglage]) => {
+      if (!reglage || !reglage.actif) return;
+      const sep = cle.indexOf('|');
+      if (sep < 0 || cle.slice(0, sep) !== p.initials) return;
+      const cleSerie = cle.slice(sep + 1);
+
+      if (cleSerie.startsWith('compteur:')) {
+        const id = cleSerie.slice('compteur:'.length);
+        const siens = appuis.filter((r) => r.compteurId === id);
+        if (!siens.length) return;
+        const parJour = new Map();
+        siens.forEach((r) => {
+          const j = jourLocal(r.timestamp);
+          if (j == null) return;
+          parJour.set(j, (parJour.get(j) || 0) + 1);
+        });
+        const journalieres = Array.from(parJour.entries())
+          .map(([j, n]) => ({ date: `${j}T12:00:00`, value: n, favorite: false }));
+        if (!journalieres.length) return;
+        ajouter(cle, cleSerie, siens[0].nomCompteur, 'compteur', journalieres,
+          { ...reglage, unite: 'occurrences' });
+        return;
+      }
+
+      if (!cleSerie.startsWith('critere:')) return;
+      /* `critere:<nomAxe>||<cle>` — le nom d'axe peut contenir n'importe quoi,
+         seule la dernière occurrence du séparateur fait foi. */
+      const reste = cleSerie.slice('critere:'.length);
+      const coupe = reste.lastIndexOf('||');
+      if (coupe < 0) return;
+      const nomAxe = reste.slice(0, coupe);
+      const cleCritere = reste.slice(coupe + 2);
+      const journalieres = [];
+      let libelle = null;
+      parAxeJour.forEach((segs, k) => {
+        if (k.slice(0, k.lastIndexOf('||')) !== nomAxe) return;
+        const value = valeurJourSuivi(segs, cleCritere, reglage.unite);
+        if (value == null) return;
+        const porteur = segs.find((s) => s.cle === cleCritere);
+        if (porteur && !libelle) libelle = porteur.meta.l;
+        journalieres.push({ date: `${k.slice(k.lastIndexOf('||') + 2)}T12:00:00`, value, favorite: false });
+      });
+      if (!journalieres.length || !libelle) return;
+      ajouter(cle, cleSerie, libelle, 'suivi', journalieres, reglage);
+    });
+  });
+
   return lignes;
 }
 
@@ -903,11 +1104,18 @@ function construireFaits(donnees, lignes) {
      porte sur tout l'historique de l'objectif, pas seulement sur la période
      affichée — la période ne filtre ici que la liste des objectifs retenus,
      via leur dernière cotation. */
+  /* Une ligne en mesure brute (occurrences, minutes, suivi continu promu en
+     objectif) n'a pas de `points` mais a des `mesures` : elle a sa place ici
+     aussi, faute de quoi les mesures `objAcquis`/`objPartAcquis` de l'Explorer
+     l'ignoraient. `evolution` reste réservée au pourcentage — la colonne est
+     en points de %, y verser un delta d'occurrences ou de minutes mélangerait
+     deux unités dans la même colonne. */
   const objectifs = (lignes || [])
-    .filter((l) => l.points.length)
+    .filter((l) => l.points.length || l.mesures.length)
     .map((l) => {
-      const dernier = l.points[l.points.length - 1];
-      const premier = l.points[0];
+      const serie = l.points.length ? l.points : l.mesures;
+      const dernier = serie[serie.length - 1];
+      const premier = serie[0];
       return {
         date: dernier.date,
         personne: l.initials,
@@ -915,7 +1123,7 @@ function construireFaits(donnees, lignes) {
         type: (TYPES_COTATION[l.type] || l.type),
         etat: ETAT_RAPPORT[l.etat] || l.etat,
         acquis: l.etat === 'acquis' ? 1 : 0,
-        evolution: l.points.length > 1 ? Math.round(dernier.value - premier.value) : null,
+        evolution: (l.points.length > 1) ? Math.round(dernier.value - premier.value) : null,
       };
     });
 
@@ -930,6 +1138,9 @@ const TYPES_COTATION = {
   trials: 'Essai par essai', probe: 'Probe', occurrence: 'Par occurrence',
   timer: 'Timer', interval: 'Niveau par intervalle', chaining: 'Chaînage',
   latency: 'Latence', balance: 'Balance Program',
+  /* Objectifs issus du suivi continu (lignesSuiviContinu), sans équivalent
+     côté DatABA : ce ne sont pas des types de cotation de séance. */
+  suivi: 'Suivi continu', compteur: "Compteur d'occurrence",
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
@@ -2232,13 +2443,16 @@ function GrapheAgrandi({ titre, sousTitre, styleOptions, style, onStyle, courbes
 }
 
 /* Aperçu minuscule, sans axes : lisible d'un coup d'œil dans une liste */
-function MiniGraphe({ points, couleur }) {
+/* `enPourcent` borne l'axe à [0, 100] pour une série de pourcentages ; une
+   mesure brute (occurrences, minutes) n'a pas cette borne — un domaine figé
+   écrasait la courbe sur la ligne du bas ou la faisait sortir du cadre. */
+function MiniGraphe({ points, couleur, enPourcent = true }) {
   const donnees = points.map((p, i) => ({ i, v: p.value }));
   return (
     <div style={{ height: 40, width: 110 }} className="shrink-0">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={donnees} margin={{ top: 4, right: 2, bottom: 4, left: 2 }}>
-          <YAxis domain={[0, 100]} hide />
+          <YAxis domain={enPourcent ? [0, 100] : ['auto', 'auto']} hide />
           <Line type="monotone" dataKey="v" stroke={couleur} strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
@@ -2394,16 +2608,21 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      la liste doit rester le sujet principal de la page. */
   const [autresOuverts, setAutresOuverts] = useState(false);
 
+  /* Une ligne survit dès que l'une des deux séries a un point sur la période —
+     `mesures` était jusqu'ici jamais filtré, une ligne en mesure brute
+     (occurrences, minutes, suivi continu promu en objectif) affichait tout son
+     historique quelle que soit la période choisie, avant d'être jetée juste en
+     dessous faute de `points`. */
   const recentes = lignes
-    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }))
-    .filter((l) => l.points.length > 0);
+    .map((l) => filtrerLignePeriode(l, periode))
+    .filter((l) => l.points.length > 0 || l.mesures.length > 0);
   /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
      qu'un objectif prioritaire existait sur la période, les autres
      disparaissaient et l'intitulé changeait tout seul : d'un appareil à
      l'autre, selon les séances importées, le même écran s'appelait tantôt
      « Objectifs prioritaires » tantôt « Objectifs travaillés » sans que rien
      ne l'explique. Les deux groupes sont désormais toujours nommés. */
-  const rang = { bientot: 0, plateau: 1, en_cours: 2, dormant: 3, acquis: 4, non_acquis: 5 };
+  const rang = { bientot: 0, plateau: 1, en_cours: 2, dormant: 3, acquis: 4, mesure: 5, non_acquis: 6 };
   const parEtat = (a, b) => rang[a.etat] - rang[b.etat];
   const prioritaires = recentes.filter((l) => l.prioritaire).sort(parEtat);
   const autres = recentes.filter((l) => !l.prioritaire).sort(parEtat);
@@ -2463,7 +2682,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
             <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Objectifs suivis</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => {
+            {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'mesure', 'non_acquis'].map((e) => {
               const n = compte(e);
               const tot = lignes.length || 1;
               const on = etatOuvert === e;
@@ -2495,7 +2714,9 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                       {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
                     </span>
                     <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: ETATS[etatOuvert].color }}>
-                      {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
+                      {l.origineSuivi
+                        ? `${l.points.length + l.mesures.length} journée${(l.points.length + l.mesures.length) !== 1 ? 's' : ''}`
+                        : `${l.points.length} séance${l.points.length !== 1 ? 's' : ''}`}
                     </span>
                   </button>
                 ))}
@@ -2583,29 +2804,38 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
 function LigneObjectifs({ lignes, donnees, onOuvrir }) {
   return (
     <div className="space-y-1.5">
-      {lignes.map((l, i) => (
-        <button key={`${l.initials}|${l.objectif}|${i}`} onClick={() => onOuvrir(l.initials, l.objectif)}
-          className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
-          style={{ borderColor: BORDER, backgroundColor: CARD }}>
-          <div className="min-w-0 flex-1">
-            <div className="text-sm break-words">
-              <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
-              {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
+      {lignes.map((l, i) => {
+        /* Une ligne en mesure brute (occurrences, minutes, suivi continu promu
+           en objectif) n'a pas de `points` : c'est `mesures` qui porte sa
+           courbe, sans la borne [0, 100] qui n'a pas de sens hors pourcentage.
+           `origineSuivi` compte en journées, pas en séances. */
+        const serie = l.points.length ? l.points : l.mesures;
+        const enPourcent = !!l.points.length;
+        const nUnite = l.origineSuivi ? 'journée' : 'séance';
+        return (
+          <button key={`${l.initials}|${l.objectif}|${i}`} onClick={() => onOuvrir(l.initials, l.objectif)}
+            className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
+            style={{ borderColor: BORDER, backgroundColor: CARD }}>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm break-words">
+                <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>{nomAffiche(donnees, l.initials)}</span>
+                {' · '}{libelleAffiche(donnees, l.initials, l.objectif)}
+              </div>
+              <div className="text-xs" style={{ color: INK_SOFT }}>
+                {serie.length} {nUnite}{serie.length !== 1 ? 's' : ''}
+                {libelleSeuil(l) && ` · ${libelleSeuil(l)}`}
+                {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
+                {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
+              </div>
             </div>
-            <div className="text-xs" style={{ color: INK_SOFT }}>
-              {l.points.length} séance{l.points.length !== 1 ? 's' : ''}
-              {libelleSeuil(l) && ` · ${libelleSeuil(l)}`}
-              {l.etat === 'bientot' && ` · ${l.streak}/${l.needed}`}
-              {l.etat === 'plateau' && ` · moyenne ${l.moyenne} %`}
-            </div>
-          </div>
-          <MiniGraphe points={l.points} couleur={ETATS[l.etat].color} />
-          <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
-            style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color), fontFamily: F_DISPLAY }}>
-            {ETATS[l.etat].court}
-          </span>
-        </button>
-      ))}
+            <MiniGraphe points={serie} couleur={ETATS[l.etat].color} enPourcent={enPourcent} />
+            <span className="text-xs font-medium px-2 py-1 rounded-lg shrink-0"
+              style={{ backgroundColor: ETATS[l.etat].color, color: texteLisibleSur(ETATS[l.etat].color), fontFamily: F_DISPLAY }}>
+              {ETATS[l.etat].court}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -3897,10 +4127,14 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
   const moyenne = journalieres.length
     ? Math.round((journalieres.reduce((a, j) => a + j.value, 0) / journalieres.length) * 10) / 10 : null;
 
-  /* Une hausse de latence n'est pas un progrès : la couleur suit le sens de
-     l'objectif, pas le signe du pourcentage. */
+  /* Une hausse de latence — ou d'un critère de suivi continu réglé « au plus »
+     (un comportement-problème à faire baisser) — n'est pas un progrès : la
+     couleur suit le sens de l'objectif, pas le signe du pourcentage.
+     `ligne.sens` prime quand un seuil explicite l'a fixé ; à défaut, repli sur
+     l'ancienne règle, qui ne connaissait que la latence. */
+  const hausseFavorableUnite = ligne.sens ? ligne.sens !== 'max' : ligne.unite !== 's';
   const favorable = evolution && evolution.pct != null && evolution.pct !== 0
-    ? ((evolution.pct > 0) === (ligne.unite !== 's'))
+    ? ((evolution.pct > 0) === hausseFavorableUnite)
     : null;
 
   return (
@@ -4048,31 +4282,225 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
    conditionnellement, un réglage d'affichage posé en état local repart de sa
    valeur initiale à chaque aller-retour — même raison que `unite` du tableau
    de bord et `config` du bilan de crise. */
+/* Unités qu'un critère de suivi continu peut apporter comme objectif, jour par
+   jour. Un compteur n'a pas ce choix — il compte toujours ses appuis, voir
+   UNITES_OBJECTIF_SUIVI et lignesSuiviContinu. */
+const UNITES_CHOIX_CRITERE = [
+  { k: 'part', label: 'Part du temps borné (%)' },
+  { k: 'minutes', label: 'Minutes cumulées' },
+  { k: 'episodes', label: "Nombre d'épisodes" },
+];
+
+/* Réglage « compte comme un objectif » d'un critère ou d'un compteur — pose ou
+   efface une entrée de `donnees.objectifsSuivi`. `uniteChoix` absent = un
+   compteur : rien à choisir, son unité est toujours le nombre d'appuis. */
+function ReglageObjectifSuivi({ reglage, uniteChoix, onChange }) {
+  const actif = !!(reglage && reglage.actif);
+  const unite = (reglage && reglage.unite) || (uniteChoix ? uniteChoix[0].k : 'occurrences');
+  const seuilPose = reglage && reglage.seuil != null;
+  const seuil = seuilPose ? reglage.seuil : '';
+  const jours = (reglage && reglage.jours) || 1;
+  const sens = (reglage && reglage.sens) || 'min';
+  const maj = (patch) => onChange({ actif, unite, seuil: seuilPose ? reglage.seuil : null, jours, sens, ...patch });
+
+  return (
+    <div className="mt-2 pt-2 space-y-2" style={{ borderTop: `1px solid ${BORDER}` }}>
+      <label className="flex items-center gap-2 text-xs cursor-pointer" style={{ color: INK_SOFT }}>
+        <input type="checkbox" checked={actif} onChange={(e) => maj({ actif: e.target.checked })} />
+        Compte comme un objectif — apparaît au Tableau de bord et dans le bilan des objectifs
+      </label>
+      {actif && (
+        <div className="flex flex-wrap items-end gap-2 pl-5">
+          {uniteChoix && (
+            <div>
+              <div className="text-xs mb-1" style={{ color: INK_SOFT }}>Valeur retenue chaque jour</div>
+              <select value={unite} onChange={(e) => maj({ unite: e.target.value })}
+                className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
+                {uniteChoix.map((u) => <option key={u.k} value={u.k}>{u.label}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <div className="text-xs mb-1" style={{ color: INK_SOFT }}>Seuil (optionnel)</div>
+            <input type="number" value={seuil} placeholder="aucun"
+              onChange={(e) => maj({ seuil: e.target.value === '' ? null : Number(e.target.value) })}
+              className="w-20 rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }} />
+          </div>
+          {seuilPose && (
+            <>
+              <div>
+                <div className="text-xs mb-1" style={{ color: INK_SOFT }}>Jours consécutifs</div>
+                <input type="number" min={1} value={jours}
+                  onChange={(e) => maj({ jours: Math.max(1, Number(e.target.value) || 1) })}
+                  className="w-16 rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK, fontFamily: F_MONO }} />
+              </div>
+              <div>
+                <div className="text-xs mb-1" style={{ color: INK_SOFT }}>Sens</div>
+                <select value={sens} onChange={(e) => maj({ sens: e.target.value })}
+                  className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
+                  <option value="min">Au moins</option>
+                  <option value="max">Au plus</option>
+                </select>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {actif && !seuilPose && (
+        <p className="text-xs pl-5" style={{ color: INK_SOFT }}>
+          Sans seuil, l'objectif reste « Suivi en mesure », lu à son évolution.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* Une série choisie dans un graphique, avec sa couleur, un bouton par option.
+   La couleur affichée est celle propre à l'option (identité de la donnée), la
+   bordure suit la sélection (règle de l'Accent Seul) — même patron que les
+   boutons de journée de la frise. */
+function SelecteurSeries({ options, selection, onToggle, nomOption, max = SERIES_MAX }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((o) => {
+        const on = selection.includes(o.valeur);
+        const desactive = !on && selection.length >= max;
+        const c = o.type === 'compteur' ? o.couleur : o.meta.color;
+        return (
+          <button key={o.valeur} type="button" disabled={desactive} onClick={() => onToggle(o.valeur)}
+            className="rounded-lg px-2.5 py-1.5 text-xs border flex items-center gap-1.5 disabled:opacity-40"
+            style={{ borderColor: on ? ACCENT : BORDER, backgroundColor: on ? ACCENT_WASH : 'transparent', color: on ? ACCENT : INK_SOFT }}>
+            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: c }} />
+            {nomOption(o)}
+          </button>
+        );
+      })}
+      {selection.length >= max && (
+        <span className="text-xs self-center" style={{ color: INK_SOFT }}>{max} séries maximum</span>
+      )}
+    </div>
+  );
+}
+
+/* Couleur effective de chaque série d'un graphique : celle de l'option, sauf
+   collision avec une couleur déjà prise dans la même sélection — deux séries
+   de la même teinte seraient indiscernables. `items` porte déjà l'id interne
+   (`s0`, `c1`, …) qui sert de clé de donnée Recharts, indépendant de la clé
+   `critere:`/`compteur:` utilisée pour le réglage d'objectif. */
+function couleursSeries(items) {
+  const utilisees = new Set();
+  const couleurs = {};
+  items.forEach(({ id, couleurNaturelle }) => {
+    let c = couleurNaturelle;
+    if (utilisees.has(c)) c = PALETTE_SERIES.find((p) => !utilisees.has(p)) || CAT_SLATE;
+    utilisees.add(c);
+    couleurs[id] = c;
+  });
+  return couleurs;
+}
+
+/* Une tendance par série sélectionnée, calculée sur les seules tranches où
+   CETTE série est connue — chaque série a son propre support, un trou n'est
+   jamais comblé par la valeur d'une autre. Rendu aligné sur `donneesGraphe`
+   (même longueur, `null` hors support) pour un simple dataKey Recharts.
+
+   Avec exactement deux séries, le croisement redevient significatif : calculé
+   sur leur support COMMUN (comparer deux droites ajustées sur des supports
+   différents ferait dire à leur rencontre une chose qu'aucune des deux ne
+   dit), et seulement rendu s'il tombe dans la période observée — rien n'est
+   prolongé au-delà du dernier point. Au-delà de deux séries, aucun croisement
+   n'est annoncé : il faudrait choisir laquelle des paires commenter. */
+function ajusterTendances(donneesGraphe, ids) {
+  const fits = {};
+  let trancheCroisement = null;
+
+  if (ids.length === 2) {
+    const [k0, k1] = ids;
+    const communes = [];
+    donneesGraphe.forEach((d, i) => { if (d[k0] != null && d[k1] != null) communes.push(i); });
+    const fit0 = tendanceLineaire(communes.map((i) => donneesGraphe[i][k0]));
+    const fit1 = tendanceLineaire(communes.map((i) => donneesGraphe[i][k1]));
+    if (fit0 && fit1) {
+      fits[k0] = new Array(donneesGraphe.length).fill(null);
+      fits[k1] = new Array(donneesGraphe.length).fill(null);
+      communes.forEach((i, j) => { fits[k0][i] = fit0[j]; fits[k1][i] = fit1[j]; });
+      const croisement = croisementTendances(fit0, fit1);
+      if (croisement) trancheCroisement = donneesGraphe[communes[Math.round(croisement.index)]] || null;
+    }
+    return { fits, trancheCroisement };
+  }
+
+  ids.forEach((k) => {
+    const idx = [];
+    donneesGraphe.forEach((d, i) => { if (d[k] != null) idx.push(i); });
+    const fit = tendanceLineaire(idx.map((i) => donneesGraphe[i][k]));
+    if (fit) {
+      fits[k] = new Array(donneesGraphe.length).fill(null);
+      idx.forEach((i, j) => { fits[k][i] = fit[j]; });
+    }
+  });
+  return { fits, trancheCroisement: null };
+}
+
+/* Texte sous un graphique de suivi : ce que dit le repère de croisement (ou
+   son absence), commun aux deux graphiques de SuiviContinuVue. */
+function texteTendances(series, fits, croisement) {
+  if (series.length < 2) {
+    return 'Superposez une seconde série pour comparer deux tendances et faire apparaître un repère de croisement.';
+  }
+  if (series.length === 2) {
+    if (!fits[series[0].id] || !fits[series[1].id]) {
+      return 'Les tendances demandent au moins trois tranches où les deux séries sont connues.';
+    }
+    if (croisement) return null;
+    return 'Les deux tendances ne se croisent pas sur la période affichée ; elles ne sont pas prolongées au-delà.';
+  }
+  return "Le repère de croisement n'apparaît qu'à deux séries affichées ; au-delà, chaque tendance reste tracée seule.";
+}
+
 /* ==================== Suivi continu d'une personne ====================
-   Deux lectures des mêmes relevés, exclusives à l'écran : la frise d'une
-   journée avec la répartition sur la période, et la chronologie de deux
-   critères opposés avec leurs droites de tendance.
+   Trois lectures des mêmes relevés, exclusives à l'écran : la frise d'une
+   journée avec la répartition sur la période, le graphique du suivi continu
+   (N critères, chacun avec sa tendance) et celui des compteurs d'occurrence —
+   deux natures de données, deux graphiques agrandissables et exportables,
+   plutôt qu'un seul contraint à cohabiter.
 
    Composant à part plutôt que bloc de rendu dans PersonnesScreen : il lui faut
-   son propre état (mode, critères choisis, mesure, journée affichée), qu'une
-   IIFE dans un rendu ne peut pas porter. Monté avec `key={personne}` : changer
-   de personne repart d'un état neuf, sans effet de remise à zéro. */
-function SuiviContinuVue({ donnees, personne, periode }) {
+   son propre état (mode, sélection de séries, journée affichée), qu'une IIFE
+   dans un rendu ne peut pas porter. Monté avec `key={personne}` : changer de
+   personne repart d'un état neuf, sans effet de remise à zéro. */
+function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }) {
   const [mode, setMode] = useState('frise');
   /* Journée affichée dans la frise. null = pas de choix explicite, la dernière
      journée cotée sert de défaut — dérivé au moment du rendu, pas par un
      effet, pour que le choix survive à un changement de période tant que la
      journée y reste. */
   const [jourChoisi, setJourChoisi] = useState(null);
-  /* Les deux critères comparés dans le graphique. Vides tant que rien n'a été
-     choisi : le graphique en propose deux par défaut pour ne pas s'ouvrir à
-     blanc, mais tant que ce n'est pas un choix, il ne sert pas à colorer les
-     écarts de la répartition — dire d'une hausse qu'elle est bonne ou mauvaise
-     demande que quelqu'un l'ait dit. */
-  const [critereHausse, setCritereHausse] = useState('');
-  const [critereBaisse, setCritereBaisse] = useState('');
-  const [mesure, setMesure] = useState('duree');
-  const [unite, setUnite] = useState('pct');
+  /* Séries choisies dans chacun des deux graphiques — critères de suivi et
+     compteurs d'occurrence sont deux natures de données, deux graphiques
+     indépendants. Vides tant que rien n'a été choisi : la valeur effective se
+     dérive au rendu (voir plus bas), sur le même principe que hausseEff avant
+     elle. */
+  const [selectionSuivi, setSelectionSuivi] = useState([]);
+  const [selectionCompteurs, setSelectionCompteurs] = useState([]);
+  const [mesureSuivi, setMesureSuivi] = useState('duree');
+  const [uniteSuivi, setUniteSuivi] = useState('pct');
+  /* Une tendance par série affichée, pas une lecture superposée globale : ce
+     n'est donc pas COURBES_LECTURE, un simple interrupteur suffit par
+     graphique. */
+  const [tendancesSuivi, setTendancesSuivi] = useState(true);
+  const [tendancesCompteurs, setTendancesCompteurs] = useState(true);
+  const [styleSuivi, setStyleSuivi] = useState('lignes');
+  const [styleCompteurs, setStyleCompteurs] = useState('lignes');
+  const [agrandiSuivi, setAgrandiSuivi] = useState(false);
+  const [agrandiCompteurs, setAgrandiCompteurs] = useState(false);
+  const refGrapheSuivi = useRef(null);
+  const refGrapheSuiviAgrandi = useRef(null);
+  const refGrapheCompteurs = useRef(null);
+  const refGrapheCompteursAgrandi = useRef(null);
+  /* Clé de la série dont le réglage d'objectif est ouvert — un seul foyer à
+     la fois, comme `agrandi` ailleurs dans l'application. */
+  const [reglageOuvert, setReglageOuvert] = useState(null);
 
   const tousReleves = suiviDePersonne(donnees, personne);
   const releves = tousReleves.filter((r) => dansPeriode(r.timestamp, periode));
@@ -4129,15 +4557,12 @@ function SuiviContinuVue({ donnees, personne, periode }) {
     court ? { weekday: 'short', day: '2-digit', month: '2-digit' }
       : { weekday: 'short', day: '2-digit', month: 'long', year: 'numeric' });
 
-  /* --- Données du graphique --- */
+  /* --- Options de série, communes aux deux graphiques --- */
   const segments = segmentsSuivi(releves);
   const gran = periode.granularite || 'jour';
 
   /* Un critère ne figure dans les menus que s'il a au moins un segment borné :
-     un critère qu'on ne peut ni cumuler ni compter n'aurait pas de courbe. Les
-     compteurs, eux, n'ont qu'à exister. Le type préfixe la valeur d'option :
-     les deux espaces de clés ne peuvent alors pas se confondre, et la lecture
-     se fait sur le premier « : ». */
+     un critère qu'on ne peut ni cumuler ni compter n'aurait pas de courbe. */
   const optionsMap = new Map();
   segments.forEach((s) => {
     if (s.ms == null) return;
@@ -4157,115 +4582,142 @@ function SuiviContinuVue({ donnees, personne, periode }) {
        catégorielle des séries, comme les chronologies de crise. */
     couleur: PALETTE_SERIES[i % PALETTE_SERIES.length],
   }));
-  const options = [...optionsCriteres, ...optionsCompteurs];
   const axesDesOptions = Array.from(new Set(optionsCriteres.map((o) => o.nomAxe)));
   const nomCritere = (o) => (o.type === 'compteur' ? o.nom
     : (o.meta === CRITERE_INCONNU_SUIVI ? `${o.meta.l} (${o.cle})` : o.meta.l));
   const nomSerie = (o) => (o.type === 'compteur' || axesDesOptions.length <= 1
     ? nomCritere(o) : `${nomCritere(o)} · ${o.nomAxe}`);
 
-  const valide = (k) => options.some((o) => o.valeur === k);
-  const hausseEff = valide(critereHausse) ? critereHausse : (options[0] || {}).valeur;
-  const baisseEff = valide(critereBaisse) && critereBaisse !== hausseEff
-    ? critereBaisse
-    : (options.find((o) => o.valeur !== hausseEff) || {}).valeur;
-  const optHausse = options.find((o) => o.valeur === hausseEff);
-  const optBaisse = options.find((o) => o.valeur === baisseEff);
-
   /* Le sens attendu d'une hausse, pour colorer les écarts de la répartition et
-     des compteurs — uniquement pour les séries explicitement désignées.
-     Ailleurs, le comportement d'avant : une hausse reste neutre-favorable
-     faute de savoir. */
-  const sensAttendu = {};
-  if (valide(critereHausse)) sensAttendu[critereHausse] = true;
-  if (valide(critereBaisse)) sensAttendu[critereBaisse] = false;
-  const favorablePour = (valeurOption) => sensAttendu[valeurOption] !== false;
+     des compteurs, vient du réglage d'objectif quand il en existe un avec un
+     seuil — c'est lui qui sait si la hausse est voulue. Sans réglage, ou sans
+     seuil, une hausse reste neutre-favorable faute d'en savoir plus. */
+  const reglageDe = (cleSerie) => (donnees.objectifsSuivi || {})[cleObjectifSuivi(personne, cleSerie)];
+  const favorablePour = (cleSerie) => {
+    const r = reglageDe(cleSerie);
+    if (!r || !r.actif || r.seuil == null) return true;
+    return r.sens !== 'max';
+  };
 
-  /* Un compteur n'a ni durée à cumuler ni total de référence : dès qu'il est
-     l'une des deux séries, la mesure et l'unité sont contraintes plutôt que de
-     laisser choisir un réglage qui ne s'appliquerait qu'à moitié — deux unités
-     différentes sur un axe Y unique ne se lisent pas. */
-  const avecCompteur = (optHausse && optHausse.type === 'compteur') || (optBaisse && optBaisse.type === 'compteur');
-  const mesureEff = avecCompteur ? 'occurrences' : mesure;
-  const uniteEff = avecCompteur ? 'nombre' : unite;
-
-  const suffixe = uniteEff === 'pct' ? ' %' : (mesureEff === 'occurrences' ? '' : ' min');
-
-  /* Les deux chronologies partagent la clé de tranche de `cleAgregation` :
-     elles se réunissent sans conversion. L'union, et non l'une des deux : une
-     tranche où seul le compteur a servi doit exister. */
-  const parTranche = new Map();
-  const absorber = (liste) => liste.forEach((t) => {
-    if (!parTranche.has(t.cle)) parTranche.set(t.cle, { cle: t.cle, label: t.label, series: {} });
-    Object.assign(parTranche.get(t.cle).series, t.series);
-  });
-  absorber(chronologieSuivi(segments, gran, mesureEff));
-  absorber(chronologieCompteurs(relevesCompteur, gran));
-  const tranches = Array.from(parTranche.values()).sort((a, b) => a.cle - b.cle);
-
+  /* --- Graphique du suivi continu --- */
+  const valideSuivi = (v) => optionsCriteres.some((o) => o.valeur === v);
+  const selectionSuiviEff = selectionSuivi.some(valideSuivi)
+    ? selectionSuivi.filter(valideSuivi)
+    : optionsCriteres.slice(0, 2).map((o) => o.valeur);
+  const onToggleSuivi = (v) => setSelectionSuivi(
+    selectionSuiviEff.includes(v) ? selectionSuiviEff.filter((x) => x !== v) : [...selectionSuiviEff, v].slice(0, SERIES_MAX)
+  );
+  const seriesSuivi = selectionSuiviEff
+    .map((v) => optionsCriteres.find((o) => o.valeur === v))
+    .filter(Boolean)
+    .map((o, i) => ({ ...o, id: `s${i}`, couleurNaturelle: o.meta.color }));
+  const couleursSuivi = couleursSeries(seriesSuivi);
+  const suffixeSuivi = uniteSuivi === 'pct' ? ' %' : (mesureSuivi === 'occurrences' ? '' : ' min');
+  const tranchesSuivi = chronologieSuivi(segments, gran, mesureSuivi);
   /* Une tranche où l'axe du critère n'a rien de borné laisse un trou, pas un
      zéro : le critère n'y était pas à zéro, il n'y a rien eu d'observé sur son
-     axe. Un compteur, lui, est bien à zéro : la tranche existe parce que
-     quelque chose y a été observé, et n'avoir pas appuyé est une information. */
-  const valeurSerie = (t, opt) => {
-    if (!opt) return null;
-    const s = t.series[opt.k];
-    if (opt.type === 'compteur') return s ? s.valeur : 0;
-    if (s) return uniteEff === 'pct' ? s.part : s.valeur;
-    return Object.values(t.series).some((x) => x.nomAxe === opt.nomAxe) ? 0 : null;
-  };
-  const donneesGraphe = tranches.map((t) => ({
-    label: t.label,
-    hausse: valeurSerie(t, optHausse),
-    baisse: valeurSerie(t, optBaisse),
-  }));
-
-  /* Les deux tendances se calculent sur les seules tranches où les deux
-     critères sont connus : comparer deux droites ajustées sur des supports
-     différents ferait dire à leur croisement une chose qu'aucune des deux ne
-     dit. */
-  const communes = [];
-  donneesGraphe.forEach((d, i) => { if (d.hausse != null && d.baisse != null) communes.push(i); });
-  const fitHausse = tendanceLineaire(communes.map((i) => donneesGraphe[i].hausse));
-  const fitBaisse = tendanceLineaire(communes.map((i) => donneesGraphe[i].baisse));
-  if (fitHausse && fitBaisse) {
-    communes.forEach((i, k) => {
-      donneesGraphe[i].tHausse = fitHausse[k];
-      donneesGraphe[i].tBaisse = fitBaisse[k];
+     axe. */
+  const donneesGrapheSuivi = tranchesSuivi.map((t) => {
+    const row = { label: t.label };
+    seriesSuivi.forEach((s) => {
+      const v = t.series[s.k];
+      row[s.id] = v ? (uniteSuivi === 'pct' ? v.part : v.valeur)
+        : (Object.values(t.series).some((x) => x.nomAxe === s.nomAxe) ? 0 : null);
+    });
+    return row;
+  });
+  const { fits: fitsSuivi, trancheCroisement: croisementSuivi } = ajusterTendances(donneesGrapheSuivi, seriesSuivi.map((s) => s.id));
+  if (tendancesSuivi) {
+    seriesSuivi.forEach((s) => {
+      donneesGrapheSuivi.forEach((row, i) => { row[`t_${s.id}`] = fitsSuivi[s.id] ? fitsSuivi[s.id][i] : null; });
     });
   }
-  const croisement = croisementTendances(fitHausse, fitBaisse);
-  const trancheCroisement = croisement ? donneesGraphe[communes[Math.round(croisement.index)]] : null;
+  const texteSuivi = tendancesSuivi ? texteTendances(seriesSuivi, fitsSuivi, croisementSuivi) : null;
 
-  /* Deux séries peuvent porter la même couleur (deux axes réglés séparément
-     côté DatABA, ou un compteur tombé sur la teinte d'un critère) : les deux
-     courbes seraient alors indiscernables. La seconde bascule sur la palette
-     catégorielle. */
-  const couleurDe = (o) => (o ? (o.type === 'compteur' ? o.couleur : o.meta.color) : INK_SOFT);
-  const couleurHausse = couleurDe(optHausse);
-  const couleurBaisseBrute = couleurDe(optBaisse);
-  const couleurBaisse = couleurBaisseBrute === couleurHausse
-    ? (PALETTE_SERIES.find((c) => c !== couleurHausse) || CAT_SLATE)
-    : couleurBaisseBrute;
-
-  /* Les mêmes groupes servent aux deux menus : les écrire une fois évite que
-     l'un gagne un jour une option que l'autre n'aurait pas. */
-  const groupesOptions = (
-    <>
-      {axesDesOptions.map((a) => (
-        <optgroup key={a} label={a}>
-          {optionsCriteres.filter((o) => o.nomAxe === a).map((o) => (
-            <option key={o.valeur} value={o.valeur}>{nomCritere(o)}</option>
-          ))}
-        </optgroup>
-      ))}
-      {optionsCompteurs.length > 0 && (
-        <optgroup label="Compteurs d'occurrence">
-          {optionsCompteurs.map((o) => <option key={o.valeur} value={o.valeur}>{o.nom}</option>)}
-        </optgroup>
-      )}
-    </>
+  const grapheSuiviEl = (
+    <ResponsiveContainer width="100%" height="100%">
+      <ComposedChart data={donneesGrapheSuivi} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
+        <CartesianGrid stroke={BORDER} vertical={false} />
+        <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+        <YAxis domain={uniteSuivi === 'pct' ? [0, 100] : undefined} allowDecimals={false}
+          tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+        <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
+          formatter={(v, n) => [`${v}${suffixeSuivi}`, n]} />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        {croisementSuivi && <ReferenceLine x={croisementSuivi.label} stroke={INK_SOFT} strokeDasharray="3 3" />}
+        {seriesSuivi.map((s) => (
+          styleSuivi === 'barres' ? (
+            <Bar key={s.id} dataKey={s.id} name={nomSerie(s)} fill={couleursSuivi[s.id]} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          ) : (
+            <Line key={s.id} dataKey={s.id} name={nomSerie(s)} stroke={couleursSuivi[s.id]}
+              strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
+          )
+        ))}
+        {/* Tendances : même couleur que leur série, en pointillé fin — c'est ce
+            qui les rattache à l'une ou à l'autre. Avec plusieurs séries, une
+            couleur de contraste unique ne dirait plus de laquelle chaque
+            droite parle. */}
+        {tendancesSuivi && seriesSuivi.map((s) => fitsSuivi[s.id] && (
+          <Line key={`t-${s.id}`} dataKey={`t_${s.id}`} name={`Tendance · ${nomCritere(s)}`} stroke={couleursSuivi[s.id]}
+            strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
+        ))}
+      </ComposedChart>
+    </ResponsiveContainer>
   );
+
+  /* --- Graphique des compteurs d'occurrence --- */
+  const valideCompteur = (v) => optionsCompteurs.some((o) => o.valeur === v);
+  const selectionCompteursEff = selectionCompteurs.some(valideCompteur)
+    ? selectionCompteurs.filter(valideCompteur)
+    : optionsCompteurs.slice(0, SERIES_MAX).map((o) => o.valeur);
+  const onToggleCompteurs = (v) => setSelectionCompteurs(
+    selectionCompteursEff.includes(v) ? selectionCompteursEff.filter((x) => x !== v) : [...selectionCompteursEff, v].slice(0, SERIES_MAX)
+  );
+  const seriesCompteurs = selectionCompteursEff
+    .map((v) => optionsCompteurs.find((o) => o.valeur === v))
+    .filter(Boolean)
+    .map((o, i) => ({ ...o, id: `c${i}`, couleurNaturelle: o.couleur }));
+  const couleursCompteurs = couleursSeries(seriesCompteurs);
+  const tranchesCompteurs = chronologieCompteurs(relevesCompteur, gran);
+  const donneesGrapheCompteurs = tranchesCompteurs.map((t) => {
+    const row = { label: t.label };
+    seriesCompteurs.forEach((s) => { const v = t.series[s.k]; row[s.id] = v ? v.valeur : 0; });
+    return row;
+  });
+  const { fits: fitsCompteurs, trancheCroisement: croisementCompteurs } = ajusterTendances(donneesGrapheCompteurs, seriesCompteurs.map((s) => s.id));
+  if (tendancesCompteurs) {
+    seriesCompteurs.forEach((s) => {
+      donneesGrapheCompteurs.forEach((row, i) => { row[`t_${s.id}`] = fitsCompteurs[s.id] ? fitsCompteurs[s.id][i] : null; });
+    });
+  }
+  const texteCompteurs = tendancesCompteurs ? texteTendances(seriesCompteurs, fitsCompteurs, croisementCompteurs) : null;
+
+  const grapheCompteursEl = (
+    <ResponsiveContainer width="100%" height="100%">
+      <ComposedChart data={donneesGrapheCompteurs} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
+        <CartesianGrid stroke={BORDER} vertical={false} />
+        <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
+        <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
+        <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        {croisementCompteurs && <ReferenceLine x={croisementCompteurs.label} stroke={INK_SOFT} strokeDasharray="3 3" />}
+        {seriesCompteurs.map((s) => (
+          styleCompteurs === 'barres' ? (
+            <Bar key={s.id} dataKey={s.id} name={s.nom} fill={couleursCompteurs[s.id]} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          ) : (
+            <Line key={s.id} dataKey={s.id} name={s.nom} stroke={couleursCompteurs[s.id]}
+              strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
+          )
+        ))}
+        {tendancesCompteurs && seriesCompteurs.map((s) => fitsCompteurs[s.id] && (
+          <Line key={`t-${s.id}`} dataKey={`t_${s.id}`} name={`Tendance · ${s.nom}`} stroke={couleursCompteurs[s.id]}
+            strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
+        ))}
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+
+  const nomFichier = (suffixe) => `${nomSain(nomAffiche(donnees, personne))}-${suffixe}.png`;
 
   return (
     <>
@@ -4331,33 +4783,57 @@ function SuiviContinuVue({ donnees, personne, periode }) {
                   <div className="space-y-1.5">
                     {repar.lignes.map((l) => {
                       const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
-                      const favorable = favorablePour(`critere:${cleSerieSuivi(nomAxeVal, l.cle)}`);
+                      const cleSerie = `critere:${cleSerieSuivi(nomAxeVal, l.cle)}`;
+                      const cleReg = cleObjectifSuivi(personne, cleSerie);
+                      const reglage = reglageDe(cleSerie);
+                      const favorable = favorablePour(cleSerie);
+                      const ouvert = reglageOuvert === cleReg;
+                      const ligneObjectif = (lignes || []).find((x) => x.cleSuivi === cleReg);
                       return (
-                        <div key={String(l.cle)} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
-                            <span className="truncate">
-                              {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
+                        <div key={String(l.cle)}>
+                          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs rounded-lg px-2.5 py-1.5" style={{ backgroundColor: PAPER }}>
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: l.meta.color }} />
+                              <span className="truncate">
+                                {l.meta === CRITERE_INCONNU_SUIVI ? `${l.meta.l} (${l.cle})` : l.meta.l}
+                              </span>
+                              {ligneObjectif && (
+                                <span className="text-xs font-medium px-1.5 py-0.5 rounded shrink-0"
+                                  style={{ backgroundColor: ETATS[ligneObjectif.etat].color, color: texteLisibleSur(ETATS[ligneObjectif.etat].color), fontFamily: F_DISPLAY }}
+                                  title="Compte comme un objectif">
+                                  {ETATS[ligneObjectif.etat].court}
+                                </span>
+                              )}
                             </span>
-                          </span>
-                          {/* Durée et occurrences côte à côte : un critère peut
-                              peser peu de temps en revenant souvent. Chacun avec
-                              sa part et son écart, pour lire la même période sous
-                              les deux angles. */}
-                          <span className="flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0" style={{ fontFamily: F_MONO }}>
-                            <span className="flex items-center gap-1.5">
-                              <span>{minutes(l.ms)} min</span>
-                              {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" hausseFavorable={favorable} />}
-                              {l.part != null && <span style={{ color: INK_SOFT }}>{l.part} %</span>}
-                              {referencePeriode && l.part != null && <Ecart valeur={l.part} reference={ref ? ref.part : null} unite=" pts" hausseFavorable={favorable} />}
+                            {/* Durée et occurrences côte à côte : un critère peut
+                                peser peu de temps en revenant souvent. Chacun avec
+                                sa part et son écart, pour lire la même période sous
+                                les deux angles. */}
+                            <span className="flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0" style={{ fontFamily: F_MONO }}>
+                              <span className="flex items-center gap-1.5">
+                                <span>{minutes(l.ms)} min</span>
+                                {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" hausseFavorable={favorable} />}
+                                {l.part != null && <span style={{ color: INK_SOFT }}>{l.part} %</span>}
+                                {referencePeriode && l.part != null && <Ecart valeur={l.part} reference={ref ? ref.part : null} unite=" pts" hausseFavorable={favorable} />}
+                              </span>
+                              <span className="flex items-center gap-1.5">
+                                <span>{l.n} occ.</span>
+                                {referencePeriode && <Ecart valeur={l.n} reference={ref ? ref.n : null} hausseFavorable={favorable} />}
+                                {l.partN != null && <span style={{ color: INK_SOFT }}>{l.partN} %</span>}
+                                {referencePeriode && l.partN != null && <Ecart valeur={l.partN} reference={ref ? ref.partN : null} unite=" pts" hausseFavorable={favorable} />}
+                              </span>
+                              {onObjectifSuivi && (
+                                <button type="button" onClick={() => setReglageOuvert(ouvert ? null : cleReg)}
+                                  className="underline decoration-dotted" style={{ color: INK_SOFT, fontFamily: F_BODY }}>
+                                  {reglage && reglage.actif ? 'Objectif' : 'Compte comme un objectif ?'}
+                                </button>
+                              )}
                             </span>
-                            <span className="flex items-center gap-1.5">
-                              <span>{l.n} occ.</span>
-                              {referencePeriode && <Ecart valeur={l.n} reference={ref ? ref.n : null} hausseFavorable={favorable} />}
-                              {l.partN != null && <span style={{ color: INK_SOFT }}>{l.partN} %</span>}
-                              {referencePeriode && l.partN != null && <Ecart valeur={l.partN} reference={ref ? ref.partN : null} unite=" pts" hausseFavorable={favorable} />}
-                            </span>
-                          </span>
+                          </div>
+                          {ouvert && onObjectifSuivi && (
+                            <ReglageObjectifSuivi reglage={reglage} uniteChoix={UNITES_CHOIX_CRITERE}
+                              onChange={(v) => onObjectifSuivi(cleReg, v)} />
+                          )}
                         </div>
                       );
                     })}
@@ -4382,11 +4858,23 @@ function SuiviContinuVue({ donnees, personne, periode }) {
               const ref = parCompteurRef.get(c.compteurId);
               const duJour = c.releves.filter((r) => jourLocal(r.timestamp) === jourAffiche).length;
               const journees = new Set(c.releves.map((r) => jourLocal(r.timestamp))).size;
-              const favorable = favorablePour(`compteur:${c.compteurId}`);
+              const cleSerie = `compteur:${c.compteurId}`;
+              const cleReg = cleObjectifSuivi(personne, cleSerie);
+              const reglage = reglageDe(cleSerie);
+              const favorable = favorablePour(cleSerie);
+              const ouvert = reglageOuvert === cleReg;
+              const ligneObjectif = (lignes || []).find((x) => x.cleSuivi === cleReg);
               return (
                 <Card key={`compteur-${c.compteurId}`}>
-                  <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
+                  <div className="text-sm font-semibold mb-2 flex items-center gap-1.5" style={{ fontFamily: F_DISPLAY }}>
                     {c.nom} <span className="font-normal text-xs" style={{ color: INK_SOFT }}>· compteur d'occurrence</span>
+                    {ligneObjectif && (
+                      <span className="text-xs font-medium px-1.5 py-0.5 rounded shrink-0"
+                        style={{ backgroundColor: ETATS[ligneObjectif.etat].color, color: texteLisibleSur(ETATS[ligneObjectif.etat].color) }}
+                        title="Compte comme un objectif">
+                        {ETATS[ligneObjectif.etat].court}
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs" style={{ fontFamily: F_MONO }}>
                     <span className="flex items-center gap-1.5">
@@ -4399,7 +4887,17 @@ function SuiviContinuVue({ donnees, personne, periode }) {
                     <span style={{ color: INK_SOFT }}>
                       {journees} journée{journees !== 1 ? 's' : ''} d'usage
                     </span>
+                    {onObjectifSuivi && (
+                      <button type="button" onClick={() => setReglageOuvert(ouvert ? null : cleReg)}
+                        className="underline decoration-dotted" style={{ color: INK_SOFT, fontFamily: F_BODY }}>
+                        {reglage && reglage.actif ? 'Objectif' : 'Compte comme un objectif ?'}
+                      </button>
+                    )}
                   </div>
+                  {ouvert && onObjectifSuivi && (
+                    <ReglageObjectifSuivi reglage={reglage} uniteChoix={null}
+                      onChange={(v) => onObjectifSuivi(cleReg, v)} />
+                  )}
                 </Card>
               );
             })}
@@ -4408,100 +4906,118 @@ function SuiviContinuVue({ donnees, personne, periode }) {
       )}
 
       {mode === 'graphique' && (
-        options.length < 2 ? (
-          <Empty>Il faut deux séries — critères de suivi ou compteurs d'occurrence — pour les comparer.</Empty>
-        ) : (
-          <Card>
-            <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-              <div>
-                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>À faire augmenter</div>
-                <select value={hausseEff} onChange={(e) => setCritereHausse(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
-                  {groupesOptions}
-                </select>
+        <div className="space-y-4">
+          {optionsCriteres.length > 0 && (
+            <Card>
+              <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Suivi continu</div>
+              <div className="mb-3">
+                <SelecteurSeries options={optionsCriteres} selection={selectionSuiviEff} onToggle={onToggleSuivi} nomOption={nomSerie} />
               </div>
-              <div>
-                <div className="text-xs mb-1.5" style={{ color: INK_SOFT }}>À faire diminuer</div>
-                <select value={baisseEff} onChange={(e) => setCritereBaisse(e.target.value)}
-                  className="w-full rounded-xl border px-3 py-2.5 text-sm" style={{ borderColor: BORDER, color: INK }}>
-                  {groupesOptions}
-                </select>
-              </div>
-            </div>
 
-            {avecCompteur ? (
-              <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
-                Un compteur d'occurrence n'a ni durée ni total de référence : les deux séries
-                sont lues en nombre, sur un seul axe.
-              </p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-3 mb-3">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
-                  <Chip label="Durée" on={mesure === 'duree'} onClick={() => setMesure('duree')} />
-                  <Chip label="Occurrences" on={mesure === 'occurrences'} onClick={() => setMesure('occurrences')} />
-                </div>
-                <BasculeUnite unite={unite} setUnite={setUnite} />
-              </div>
-            )}
-
-            <div style={{ height: 280 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={donneesGraphe} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
-                  <CartesianGrid stroke={BORDER} vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                  <YAxis domain={uniteEff === 'pct' ? [0, 100] : undefined} allowDecimals={false}
-                    tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }}
-                    formatter={(v) => `${v}${suffixe}`} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  {trancheCroisement && (
-                    <ReferenceLine x={trancheCroisement.label} stroke={INK_SOFT} strokeDasharray="3 3" />
-                  )}
-                  <Line dataKey="hausse" name={optHausse ? nomSerie(optHausse) : ''} stroke={couleurHausse}
-                    strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
-                  <Line dataKey="baisse" name={optBaisse ? nomSerie(optBaisse) : ''} stroke={couleurBaisse}
-                    strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
-                  {/* Tendances : même couleur que leur série, en pointillé fin.
-                      C'est ce qui les rattache à l'une ou à l'autre — avec deux
-                      séries, une couleur de contraste ne dirait plus de quelle
-                      courbe la droite parle. */}
-                  {fitHausse && (
-                    <Line dataKey="tHausse" name={`Tendance · ${optHausse ? nomCritere(optHausse) : ''}`} stroke={couleurHausse}
-                      strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
-                  )}
-                  {fitBaisse && (
-                    <Line dataKey="tBaisse" name={`Tendance · ${optBaisse ? nomCritere(optBaisse) : ''}`} stroke={couleurBaisse}
-                      strokeWidth={1.5} strokeDasharray="5 4" dot={false} connectNulls isAnimationActive={false} />
-                  )}
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
-              {!fitHausse || !fitBaisse ? (
-                <div>Les tendances demandent au moins trois tranches où les deux séries sont connues.</div>
-              ) : trancheCroisement ? (
-                <div>Les deux tendances se croisent au niveau de <span style={{ fontFamily: F_MONO, color: INK }}>{trancheCroisement.label}</span>.</div>
+              {seriesSuivi.length === 0 ? (
+                <Empty>Choisissez au moins un critère.</Empty>
               ) : (
-                <div>Les deux tendances ne se croisent pas sur la période affichée ; elles ne sont pas prolongées au-delà.</div>
+                <>
+                  <div className="flex flex-wrap items-center gap-3 mb-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
+                      <Chip label="Durée" on={mesureSuivi === 'duree'} onClick={() => setMesureSuivi('duree')} />
+                      <Chip label="Occurrences" on={mesureSuivi === 'occurrences'} onClick={() => setMesureSuivi('occurrences')} />
+                    </div>
+                    <BasculeUnite unite={uniteSuivi} setUnite={setUniteSuivi} />
+                    <div className="flex items-center gap-1.5">
+                      <Chip label="Courbes" on={styleSuivi === 'lignes'} onClick={() => setStyleSuivi('lignes')} />
+                      <Chip label="Barres" on={styleSuivi === 'barres'} onClick={() => setStyleSuivi('barres')} />
+                    </div>
+                    <Chip label="Tendances" on={tendancesSuivi} onClick={() => setTendancesSuivi((v) => !v)} />
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <Btn variant="ghost" className="text-xs py-1" onClick={() => setAgrandiSuivi(true)}>Agrandir</Btn>
+                      <Btn variant="ghost" className="text-xs py-1"
+                        onClick={() => exporterGraphePng(refGrapheSuivi.current, nomFichier('suivi-continu'))}>
+                        <Download size={13} /> PNG
+                      </Btn>
+                    </div>
+                  </div>
+
+                  <div style={{ height: 280 }} ref={refGrapheSuivi}>{grapheSuiviEl}</div>
+
+                  <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
+                    {texteSuivi && <div>{texteSuivi}</div>}
+                    <div>
+                      {uniteSuivi === 'pct'
+                        ? `Chaque part est calculée sur ${mesureSuivi === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
+                        : `Chaque point cumule ${mesureSuivi === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
+                      {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
+                    </div>
+                  </div>
+                </>
               )}
-              <div>
-                {uniteEff === 'pct'
-                  ? `Chaque part est calculée sur ${mesureEff === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
-                  : `Chaque point cumule ${mesureEff === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
-                {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
-                {optionsCompteurs.length > 0 && " Un compteur, lui, compte ses appuis : n'avoir pas appuyé sur une tranche observée vaut bien zéro."}
+
+              {agrandiSuivi && (
+                <GrapheAgrandi titre={`${nomAffiche(donnees, personne)} · Suivi continu`} sousTitre={libellePeriode(periode)}
+                  styleOptions={[{ k: 'lignes', label: 'Courbes' }, { k: 'barres', label: 'Barres' }]}
+                  style={styleSuivi} onStyle={setStyleSuivi} courbes={null} onBasculerCourbe={null}
+                  onExporterPng={() => exporterGraphePng(refGrapheSuiviAgrandi.current, nomFichier('suivi-continu'))}
+                  onFermer={() => setAgrandiSuivi(false)}>
+                  <div ref={refGrapheSuiviAgrandi} style={{ height: '70vh' }}>{grapheSuiviEl}</div>
+                </GrapheAgrandi>
+              )}
+            </Card>
+          )}
+
+          {optionsCompteurs.length > 0 && (
+            <Card>
+              <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>Compteurs d'occurrence</div>
+              <div className="mb-3">
+                <SelecteurSeries options={optionsCompteurs} selection={selectionCompteursEff} onToggle={onToggleCompteurs} nomOption={(o) => o.nom} />
               </div>
-            </div>
-          </Card>
-        )
+
+              {seriesCompteurs.length === 0 ? (
+                <Empty>Choisissez au moins un compteur.</Empty>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-3 mb-3">
+                    <div className="flex items-center gap-1.5">
+                      <Chip label="Courbes" on={styleCompteurs === 'lignes'} onClick={() => setStyleCompteurs('lignes')} />
+                      <Chip label="Barres" on={styleCompteurs === 'barres'} onClick={() => setStyleCompteurs('barres')} />
+                    </div>
+                    <Chip label="Tendances" on={tendancesCompteurs} onClick={() => setTendancesCompteurs((v) => !v)} />
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <Btn variant="ghost" className="text-xs py-1" onClick={() => setAgrandiCompteurs(true)}>Agrandir</Btn>
+                      <Btn variant="ghost" className="text-xs py-1"
+                        onClick={() => exporterGraphePng(refGrapheCompteurs.current, nomFichier('compteurs'))}>
+                        <Download size={13} /> PNG
+                      </Btn>
+                    </div>
+                  </div>
+
+                  <div style={{ height: 280 }} ref={refGrapheCompteurs}>{grapheCompteursEl}</div>
+
+                  <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
+                    {texteCompteurs && <div>{texteCompteurs}</div>}
+                    <div>Chaque point compte les appuis du compteur sur la tranche ; n'avoir pas appuyé vaut bien zéro.</div>
+                  </div>
+                </>
+              )}
+
+              {agrandiCompteurs && (
+                <GrapheAgrandi titre={`${nomAffiche(donnees, personne)} · Compteurs d'occurrence`} sousTitre={libellePeriode(periode)}
+                  styleOptions={[{ k: 'lignes', label: 'Courbes' }, { k: 'barres', label: 'Barres' }]}
+                  style={styleCompteurs} onStyle={setStyleCompteurs} courbes={null} onBasculerCourbe={null}
+                  onExporterPng={() => exporterGraphePng(refGrapheCompteursAgrandi.current, nomFichier('compteurs'))}
+                  onFermer={() => setAgrandiCompteurs(false)}>
+                  <div ref={refGrapheCompteursAgrandi} style={{ height: '70vh' }}>{grapheCompteursEl}</div>
+                </GrapheAgrandi>
+              )}
+            </Card>
+          )}
+        </div>
       )}
     </>
   );
 }
 
-function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises }) {
+function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises, onObjectifSuivi }) {
   const [vue, setVue] = useState('objectifs');
   const style = graphe.style;
   const courbes = graphe.courbes;
@@ -4654,15 +5170,14 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
 
   const siennes = lignes
     .filter((l) => l.initials === personne)
-    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
+    .map((l) => filtrerLignePeriode(l, periode));
 
   /* Même construction que `siennes`, sur la période de comparaison réglée
      dans le sélecteur — sert au radar, pour opposer deux moments plutôt que
      de montrer une seule photo. */
   const referencePeriode = periodeComparee(periode);
   const siennesRef = referencePeriode
-    ? lignes.filter((l) => l.initials === personne)
-        .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, referencePeriode)) }))
+    ? lignes.filter((l) => l.initials === personne).map((l) => filtrerLignePeriode(l, referencePeriode))
     : [];
 
   const crisesPersonne = (donnees.crises || []).filter((c) => {
@@ -4838,7 +5353,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
         return (
           <>
             <div className="flex flex-wrap gap-4 mb-4">
-              {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'non_acquis'].map((e) => (
+              {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'mesure', 'non_acquis'].map((e) => (
                 <div key={e} className="min-w-[80px] text-center">
                   <div className="text-xl font-semibold" style={{ fontFamily: F_MONO, color: ETATS[e].color }}>{compte(e)}</div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
@@ -4945,7 +5460,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
       )}
 
       {vue === 'suivi' && (
-        <SuiviContinuVue key={personne} donnees={donnees} personne={personne} periode={periode} />
+        <SuiviContinuVue key={personne} donnees={donnees} personne={personne} periode={periode}
+          lignes={lignes} onObjectifSuivi={onObjectifSuivi} />
       )}
 
       {vue === 'croisement' && (
@@ -5325,9 +5841,13 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
   const periode = selection.periode || periodeVide();
 
   const disponibles = lignes.filter((l) => l.initials === personne);
+  /* `mesures` n'était pas filtré par la période ici non plus : le document
+     imprimé pour un objectif en mesure brute portait tout son historique quel
+     que soit le réglage du rapport. Même correction qu'au Tableau de bord et
+     à la fiche personne, via filtrerLignePeriode. */
   const retenus = disponibles
     .filter((l) => (selection.objectifs || []).includes(l.objectif))
-    .map((l) => ({ ...l, points: l.points.filter((pt) => dansPeriode(pt.date, periode)) }));
+    .map((l) => filtrerLignePeriode(l, periode));
 
   const basculer = (objectif) => {
     const cur = selection.objectifs || [];
@@ -5854,6 +6374,10 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
      entier, même sur un export restreint à quelques personnes ou une
      période resserrée. */
   const codesEfl = { ...(donnees.codesEfl || {}) };
+  /* Même filtrage que `commentaires` : la clé porte les initiales avant le
+     premier séparateur. */
+  const objectifsSuivi = {};
+  Object.entries(donnees.objectifsSuivi || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) objectifsSuivi[k] = v; });
 
   return {
     format: 'aba-manager-export',
@@ -5866,7 +6390,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
     _compteurs: donnees._compteurs,
     _intervenants: donnees._intervenants,
     _axesSuivi: donnees._axesSuivi,
-    alias, commentaires, codesEfl,
+    alias, commentaires, codesEfl, objectifsSuivi,
   };
 }
 
@@ -5949,6 +6473,7 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
       },
       commentaires: { ...(cumul.commentaires || {}), ...(paquet.commentaires || {}) },
       codesEfl: { ...(cumul.codesEfl || {}), ...(paquet.codesEfl || {}) },
+      objectifsSuivi: { ...(cumul.objectifsSuivi || {}), ...(paquet.objectifsSuivi || {}) },
     };
     onImported(cumul);
     setFichier(null); setEnveloppe(null); setPassphrase('');
@@ -6210,12 +6735,13 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                       };
                       delete alias.personnes[pp.initials];
                       const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
+                      const objectifsSuivi = Object.fromEntries(Object.entries(d.objectifsSuivi || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
                       const idVers = {};
                       Object.entries(d._idVersInitiales || {}).forEach(([src, t]) => {
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, stabilite, suivi, alias, commentaires,
+                        ...d, seances, crises, stabilite, suivi, alias, commentaires, objectifsSuivi,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
@@ -6626,7 +7152,8 @@ function ManagerApp() {
      tous les objectifs de tout le monde. */
   const lignes = useMemo(
     () => construireLignes(donnees),
-    [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales]
+    [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales,
+      donnees.suivi, donnees.stabilite, donnees._axesSuivi, donnees._compteurs, donnees.objectifsSuivi]
   );
 
 
@@ -6768,6 +7295,12 @@ function ManagerApp() {
      travaillent cet objectif : la clé est le nom de l'objectif, pas le couple. */
   function majCodeEfl(objectif, valeur) {
     setDonnees((d) => ({ ...d, codesEfl: { ...(d.codesEfl || {}), [objectif]: valeur } }));
+  }
+  /* Réglage « compte comme un objectif » d'un critère de suivi ou d'un
+     compteur : `cle` est déjà préfixée des initiales (voir cleObjectifSuivi),
+     même patron que majCommentaire. */
+  function majObjectifSuivi(cle, valeur) {
+    setDonnees((d) => ({ ...d, objectifsSuivi: { ...(d.objectifsSuivi || {}), [cle]: valeur } }));
   }
 
   /* Toute purge passe par ici : un seul point d'écriture, un seul message. */
@@ -6974,7 +7507,8 @@ function ManagerApp() {
                 periode={periode} setPeriode={setPeriode}
                 graphe={graphePersonnes} setGraphe={setGraphePersonnes}
                 onRapport={lancerRapport}
-                onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises} />
+                onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises}
+                onObjectifSuivi={majObjectifSuivi} />
             </>
           )}
           {tab === 'crises' && (

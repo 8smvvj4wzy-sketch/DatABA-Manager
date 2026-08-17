@@ -13,7 +13,7 @@ disent, ils ne se lissent pas.
 
 ## Architecture
 
-Tout tient dans `src/App.jsx` (~6 900 lignes). Assumé, ne pas proposer de
+Tout tient dans `src/App.jsx` (~7 600 lignes). Assumé, ne pas proposer de
 découpage sans que je le demande.
 
 Données consolidées : un seul bloc JSON dans `localStorage`, chiffré, sous la
@@ -40,7 +40,7 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 23 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 24 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
@@ -85,6 +85,21 @@ rouge.
   re-cotée ou une crise complétée après coup. Contrepartie assumée :
   réimporter un fichier plus ancien que ce qui est consolidé fait régresser
   les enregistrements concernés, aucune date de version n'étant comparée.
+- **DatABA ne sait pas déclarer qu'un axe de suivi ou un compteur cote un
+  objectif.** Le choix se fait ici (`donnees.objectifsSuivi`, par personne),
+  et `lignesSuiviContinu` fabrique alors une ligne de la même forme que
+  `construireLignes` en produit pour une séance. Piège d'identité :
+  `objectif` est un nom, clé React, ancre DOM, clé d'alias et de commentaire —
+  s'il coïncide avec un objectif déjà coté chez la même personne, il est
+  suffixé (« (suivi continu) » / « (compteur) »), sinon deux lignes
+  partageraient tout cela en silence. Sur les six consommateurs de `lignes`,
+  quatre jetaient toute ligne sans `points` (une mesure brute n'y vit que dans
+  `mesures`) — corrigé au Tableau de bord, à la fiche personne et dans
+  `construireFaits`, laissé tel quel dans `RadarObjectifs` (échelle 0-100 en
+  pourcentage, une mesure brute n'y a pas sa place). `mesures` n'était filtré
+  par la période nulle part : `filtrerLignePeriode` centralise ce filtrage,
+  les trois écrans doivent continuer à l'appeler plutôt que de refiltrer
+  `points` seul.
 - **`BlocsCrise` est partagé** entre l'écran et l'impression. Ne pas en créer
   une seconde version pour l'impression : deux blocs de rendu qui se
   ressemblent finissent par diverger, et c'est déjà arrivé — un bloc
