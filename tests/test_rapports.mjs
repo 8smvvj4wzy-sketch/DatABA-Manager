@@ -78,4 +78,34 @@ t('le bilan de crise est conservé avec le rapport', liste.find(r=>r.nom==='Bila
 liste=liste.filter(r=>r.nom!=='Bilan T.B.');
 t('suppression ciblée', liste.map(r=>r.nom), ['Bilan L.M.']);
 
+/* ==================== Titre du document ====================
+   Distinct de `nom` (clé de la liste, jamais imprimé — voir ci-dessus) :
+   `titre` est ce qui s'affiche en en-tête du document, saisi dans l'écran
+   Rapport, enregistré avec la composition et restauré à l'ouverture. Un
+   rapport enregistré avant l'ajout de ce champ n'a pas de `titre` : la
+   lecture doit retomber sur le défaut plutôt que d'afficher un titre vide. */
+const TITRE_DEFAUT='Bilan de suivi';
+function enregistrerAvecTitre(liste,nom,sel){
+  const cle=String(nom||'').trim();
+  if(!cle)return liste;
+  const entree={id:'x',nom:cle,majLe:'2026-07-31',...sel,titre:sel.titre||TITRE_DEFAUT};
+  return [entree,...liste.filter(r=>r.nom!==cle)];
+}
+function ouvrirAvecTitre(r){
+  return {personne:r.personne,objectifs:r.objectifs||[],titre:r.titre||TITRE_DEFAUT};
+}
+
+let listeTitres=[];
+listeTitres=enregistrerAvecTitre(listeTitres,'Bilan L.M.',{personne:'L.M.',objectifs:['A'],titre:'Bilan trimestriel'});
+t('le titre du document est enregistré avec le rapport', listeTitres[0].titre, 'Bilan trimestriel');
+t('le nom reste la clé de la liste, distinct du titre', listeTitres[0].nom, 'Bilan L.M.');
+listeTitres=enregistrerAvecTitre(listeTitres,'Bilan T.B.',{personne:'T.B.',objectifs:[]});
+t('sans titre saisi, le défaut est enregistré', listeTitres[0].titre, TITRE_DEFAUT);
+t('un rapport ancien sans champ titre retombe sur le défaut à l ouverture', ouvrirAvecTitre({personne:'X',objectifs:[]}).titre, TITRE_DEFAUT);
+t('un rapport avec titre le restaure tel quel', ouvrirAvecTitre({personne:'X',objectifs:[],titre:'Bilan trimestriel'}).titre, 'Bilan trimestriel');
+/* Réenregistrer sous le même nom mais un titre différent remplace le titre,
+   comme le reste de la composition */
+listeTitres=enregistrerAvecTitre(listeTitres,'Bilan T.B.',{personne:'T.B.',objectifs:[],titre:'Bilan de fin d’année'});
+t('réenregistrer remplace aussi le titre', listeTitres.find(r=>r.nom==='Bilan T.B.').titre, 'Bilan de fin d’année');
+
 console.log(`\n${ok} réussis, ${ko} échecs`);process.exit(ko?1:0);
