@@ -235,6 +235,13 @@ const VIDE = {
      (`students[].compteurs`) et leurs appuis voyagent dans `suivi`, mêlés aux
      relevés d'état — voir `compteursDePersonne` pour ce qui les sépare. */
   _compteurs: {},
+  /* Jeu de guidances de l'établissement, par source. DatABA l'exporte
+     (`backup.guidances`) et s'en sert de repli quand un objectif ne porte pas
+     son propre `config.guidanceSet` : c'est lui qui dit quel code vaut
+     « indépendant ». Sans lui, Manager retombait en dur sur le code 'I' et
+     rendait donc un autre pourcentage que la tablette dès qu'un établissement
+     avait renommé ce code ou en avait marqué un second. */
+  _guidances: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code de curriculum attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -272,6 +279,7 @@ function normaliser(d) {
     suivi: d.suivi || [],
     _axesSuivi: d._axesSuivi || {},
     _compteurs: d._compteurs || {},
+    _guidances: d._guidances || {},
     classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
@@ -400,6 +408,19 @@ function fusionnerImport(actuel, backup, nomSource) {
       .map((c) => [c.id, (c.nom || '').trim() || 'Compteur sans nom']))),
   };
 
+  /* Guidances de l'établissement. Fusionnées par code plutôt que remplacées :
+     un export ultérieur qui aurait perdu un code ne doit pas rendre muettes
+     les cotations passées qui s'en servent. Le fichier entrant gagne sur un
+     code déjà connu — c'est lui qui porte le drapeau `independent` à jour. */
+  const guidancesSource = (() => {
+    const parCode = new Map(((actuel._guidances || {})[nomSource] || []).map((g) => [g.code, g]));
+    (backup.guidances || []).forEach((g) => {
+      if (!g || !g.code) return;
+      parCode.set(g.code, { code: g.code, label: g.label || g.code, independent: !!g.independent });
+    });
+    return Array.from(parCode.values());
+  })();
+
   const fusionSeances = fusionnerParId(actuel.seances, backup.sessions,
     (s) => ({ ...s, source: s.source || nomSource }));
   const seances = fusionSeances.liste;
@@ -461,6 +482,7 @@ function fusionnerImport(actuel, backup, nomSource) {
     collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
     _compteurs: { ...(actuel._compteurs || {}), [nomSource]: { ...((actuel._compteurs || {})[nomSource] || {}), ...compteursSource } },
+    _guidances: { ...(actuel._guidances || {}), [nomSource]: guidancesSource },
     nbNouvellesSeances: fusionSeances.nouveaux,
     nbNouvellesCrises: fusionCrises.nouveaux,
     nbNouveauxReleves,
@@ -478,10 +500,25 @@ function idPourSource(donnees, source, initiales) {
   return Object.keys(t).find((id) => t[id] === initiales) || null;
 }
 
-/* ==================== Calcul des scores ==================== */
-function objectiveScoreValue(obj, entry) {
+/* ==================== Calcul des scores ====================
+   Auxiliaire interne de `valeurCotation`, et de personne d'autre : il ne sait
+   calculer que les modes dont le score est un pourcentage DIRECT et rend null
+   pour l'occurrence comme pour l'intervalle. L'appeler depuis un écran, c'est
+   y faire disparaître ces deux modes — ce qui est arrivé à trois endroits à la
+   fois. Le vérificateur interdit désormais tout appel hors de
+   `valeurCotation`.
+
+   `guidances` est le jeu de l'établissement (`_guidances`, par source) :
+   DatABA s'en sert de repli quand un objectif ne porte pas son propre
+   `config.guidanceSet`, et c'est lui qui dit quel code vaut « indépendant ».
+   Sans lui, le repli en dur sur 'I' rendait un autre pourcentage que la
+   tablette dès qu'un établissement avait renommé ce code ou en avait marqué un
+   second. Le repli sur 'I' reste, en dernier recours seulement — c'est celui
+   d'`isIndependentCode` côté DatABA. */
+function objectiveScoreValue(obj, entry, guidances) {
   if (!obj || !entry) return null;
-  const gList = (obj.config && obj.config.guidanceSet) || [];
+  const propre = (obj.config && obj.config.guidanceSet) || [];
+  const gList = propre.length ? propre : (guidances || []);
   const indep = (code) => {
     const g = gList.find((x) => x.code === code);
     return g ? !!g.independent : code === 'I';
@@ -625,7 +662,10 @@ function suiteAuSeuil(points, crit) {
   return suite;
 }
 
-function analyserObjectif(seances, tableParSource, obj) {
+/* `guidancesParSource` est `donnees._guidances` : le jeu de l'établissement,
+   par tablette, dont `objectiveScoreValue` se sert de repli quand l'objectif
+   ne porte pas le sien. Optionnel — sans lui le repli reste celui d'avant. */
+function analyserObjectif(seances, tableParSource, obj, guidancesParSource) {
   const points = [];
   const mesures = [];
   let unite = null;
@@ -656,7 +696,7 @@ function analyserObjectif(seances, tableParSource, obj) {
        c'est ce qui fait enfin entrer le mode Intervalle dans les points, lui
        dont le score est bien un pourcentage mais qu'objectiveScoreValue ne
        sait pas calculer — ses cotations n'apparaissaient nulle part. */
-    const m = valeurCotation(snap, entry);
+    const m = valeurCotation(snap, entry, (guidancesParSource || {})[sess.source]);
     if (!m) return;
     if (m.unite === '%') {
       /* Le créneau (matin/après-midi) n'existe que pour Probe à deux prises
@@ -829,7 +869,7 @@ function construireLignes(donnees) {
         initials: p.initials,
         objectif: obj.name,
         type: obj.type,
-        ...analyserObjectif(siennes, tableParSource, obj),
+        ...analyserObjectif(siennes, tableParSource, obj, donnees._guidances),
       });
     });
   });
@@ -1026,7 +1066,7 @@ function construireFaits(donnees, lignes) {
            alors qu'elles entrent bien dans les points de analyserObjectif :
            deux chiffres différents pour la même cotation. L'occurrence reste
            hors du taux, elle, mais parce que ce n'est pas un pourcentage. */
-        const m = valeurCotation(obj, entry);
+        const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
         const score = m && m.unite === '%' ? m.valeur : null;
         cotations.push({
           seanceId: sess.id,
@@ -1177,6 +1217,9 @@ function libelleSeance(d, sess) {
    (voir fusionnerImport), donc arriver ici signifie que l'identifiant n'est
    plus dans la configuration de la tablette. */
 const nomCompteurDe = (d, source, id) => (id && ((d._compteurs || {})[source] || {})[id]) || 'Compteur retiré';
+/* Jeu de guidances de la tablette d'où vient la cotation — à passer à
+   `valeurCotation` par tout ce qui lit une cotation de séance. */
+const guidancesDe = (d, source) => ((d._guidances || {})[source] || []);
 
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
@@ -1921,14 +1964,19 @@ function partNiveauCible(obj, entry) {
   if (!total) return null;
   const niveaux = c.levels || [];
   const cible = c.targetLevelId || (niveaux[0] && niveaux[0].id);
+  /* Sans niveau cible, il n'y a rien à mesurer. Faute de cette garde,
+     `totaux[undefined] || 0` valait 0 et la fonction rendait 0 % — un snapshot
+     amputé de ses niveaux se lisait donc « 0 % » puis « Non acquis », comme un
+     échec, au lieu d'être écarté faute de quoi juger. */
+  if (!cible) return null;
   return Math.round(((totaux[cible] || 0) / total) * 100);
 }
 
 /* Valeur d'une cotation, quel que soit son type : le pourcentage quand il
    existe, sinon la mesure brute. Renvoie null si rien n'a été relevé. */
-function valeurCotation(obj, entry) {
+function valeurCotation(obj, entry, guidances) {
   if (!obj || !entry) return null;
-  const score = objectiveScoreValue(obj, entry);
+  const score = objectiveScoreValue(obj, entry, guidances);
   if (score != null) return { valeur: score, unite: '%', cumulable: false, hausseFavorable: true };
 
   if (obj.type === 'occurrence') {
@@ -2023,7 +2071,7 @@ function detailCotationsPersonne(donnees, personne, periode) {
       } else {
         /* occurrence / timer / latency : valeur brute déjà scalaire, rien à
            décomposer en dessous — voir le commentaire de tête. */
-        const m = valeurCotation(obj, entry);
+        const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
         if (!m) return;
         lignes.push({ ...base, unite: m.unite, repere: 'cotation', valeur: m.valeur });
       }
@@ -3035,7 +3083,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
            sur toutes les séances à la fois — et que le tri « Par cotations »
            reléguait en fin de liste les séances les plus denses dans ces deux
            modes. */
-        if (obj && entry && valeurCotation(obj, entry) != null) cotations += 1;
+        if (obj && entry && valeurCotation(obj, entry, guidancesDe(donnees, s.source)) != null) cotations += 1;
       });
     });
     const table = (donnees._idVersInitiales || {})[s.source] || {};
@@ -3309,7 +3357,7 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                      trois, dont tous les comportements problèmes comptés à
                      l'occurrence. La valeur est rendue avec son unité : un
                      compteur à douze n'est pas un score de douze pour cent. */
-                  const m = valeurCotation(obj, entry);
+                  const m = valeurCotation(obj, entry, guidancesDe(donnees, seance.source));
                   return (
                     <div key={oid} className="flex items-baseline justify-between gap-2 text-xs py-0.5">
                       <span className="min-w-0 break-words">
@@ -6454,6 +6502,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
     _compteurs: donnees._compteurs,
     _intervenants: donnees._intervenants,
     _axesSuivi: donnees._axesSuivi,
+    _guidances: donnees._guidances,
     alias, commentaires, codesEfl, objectifsSuivi,
   };
 }
@@ -6519,6 +6568,10 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
            perdrait les noms de compteurs. */
         compteurs: Object.entries((paquet._compteurs || {})[src] || {}).map(([id, nom]) => ({ id, nom })),
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
+        /* Même forme que dans la sauvegarde de tablette : sans elle, un
+           aller-retour Manager → Manager perdrait le jeu de guidances de
+           l'établissement et les pourcentages changeraient au passage. */
+        guidances: (paquet._guidances || {})[src] || [],
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
         /* Même règle que fusionnerImport : `suivi` prime sur `stabilite`, pour
@@ -6743,6 +6796,8 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         delete axes[src];
                         const compt = { ...(d._compteurs || {}) };
                         delete compt[src];
+                        const guid = { ...(d._guidances || {}) };
+                        delete guid[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
@@ -6754,6 +6809,7 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                           ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
                           _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
                           _compteurs: compt,
+                          _guidances: guid,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -7217,7 +7273,8 @@ function ManagerApp() {
   const lignes = useMemo(
     () => construireLignes(donnees),
     [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales,
-      donnees.suivi, donnees.stabilite, donnees._axesSuivi, donnees._compteurs, donnees.objectifsSuivi]
+      donnees.suivi, donnees.stabilite, donnees._axesSuivi, donnees._compteurs, donnees._guidances,
+      donnees.objectifsSuivi]
   );
 
 
