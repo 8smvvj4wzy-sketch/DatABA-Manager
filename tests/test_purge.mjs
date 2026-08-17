@@ -24,8 +24,15 @@ const base={
     {id:'v2',studentId:'a2',timestamp:'2026-07-12',source:'tabA',suiviId:'principal',critere:'crise'},
     {id:'v3',studentId:'b1',timestamp:'2026-07-21',source:'tabB',suiviId:'principal',critere:'stable'},
   ],
-  alias:{personnes:{'L.M.':'Lucas M.'},objectifs:{'L.M.|o1':'Couleurs'}},
-  commentaires:{'L.M.|o1':'à revoir'},
+  alias:{personnes:{'L.M.':'Lucas M.','T.B.':'Théo B.'},objectifs:{'L.M.|o1':'Couleurs','T.B.|o2':'Tri'}},
+  commentaires:{'L.M.|o1':'à revoir','T.B.|o2':'acquis'},
+  /* Les trois dictionnaires et les rapports que la purge par source oubliait :
+     elle supprimait bien la personne, et laissait derrière elle ses libellés,
+     ses commentaires, ses réglages de suivi promu et ses rapports enregistrés.
+     Des réglages orphelins qui ressuscitaient sur quelqu'un d'autre au premier
+     import ramenant les mêmes initiales. */
+  objectifsSuivi:{'L.M.|critere:Stabilité||stable':{actif:true},'T.B.|compteur:c1':{actif:true}},
+  rapports:[{id:'r1',nom:'Bilan L.M.',personne:'L.M.'},{id:'r2',nom:'Bilan T.B.',personne:'T.B.'}],
 };
 
 /* Purge par date */
@@ -43,9 +50,20 @@ function purgerSource(d,src){
   const idv={...d._idVersInitiales};delete idv[src];
   const ate={...d._ateliers};delete ate[src];
   const encore=new Set();Object.values(idv).forEach(tb=>Object.values(tb).forEach(i=>encore.add(i)));
+  /* Même nettoyage de dictionnaires que la purge par personne : la clé porte
+     les initiales avant le premier séparateur. */
+  const survit=k=>encore.has(k.split('|')[0]);
+  const alias={
+    personnes:Object.fromEntries(Object.entries(d.alias.personnes||{}).filter(([k])=>encore.has(k))),
+    objectifs:Object.fromEntries(Object.entries(d.alias.objectifs||{}).filter(([k])=>survit(k))),
+  };
+  const commentaires=Object.fromEntries(Object.entries(d.commentaires||{}).filter(([k])=>survit(k)));
+  const objectifsSuivi=Object.fromEntries(Object.entries(d.objectifsSuivi||{}).filter(([k])=>survit(k)));
+  const rapports=(d.rapports||[]).filter(r=>encore.has(r.personne));
   return {...d, seances:d.seances.filter(x=>x.source!==src), crises:d.crises.filter(x=>x.source!==src),
     suivi:(d.suivi||[]).filter(x=>x.source!==src),
     sources:d.sources.filter(x=>x!==src), _idVersInitiales:idv, _ateliers:ate,
+    alias, commentaires, objectifsSuivi, rapports,
     personnes:d.personnes.filter(p=>encore.has(p.initials))};
 }
 const r2=purgerSource(base,'tabA');
@@ -55,6 +73,13 @@ t('source retirée de la liste', r2.sources, ['tabB']);
 t('T.B. disparaît, plus présente ailleurs', r2.personnes.map(p=>p.initials), ['L.M.']);
 t('L.M. reste, encore présente sur tabB', r2.personnes.length, 1);
 t('table d ateliers nettoyée', Object.keys(r2._ateliers), ['tabB']);
+/* T.B. disparaît avec tabA : tout ce qui la désigne doit partir avec elle. */
+t('POINT CLÉ : le libellé de la personne disparue part', Object.keys(r2.alias.personnes), ['L.M.']);
+t('ses libellés d objectif partent', Object.keys(r2.alias.objectifs), ['L.M.|o1']);
+t('ses commentaires partent', Object.keys(r2.commentaires), ['L.M.|o1']);
+t('ses réglages de suivi promu partent', Object.keys(r2.objectifsSuivi), ['L.M.|critere:Stabilité||stable']);
+t('ses rapports enregistrés partent', r2.rapports.map(r=>r.id), ['r1']);
+t('et ceux de la personne qui reste ne bougent pas', r2.alias.personnes['L.M.'], 'Lucas M.');
 
 /* Purge d une personne : ses cotations partent des séances partagées */
 function purgerPersonne(d,ini){
@@ -73,9 +98,11 @@ function purgerPersonne(d,ini){
     objectifs:Object.fromEntries(Object.entries(d.alias.objectifs).filter(([k])=>k.split('|')[0]!==ini))};
   delete alias.personnes[ini];
   const commentaires=Object.fromEntries(Object.entries(d.commentaires).filter(([k])=>k.split('|')[0]!==ini));
+  const objectifsSuivi=Object.fromEntries(Object.entries(d.objectifsSuivi||{}).filter(([k])=>k.split('|')[0]!==ini));
+  const rapports=(d.rapports||[]).filter(r=>r.personne!==ini);
   const idv={};Object.entries(d._idVersInitiales).forEach(([src,tb])=>{
     idv[src]=Object.fromEntries(Object.entries(tb).filter(([,i])=>i!==ini));});
-  return {...d,seances,crises,suivi,alias,commentaires,_idVersInitiales:idv,
+  return {...d,seances,crises,suivi,alias,commentaires,objectifsSuivi,rapports,_idVersInitiales:idv,
     personnes:d.personnes.filter(p=>p.initials!==ini)};
 }
 const r3=purgerPersonne(base,'L.M.');
@@ -85,8 +112,10 @@ t('ses cotations sont retirées de la séance partagée', Object.keys(r3.seances
 t('les séances où elle était seule disparaissent', r3.seances.map(s=>s.id), ['s1']);
 t('ses crises partent', r3.crises.map(c=>c.id), ['c2']);
 t('ses relevés de suivi continu partent, sur les deux tablettes', r3.suivi.map(v=>v.id), ['v2']);
-t('ses libellés partent', r3.alias.personnes, {});
-t('ses commentaires partent', r3.commentaires, {});
+t('ses libellés partent', Object.keys(r3.alias.personnes), ['T.B.']);
+t('ses commentaires partent', Object.keys(r3.commentaires), ['T.B.|o2']);
+t('ses réglages de suivi promu partent', Object.keys(r3.objectifsSuivi), ['T.B.|compteur:c1']);
+t('ses rapports enregistrés partent', r3.rapports.map(r=>r.id), ['r2']);
 t("l'autre personne garde ses données", r3.seances.find(s=>s.id==='s1').selectedObjectives.a2, ['o2']);
 
 /* Jours de la semaine dans l ordre du calendrier */

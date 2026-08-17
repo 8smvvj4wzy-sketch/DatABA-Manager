@@ -235,6 +235,13 @@ const VIDE = {
      (`students[].compteurs`) et leurs appuis voyagent dans `suivi`, mêlés aux
      relevés d'état — voir `compteursDePersonne` pour ce qui les sépare. */
   _compteurs: {},
+  /* Jeu de guidances de l'établissement, par source. DatABA l'exporte
+     (`backup.guidances`) et s'en sert de repli quand un objectif ne porte pas
+     son propre `config.guidanceSet` : c'est lui qui dit quel code vaut
+     « indépendant ». Sans lui, Manager retombait en dur sur le code 'I' et
+     rendait donc un autre pourcentage que la tablette dès qu'un établissement
+     avait renommé ce code ou en avait marqué un second. */
+  _guidances: {},
   _idVersInitiales: {}, _ateliers: {}, _intervenants: {}, alias: { personnes: {}, objectifs: {} }, commentaires: {},
   /* Code de curriculum attaché à l'objectif lui-même, et non au couple
      personne-objectif : une même compétence garde son code quelle que soit la
@@ -272,6 +279,7 @@ function normaliser(d) {
     suivi: d.suivi || [],
     _axesSuivi: d._axesSuivi || {},
     _compteurs: d._compteurs || {},
+    _guidances: d._guidances || {},
     classes: d.classes || [],
     commentaires: d.commentaires || {},
     codesEfl: d.codesEfl || {},
@@ -400,6 +408,25 @@ function fusionnerImport(actuel, backup, nomSource) {
       .map((c) => [c.id, (c.nom || '').trim() || 'Compteur sans nom']))),
   };
 
+  /* Guidances de l'établissement. Fusionnées par code plutôt que remplacées :
+     un export ultérieur qui aurait perdu un code ne doit pas rendre muettes
+     les cotations passées qui s'en servent. Le fichier entrant gagne sur un
+     code déjà connu — c'est lui qui porte le drapeau `independent` à jour. */
+  const axesSource = (() => {
+    const parId = new Map(((actuel._axesSuivi || {})[nomSource] || []).map((a) => [a.id, a]));
+    (backup.axesSuivi || []).forEach((a) => { if (a && a.id) parId.set(a.id, a); });
+    return Array.from(parId.values());
+  })();
+
+  const guidancesSource = (() => {
+    const parCode = new Map(((actuel._guidances || {})[nomSource] || []).map((g) => [g.code, g]));
+    (backup.guidances || []).forEach((g) => {
+      if (!g || !g.code) return;
+      parCode.set(g.code, { code: g.code, label: g.label || g.code, independent: !!g.independent });
+    });
+    return Array.from(parCode.values());
+  })();
+
   const fusionSeances = fusionnerParId(actuel.seances, backup.sessions,
     (s) => ({ ...s, source: s.source || nomSource }));
   const seances = fusionSeances.liste;
@@ -457,10 +484,17 @@ function fusionnerImport(actuel, backup, nomSource) {
        autres l'ont maintenant. */
     _idVersInitiales: { ...(actuel._idVersInitiales || {}), [nomSource]: { ...((actuel._idVersInitiales || {})[nomSource] || {}), ...idVersInitiales } },
     _ateliers: { ...(actuel._ateliers || {}), [nomSource]: { ...((actuel._ateliers || {})[nomSource] || {}), ...ateliersSource } },
-    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: backup.axesSuivi || (actuel._axesSuivi || {})[nomSource] || [] },
+    /* Fusionnés par id, comme les quatre autres tables par source. Le
+       remplacement pur était le seul écart du lot : un second export de la
+       même tablette dont un axe avait été retiré faisait basculer tous les
+       relevés passés qui s'y rattachaient en « Suivi retiré », alors qu'ils
+       restaient bien en base. Le fichier entrant gagne sur un axe déjà connu,
+       c'est lui qui porte les critères à jour. */
+    _axesSuivi: { ...(actuel._axesSuivi || {}), [nomSource]: axesSource },
     collisionsInitiales,
     _intervenants: { ...(actuel._intervenants || {}), [nomSource]: { ...((actuel._intervenants || {})[nomSource] || {}), ...intervenantsSource } },
     _compteurs: { ...(actuel._compteurs || {}), [nomSource]: { ...((actuel._compteurs || {})[nomSource] || {}), ...compteursSource } },
+    _guidances: { ...(actuel._guidances || {}), [nomSource]: guidancesSource },
     nbNouvellesSeances: fusionSeances.nouveaux,
     nbNouvellesCrises: fusionCrises.nouveaux,
     nbNouveauxReleves,
@@ -478,10 +512,25 @@ function idPourSource(donnees, source, initiales) {
   return Object.keys(t).find((id) => t[id] === initiales) || null;
 }
 
-/* ==================== Calcul des scores ==================== */
-function objectiveScoreValue(obj, entry) {
+/* ==================== Calcul des scores ====================
+   Auxiliaire interne de `valeurCotation`, et de personne d'autre : il ne sait
+   calculer que les modes dont le score est un pourcentage DIRECT et rend null
+   pour l'occurrence comme pour l'intervalle. L'appeler depuis un écran, c'est
+   y faire disparaître ces deux modes — ce qui est arrivé à trois endroits à la
+   fois. Le vérificateur interdit désormais tout appel hors de
+   `valeurCotation`.
+
+   `guidances` est le jeu de l'établissement (`_guidances`, par source) :
+   DatABA s'en sert de repli quand un objectif ne porte pas son propre
+   `config.guidanceSet`, et c'est lui qui dit quel code vaut « indépendant ».
+   Sans lui, le repli en dur sur 'I' rendait un autre pourcentage que la
+   tablette dès qu'un établissement avait renommé ce code ou en avait marqué un
+   second. Le repli sur 'I' reste, en dernier recours seulement — c'est celui
+   d'`isIndependentCode` côté DatABA. */
+function objectiveScoreValue(obj, entry, guidances) {
   if (!obj || !entry) return null;
-  const gList = (obj.config && obj.config.guidanceSet) || [];
+  const propre = (obj.config && obj.config.guidanceSet) || [];
+  const gList = propre.length ? propre : (guidances || []);
   const indep = (code) => {
     const g = gList.find((x) => x.code === code);
     return g ? !!g.independent : code === 'I';
@@ -625,7 +674,10 @@ function suiteAuSeuil(points, crit) {
   return suite;
 }
 
-function analyserObjectif(seances, tableParSource, obj) {
+/* `guidancesParSource` est `donnees._guidances` : le jeu de l'établissement,
+   par tablette, dont `objectiveScoreValue` se sert de repli quand l'objectif
+   ne porte pas le sien. Optionnel — sans lui le repli reste celui d'avant. */
+function analyserObjectif(seances, tableParSource, obj, guidancesParSource) {
   const points = [];
   const mesures = [];
   let unite = null;
@@ -656,7 +708,7 @@ function analyserObjectif(seances, tableParSource, obj) {
        c'est ce qui fait enfin entrer le mode Intervalle dans les points, lui
        dont le score est bien un pourcentage mais qu'objectiveScoreValue ne
        sait pas calculer — ses cotations n'apparaissaient nulle part. */
-    const m = valeurCotation(snap, entry);
+    const m = valeurCotation(snap, entry, (guidancesParSource || {})[sess.source]);
     if (!m) return;
     if (m.unite === '%') {
       /* Le créneau (matin/après-midi) n'existe que pour Probe à deux prises
@@ -829,7 +881,7 @@ function construireLignes(donnees) {
         initials: p.initials,
         objectif: obj.name,
         type: obj.type,
-        ...analyserObjectif(siennes, tableParSource, obj),
+        ...analyserObjectif(siennes, tableParSource, obj, donnees._guidances),
       });
     });
   });
@@ -1003,7 +1055,10 @@ function construireFaits(donnees, lignes) {
   };
 
   donnees.seances.forEach((sess) => {
-    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    /* `libelleSeance` et non `nomAtelier` : sans quoi les séances libres et les
+       séances Équilibre tombent toutes dans un même « Hors atelier » et la
+       dimension Atelier d'Explorer les confond. */
+    const atelier = libelleSeance(donnees, sess);
     const intervenant = nomIntervenant(sess.source, sess.intervenantId);
     const table = (donnees._idVersInitiales || {})[sess.source] || {};
 
@@ -1015,7 +1070,17 @@ function construireFaits(donnees, lignes) {
         const obj = (sess.objectiveSnapshot || {})[oid];
         const entry = (sess.data || {})[sid] && sess.data[sid][oid];
         if (!obj) return;
-        const score = objectiveScoreValue(obj, entry);
+        /* `valeurCotation` et non `objectiveScoreValue` : ce dernier ne sait
+           calculer que les quatre modes dont le score est un pourcentage
+           DIRECT, et rend null pour le mode Intervalle — dont le score est
+           pourtant bien un pourcentage, calculé par partNiveauCible. Les
+           cotations en Intervalle sortaient donc du taux d'autonomie moyen,
+           alors qu'elles entrent bien dans les points de analyserObjectif :
+           deux chiffres différents pour la même cotation. L'occurrence reste
+           hors du taux, elle, mais parce que ce n'est pas un pourcentage. */
+        const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
+        const score = m && m.unite === '%' ? m.valeur : null;
+        const app = mesuresAppoint(entry);
         cotations.push({
           seanceId: sess.id,
           date: sess.date,
@@ -1026,6 +1091,12 @@ function construireFaits(donnees, lignes) {
           type: (TYPES_COTATION[obj.type] || obj.type),
           phase: obj.activePhaseName || 'Non renseignée',
           score,
+          /* Mesures d'appoint : sur la table des cotations et non à part, elles
+             n'existent que rattachées à l'une d'elles. null quand rien n'a été
+             validé — `agreger` écarte les null, la case reste donc vide plutôt
+             que de compter un zéro qui n'a pas été mesuré. */
+          compteurAppoint: app ? app.compteur : null,
+          chronoAppointMin: minutesAppoint(app),
         });
       });
     });
@@ -1037,6 +1108,14 @@ function construireFaits(donnees, lignes) {
       date: c.date,
       personne: table[c.studentId] || 'Non renseignée',
       atelier: nomAtelier(donnees, c.source, c.atelierId),
+      /* DatABA note plusieurs intervenants sur une crise (`intervenantIds`).
+         Le champ arrivait bien à l'import et n'était lu nulle part : les
+         séances et les relevés portaient leur intervenant dans les faits, les
+         crises non, si bien que le croisement crises × intervenant était le
+         seul à ne pas exister. Plusieurs noms sont joints plutôt que réduits au
+         premier — écarter les autres inventerait une attribution unique que la
+         tablette n'a pas faite. */
+      intervenant: (c.intervenantIds || []).map((id) => nomIntervenant(c.source, id)).join(', ') || 'Non renseigné',
       type: (c.kind || 'crise') === 'abc' ? 'Observation' : 'Crise',
       intensite: c.intensite ? `${c.intensite} · ${INTENSITES[c.intensite].label}` : 'Non renseignée',
       intensiteNum: c.intensite || null,
@@ -1074,6 +1153,7 @@ function construireFaits(donnees, lignes) {
           intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
           axe,
           critere: seg.meta.l,
+          origine: libelleOrigineReleve(porteur && porteur.origine),
           minutes: Math.round(seg.ms / 60000),
         });
       });
@@ -1093,6 +1173,7 @@ function construireFaits(donnees, lignes) {
         compteur: r.nomCompteur,
         atelier: nomAtelier(donnees, r.source, r.atelierId),
         intervenant: nomIntervenant(r.source, r.intervenantId),
+        origine: libelleOrigineReleve(r.origine),
       });
     });
   });
@@ -1144,11 +1225,30 @@ const TYPES_COTATION = {
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
+
+/* DatABA connaît trois natures de séance, mais son modèle n'en nomme que deux :
+   `mode` vaut 'atelier' ou 'balance', et la séance libre est un 'atelier' SANS
+   atelier. Manager les résolvait toutes par `nomAtelier`, qui rend « Hors
+   atelier » dès que l'identifiant est nul : une séance libre et une séance
+   Équilibre s'affichaient à l'identique, introuvables par la recherche et
+   fondues sous une même valeur dans la dimension Atelier d'Explorer.
+
+   Même règle que côté DatABA, où elle est écrite deux fois (export Excel et
+   liste des séances) — ici une seule fois, et tout le monde l'appelle. */
+function libelleSeance(d, sess) {
+  if (!sess) return 'Hors atelier';
+  if (sess.atelierId) return nomAtelier(d, sess.source, sess.atelierId);
+  return sess.mode === 'balance' ? 'Équilibre' : 'Séance libre';
+}
+
 /* Nom d'un compteur d'occurrence, même patron. Le repli dit « retiré » et non
    « sans nom » : un compteur sans nom a été enregistré comme tel à l'import
    (voir fusionnerImport), donc arriver ici signifie que l'identifiant n'est
    plus dans la configuration de la tablette. */
 const nomCompteurDe = (d, source, id) => (id && ((d._compteurs || {})[source] || {})[id]) || 'Compteur retiré';
+/* Jeu de guidances de la tablette d'où vient la cotation — à passer à
+   `valeurCotation` par tout ce qui lit une cotation de séance. */
+const guidancesDe = (d, source) => ((d._guidances || {})[source] || []);
 
 const cleAlias = (initiales, objectif) => `${initiales}|${objectif}`;
 const nomAffiche = (d, initiales) => (d.alias.personnes || {})[initiales] || initiales;
@@ -1207,6 +1307,14 @@ function axeEtCritereDuReleve(donnees, releve, estV4) {
    absent. D'où la séparation à la source : suiviDePersonne les écarte,
    compteursDePersonne les prend. */
 const estReleveCompteur = (r) => !!r && r.kind === 'compteur';
+
+/* Geste qui a produit un relevé, côté DatABA : un appui sur la pastille de
+   suivi, la clôture de la journée, ou une saisie a posteriori. Le champ arrive
+   sous le nom `source` et `fusionnerImport` le renomme `origine`, `source`
+   désignant ici la tablette. Il était conservé depuis toujours et n'apparaissait
+   nulle part : un axe de croisement de plus, pas une donnée de plus. */
+const ORIGINES_RELEVE = { pastille: 'Pastille', cloture: 'Clôture de journée', manuel: 'Saisie manuelle' };
+const libelleOrigineReleve = (o) => ORIGINES_RELEVE[o] || 'Non renseignée';
 
 /* Relevés de suivi continu d'une personne, v4 et v3 réunis et triés du plus
    récent au plus ancien. Chaque entrée porte de quoi s'afficher sans
@@ -1527,6 +1635,59 @@ function SectionTitle({ children, sub, icone: Icone }) {
   );
 }
 
+/* Contexte de lecture partagé : la personne et la classe qu'on regarde, valables
+   pour tous les écrans d'analyse à la fois.
+
+   Le grief auquel il répond : la personne était choisie trois fois, dans trois
+   états sans rapport — la liste de gauche de la fiche, les pastilles de l'écran
+   Crises, le sujet du rapport — et les écrans Séances et Explorer n'en avaient
+   même pas la notion. Passer de l'un à l'autre par le rail latéral ne reportait
+   rien.
+
+   Rendu par ManagerApp une seule fois et passé à `SelecteurPeriode`, qui
+   l'insère dans sa bande collante. Ni état ni logique ici : c'est un affichage.
+   Le choix de la personne rouvre la palette de commande (⌘K) plutôt que
+   d'aligner une pastille par personne — sur un effectif de quinze, une rangée
+   de quinze pastilles collantes mangerait le haut de chaque écran, et la
+   palette est déjà le geste documenté. */
+function BandeauContexte({ donnees, contexte, setContexte, onPalette }) {
+  const { personne, classe } = contexte;
+  const classes = donnees.classes || [];
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-t-xl border"
+      style={{ backgroundColor: CARD, borderColor: BORDER, borderBottom: 'none' }}>
+      <Users size={13} style={{ color: INK_SOFT }} />
+      {personne ? (
+        <>
+          <span className="text-xs font-semibold" style={{ fontFamily: F_DISPLAY, color: ACCENT }}>
+            {nomAffiche(donnees, personne)}
+          </span>
+          <Btn variant="ghost" onClick={onPalette} className="text-xs py-1">Changer</Btn>
+          <Btn variant="ghost" onClick={() => setContexte({ ...contexte, personne: null })} className="text-xs py-1">
+            Toutes les personnes
+          </Btn>
+        </>
+      ) : (
+        <>
+          <span className="text-xs" style={{ color: INK_SOFT }}>Toutes les personnes</span>
+          <Btn variant="ghost" onClick={onPalette} className="text-xs py-1">Choisir une personne</Btn>
+        </>
+      )}
+      {classes.length > 0 && (
+        <label className="flex items-center gap-1.5 ml-auto">
+          <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
+          <select value={classe} onChange={(e) => setContexte({ ...contexte, classe: e.target.value })}
+            className="rounded-lg border px-2 py-1 text-xs bg-transparent"
+            style={{ borderColor: classe ? ACCENT : BORDER, color: INK }}>
+            <option value="">Toutes</option>
+            {classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+          </select>
+        </label>
+      )}
+    </div>
+  );
+}
+
 /* Sélecteur de période, partagé par tous les écrans */
 /* `collant` : la carte se réduit à une bande fine posée en position sticky,
    qui reste atteignable au défilement sous les graphiques — sans lui,
@@ -1544,8 +1705,15 @@ function SectionTitle({ children, sub, icone: Icone }) {
    verbeux.
    Absent (RapportScreen, où le sélecteur est un champ de formulaire parmi
    d'autres, pas un filtre d'écran) : comportement d'origine, toujours
-   déplié, jamais collant, `extra` ignoré. */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true, extra, resumeExtra }) {
+   déplié, jamais collant, `extra` ignoré.
+   `bandeau` : le nœud de sélection personne/classe partagé par les écrans de
+   lecture (BandeauContexte), construit une seule fois par ManagerApp. Il vit ici, dans la bande
+   collante, et non dans un second bandeau posé au-dessus des écrans : cette
+   bande porte déjà `no-print`, elle est déjà couverte par test_impression, et
+   un bloc de plus dans la structure de page est le risque de régression n°1 à
+   l'impression. Ignoré quand `!collant`, donc absent du Rapport — un document
+   composé ne porte pas le contexte de lecture de l'écran. */
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true, extra, resumeExtra, bandeau }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
   const cmp = p.comparer;
@@ -1646,8 +1814,9 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
 
   return (
     <div className="sticky top-0 z-10 mb-4 no-print">
+      {bandeau}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl border"
-        style={{ backgroundColor: CARD, borderColor: BORDER }}>
+        style={{ backgroundColor: CARD, borderColor: BORDER, borderTopLeftRadius: bandeau ? 0 : undefined, borderTopRightRadius: bandeau ? 0 : undefined }}>
         <span className="text-xs font-medium shrink-0" style={{ color: INK, fontFamily: F_MONO }}>{libellePeriode(p)}</span>
         {resumeExtra && (
           <span className="text-xs shrink-0" style={{ color: INK_SOFT }}>· {resumeExtra}</span>
@@ -1893,14 +2062,19 @@ function partNiveauCible(obj, entry) {
   if (!total) return null;
   const niveaux = c.levels || [];
   const cible = c.targetLevelId || (niveaux[0] && niveaux[0].id);
+  /* Sans niveau cible, il n'y a rien à mesurer. Faute de cette garde,
+     `totaux[undefined] || 0` valait 0 et la fonction rendait 0 % — un snapshot
+     amputé de ses niveaux se lisait donc « 0 % » puis « Non acquis », comme un
+     échec, au lieu d'être écarté faute de quoi juger. */
+  if (!cible) return null;
   return Math.round(((totaux[cible] || 0) / total) * 100);
 }
 
 /* Valeur d'une cotation, quel que soit son type : le pourcentage quand il
    existe, sinon la mesure brute. Renvoie null si rien n'a été relevé. */
-function valeurCotation(obj, entry) {
+function valeurCotation(obj, entry, guidances) {
   if (!obj || !entry) return null;
-  const score = objectiveScoreValue(obj, entry);
+  const score = objectiveScoreValue(obj, entry, guidances);
   if (score != null) return { valeur: score, unite: '%', cumulable: false, hausseFavorable: true };
 
   if (obj.type === 'occurrence') {
@@ -1924,6 +2098,46 @@ function valeurCotation(obj, entry) {
   return null;
 }
 
+/* Compteur et chronomètre d'appoint, que DatABA attache à n'importe quelle
+   cotation quel que soit son mode (widget `MesuresAuxiliaires`, activé par
+   `config.avecCompteur` / `avecChrono`). Ce ne sont pas des scores : ils
+   accompagnent la cotation sans la remplacer, et n'entrent donc ni dans
+   `points` ni dans `mesures`.
+
+   `valideA` fait foi, exactement comme dans `mesuresExport` côté DatABA : il
+   distingue « pas encore mesuré » (null) de « mesuré à zéro », et lire
+   `total` sans lui ferait apparaître un zéro partout où le widget n'a jamais
+   servi. Rend null quand rien n'a été validé — l'appelant n'affiche alors
+   rien du tout. */
+function mesuresAppoint(entry) {
+  const c = entry && entry.mesures && entry.mesures.compteur;
+  const h = entry && entry.mesures && entry.mesures.chrono;
+  const compteur = c && c.valideA ? (c.total || 0) : null;
+  const secondes = h && h.valideA ? Math.round((h.elapsedMs || 0) / 1000) : null;
+  if (compteur == null && secondes == null) return null;
+  return { compteur, secondes };
+}
+
+/* Durée d'appoint en minutes, pour la table de faits et les mesures d'Explorer
+   — les durées de suivi continu y sont déjà en minutes, mélanger les unités
+   dans une même colonne d'un tableau croisé n'aurait pas de sens. */
+const minutesAppoint = (m) => (m && m.secondes != null ? Math.round(m.secondes / 60) : null);
+
+/* Libellé court d'une mesure d'appoint, pour l'afficher à côté de la cotation
+   qu'elle accompagne. Les secondes restent des secondes ici : à l'échelle
+   d'une cotation, arrondir 40 secondes à 1 minute perdrait la mesure. */
+function libelleAppoint(m) {
+  if (!m) return null;
+  const bouts = [];
+  if (m.compteur != null) bouts.push(`compteur ${m.compteur}`);
+  if (m.secondes != null) {
+    bouts.push(m.secondes >= 60
+      ? `chrono ${Math.floor(m.secondes / 60)} min ${String(m.secondes % 60).padStart(2, '0')} s`
+      : `chrono ${m.secondes} s`);
+  }
+  return bouts.join(' · ');
+}
+
 /* Détail des cotations d'une personne sur une période, au niveau de
    l'essai/étape/intervalle — pas du score agrégé de la séance
    (`construireFaits` s'arrête là). Une ligne par élément brut pour les
@@ -1943,17 +2157,24 @@ function detailCotationsPersonne(donnees, personne, periode) {
     const sid = Object.keys(table).find((k) => table[k] === personne);
     if (!sid || !(sess.studentIds || []).includes(sid)) return;
 
-    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    const atelier = libelleSeance(donnees, sess);
     const intervenant = nomIntervenant(sess.source, sess.intervenantId);
 
     ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
       const obj = (sess.objectiveSnapshot || {})[oid];
       const entry = (sess.data || {})[sid] && sess.data[sid][oid];
       if (!obj || !entry) return;
+      /* Mesures d'appoint portées sur chaque ligne du détail, comme le fait
+         déjà l'export CSV de DatABA : elles valent pour la cotation entière,
+         pas pour l'essai, mais les répéter est le seul moyen de les faire
+         voyager dans un tableau à plat. Vides quand rien n'a été validé. */
+      const app = mesuresAppoint(entry);
       const base = {
         date: sess.date, seanceId: sess.id, atelier, intervenant,
         objectif: obj.name, code: codeEflDe(donnees, obj.name),
         type: TYPES_COTATION[obj.type] || obj.type,
+        compteurAppoint: app && app.compteur != null ? app.compteur : '',
+        chronoAppoint: app && app.secondes != null ? app.secondes : '',
       };
 
       if (obj.type === 'trials') {
@@ -1995,7 +2216,7 @@ function detailCotationsPersonne(donnees, personne, periode) {
       } else {
         /* occurrence / timer / latency : valeur brute déjà scalaire, rien à
            décomposer en dessous — voir le commentaire de tête. */
-        const m = valeurCotation(obj, entry);
+        const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
         if (!m) return;
         lignes.push({ ...base, unite: m.unite, repere: 'cotation', valeur: m.valeur });
       }
@@ -2602,7 +2823,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 /* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
    montés conditionnellement, un état local d'écran ne survit pas à un
    aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, onOuvrirPersonne, onOuvrirCrises }) {
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -2613,7 +2834,20 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      (occurrences, minutes, suivi continu promu en objectif) affichait tout son
      historique quelle que soit la période choisie, avant d'être jetée juste en
      dessous faute de `points`. */
+  /* Le contexte partagé resserre l'écran sur une personne ou une classe. Sans
+     lui, cet écran était une liste plate de tous les objectifs de tout le
+     monde, sans aucun filtre : à quinze personnes et dix objectifs, la seule
+     façon de répondre à « où en est cette personne » était de changer d'écran. */
+  const dansLeContexte = (initiales) => {
+    if (contexte.personne && initiales !== contexte.personne) return false;
+    if (contexte.classe) {
+      const p = (donnees.personnes || []).find((x) => x.initials === initiales);
+      if (!p || p.classeId !== contexte.classe) return false;
+    }
+    return true;
+  };
   const recentes = lignes
+    .filter((l) => dansLeContexte(l.initials))
     .map((l) => filtrerLignePeriode(l, periode))
     .filter((l) => l.points.length > 0 || l.mesures.length > 0);
   /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
@@ -2627,7 +2861,8 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const prioritaires = recentes.filter((l) => l.prioritaire).sort(parEtat);
   const autres = recentes.filter((l) => !l.prioritaire).sort(parEtat);
 
-  const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
+  const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise'
+    && dansLeContexte(((donnees._idVersInitiales || {})[c.source] || {})[c.studentId]));
   const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
 
   /* Période de référence : celle réglée dans le sélecteur si elle l'est, sinon
@@ -2650,7 +2885,17 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const intensiteMoy = notees.length
     ? Math.round((notees.reduce((a, c) => a + c.intensite, 0) / notees.length) * 10) / 10
     : null;
-  const compte = (e) => lignes.filter((l) => l.etat === e).length;
+  /* Compté sur `recentes`, comme tout le reste de l'écran. Sur `lignes` brut,
+     les sept pastilles et leur liste dépliée ignoraient le sélecteur de
+     période posé juste au-dessus d'elles : à sept jours, les pastilles
+     annonçaient cent objectifs quand la liste en dessous en montrait
+     cinquante, et cliquer une pastille ouvrait des objectifs absents de cette
+     liste. */
+  const compte = (e) => recentes.filter((l) => l.etat === e).length;
+  /* Nombre de cotations d'une ligne, quelle que soit la série qui les porte :
+     un objectif suivi en mesure brute (occurrences, minutes) n'a pas de
+     `points` et s'affichait « 0 séance » alors qu'il en portait des dizaines. */
+  const nbCotations = (l) => l.points.length + l.mesures.length;
 
   /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
      de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
@@ -2668,7 +2913,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
 
   return (
     <div>
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
@@ -2684,7 +2929,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           <div className="flex flex-wrap gap-2">
             {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'mesure', 'non_acquis'].map((e) => {
               const n = compte(e);
-              const tot = lignes.length || 1;
+              const tot = recentes.length || 1;
               const on = etatOuvert === e;
               return (
                 <button key={e} onClick={() => setEtatOuvert(on ? null : e)} disabled={!n}
@@ -2705,7 +2950,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                 {ETATS[etatOuvert].label} — appuyez sur une ligne pour ouvrir la fiche
               </div>
               <div className="space-y-1.5">
-                {lignes.filter((l) => l.etat === etatOuvert).map((l, i) => (
+                {recentes.filter((l) => l.etat === etatOuvert).map((l, i) => (
                   <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
                     className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
                     style={{ backgroundColor: PAPER }}>
@@ -2715,8 +2960,8 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                     </span>
                     <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: ETATS[etatOuvert].color }}>
                       {l.origineSuivi
-                        ? `${l.points.length + l.mesures.length} journée${(l.points.length + l.mesures.length) !== 1 ? 's' : ''}`
-                        : `${l.points.length} séance${l.points.length !== 1 ? 's' : ''}`}
+                        ? `${nbCotations(l)} journée${nbCotations(l) !== 1 ? 's' : ''}`
+                        : `${nbCotations(l)} séance${nbCotations(l) !== 1 ? 's' : ''}`}
                     </span>
                   </button>
                 ))}
@@ -2921,8 +3166,10 @@ function trouverPaires(donnees) {
   const cand = (donnees.seances || []).filter((s) => s.doubleCotation);
   const parJour = new Map();
   cand.forEach((s) => {
-    const atelier = s.atelierId ? nomAtelier(donnees, s.source, s.atelierId) : 'libre';
-    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${atelier}`;
+    /* Même résolution qu'à l'affichage : une séance libre et une séance
+       Équilibre du même jour ne sont pas la même situation d'observation et
+       n'ont pas à s'apparier, ce que le repli commun « libre » permettait. */
+    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${libelleSeance(donnees, s)}`;
     if (!parJour.has(cle)) parJour.set(cle, []);
     parJour.get(cle).push(s);
   });
@@ -2964,22 +3211,27 @@ function comparerPaire(paire, donnees) {
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
    observateurs. */
-function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
-  const [choisie, setChoisie] = useState(null);
-  const [ouverte, setOuverte] = useState(null);      // séance dépliée
-  const [recherche, setRecherche] = useState('');
-  /* Par jour d'office : à dix séances par jour, une liste à plat déborde vite.
-     « Par date » a disparu — le regroupement par jour en tient lieu, avec le
-     même ordre antéchronologique. */
-  const [tri, setTri] = useState('jour');
-  const [toutes, setToutes] = useState(false);       // au-delà des 25 premiers
-  /* Groupes ouverts, par clé de tranche. Vide = tout replié, le défaut : à
-     dix séances par jour, tout déplié rendrait la liste plus longue que la
-     liste à plat qu'elle est censée remplacer. La liste est vidée en
-     changeant de tri — une clé de semaine ne veut rien dire pour un
-     regroupement par mois. */
-  const [groupesOuverts, setGroupesOuverts] = useState([]);
-  const changerTri = (k) => { setTri(k); setGroupesOuverts([]); };
+/* Les six réglages de cet écran vivent dans ManagerApp (`vueSeances`) : ils
+   étaient locaux, donc détruits au moindre changement d'onglet. Vérifier une
+   paire d'observateurs, aller lire une fiche et revenir imposait de refaire la
+   recherche, le tri, les déplis et le choix de la paire.
+   Les accesseurs ci-dessous gardent le corps du composant inchangé. */
+function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, periode, setPeriode, contexte, bandeau, onOuvrirPersonne }) {
+  const majVue = (champs) => setVue({ ...vue, ...champs });
+  const { recherche, tri, toutes, groupesOuverts, ouverte, paire: choisie } = vue;
+  const setChoisie = (v) => majVue({ paire: v });
+  const setOuverte = (v) => majVue({ ouverte: v });
+  const setRecherche = (v) => majVue({ recherche: v });
+  const setToutes = (v) => majVue({ toutes: v });
+  const setGroupesOuverts = (f) => majVue({ groupesOuverts: typeof f === 'function' ? f(groupesOuverts) : f });
+  /* Le tri est « par jour » d'office : à dix séances par jour, une liste à plat
+     déborde vite. « Par date » a disparu — le regroupement par jour en tient
+     lieu, avec le même ordre antéchronologique. Les groupes ouverts sont vidés
+     en changeant de tri (une clé de semaine ne veut rien dire pour un
+     regroupement par mois) mais surtout pas en changeant de période : une clé
+     absente est inoffensive, et les vider annulerait le dépli à chaque
+     ajustement du sélecteur. */
+  const changerTri = (k) => setVue({ ...vue, tri: k, groupesOuverts: [] });
 
   const LOT = 25;
 
@@ -2989,7 +3241,13 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       ((s.selectedObjectives || {})[sid] || []).forEach((oid) => {
         const obj = (s.objectiveSnapshot || {})[oid];
         const entry = (s.data || {})[sid] && s.data[sid][oid];
-        if (obj && entry && objectiveScoreValue(obj, entry) != null) cotations += 1;
+        /* `valeurCotation` et non `objectiveScoreValue` : ce dernier ignore
+           l'occurrence et l'intervalle, si bien que le compte annoncé était
+           inférieur d'un bon tiers au nombre de cotations réellement saisies,
+           sur toutes les séances à la fois — et que le tri « Par cotations »
+           reléguait en fin de liste les séances les plus denses dans ces deux
+           modes. */
+        if (obj && entry && valeurCotation(obj, entry, guidancesDe(donnees, s.source)) != null) cotations += 1;
       });
     });
     const table = (donnees._idVersInitiales || {})[s.source] || {};
@@ -2998,12 +3256,25 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   });
 
   const q = recherche.trim().toLowerCase();
+  /* Trois filtres, dans cet ordre : la période partagée avec les autres écrans,
+     la personne du contexte, puis la recherche libre. Cet écran était le seul
+     écran de lecture à ignorer la période — se restreindre dans le temps y
+     supposait de taper une date au clavier dans le champ de recherche. */
   const filtrees = seances.filter((s) => {
+    if (!dansPeriode(s.date, periode)) return false;
+    if (contexte.personne && !s.initiales.includes(contexte.personne)) return false;
+    if (contexte.classe && !s.initiales.some((i) => {
+      const p = (donnees.personnes || []).find((x) => x.initials === i);
+      return p && p.classeId === contexte.classe;
+    })) return false;
     if (!q) return true;
     const champs = [
       new Date(s.date).toLocaleDateString('fr-FR'),
       s.source || '',
-      nomAtelier(donnees, s.source, s.atelierId),
+      /* `libelleSeance` : chercher « libre » ou « équilibre » ne rendait rien,
+         les deux natures étant résolues en « Hors atelier » comme n'importe
+         quelle séance sans atelier. */
+      libelleSeance(donnees, s),
       ...s.initiales.map((i) => nomAffiche(donnees, i)),
     ].join(' ').toLowerCase();
     return champs.includes(q);
@@ -3050,6 +3321,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
 
   return (
     <div>
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} collant bandeau={bandeau} />
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
           placeholder="Rechercher une date, une personne, un atelier…"
@@ -3066,7 +3338,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
           {filtrees.length} séance{filtrees.length !== 1 ? 's' : ''}
-          {q && ` sur ${seances.length}`} — appuyez pour voir le détail
+          {/* « sur N » dès qu'un des trois filtres retire quelque chose, et non
+              plus seulement sur la recherche : avec la période et le contexte,
+              des séances disparaissaient de la liste sans que rien ne le dise. */}
+          {filtrees.length !== seances.length && ` sur ${seances.length}`} — appuyez pour voir le détail
         </span>
         {groupes && (
           <Btn variant="ghost" className="text-xs py-1 ml-auto"
@@ -3098,7 +3373,8 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
                     <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
                       ouverte={ouverte === s.id}
                       onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-                      onSupprimer={() => onSupprimerSeance(s)} />
+                      onSupprimer={() => onSupprimerSeance(s)}
+                      onOuvrirPersonne={onOuvrirPersonne} />
                   ))}
                 </div>
               )}
@@ -3110,7 +3386,8 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
               <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
                 ouverte={ouverte === s.id}
                 onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-                onSupprimer={() => onSupprimerSeance(s)} />
+                onSupprimer={() => onSupprimerSeance(s)}
+                onOuvrirPersonne={onOuvrirPersonne} />
             ))}
           </div>
         )}
@@ -3198,7 +3475,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
 /* Une séance dans la liste, dépliable sur son détail complet.
    Les cotations ne sont pas modifiables ici : la tablette reste la source, et
    un réimport de la même séance rétablirait de toute façon ses valeurs. */
-function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite }) {
+function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite, onOuvrirPersonne }) {
   const table = (donnees._idVersInitiales || {})[seance.source] || {};
   const intervenant = ((donnees._intervenants || {})[seance.source] || {})[seance.intervenantId];
   const dureeMin = seance.endedAt && seance.startedAt
@@ -3217,7 +3494,7 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
           </div>
           {!compact && (
             <div className="text-xs break-words" style={{ color: INK_SOFT }}>
-              {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
+              {seance.source} · {libelleSeance(donnees, seance)}
               {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
             </div>
           )}
@@ -3233,7 +3510,10 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
           <div className="text-xs mb-3 mt-2" style={{ color: INK_SOFT }}>
             {intervenant && <>Intervenant : <strong style={{ color: INK }}>{intervenant}</strong> · </>}
             {dureeMin != null && <>Durée : <strong style={{ color: INK }}>{dureeMin} min</strong> · </>}
-            Mode : {seance.mode === 'balance' ? 'Balance Program' : 'atelier'}
+            {/* Les trois natures de DatABA, et non les deux valeurs de `mode` :
+                une séance libre est un `mode: 'atelier'` sans atelier, et
+                s'annonçait donc « atelier » ici. */}
+            Nature : {seance.mode === 'balance' ? 'Équilibre' : seance.atelierId ? 'Atelier' : 'Séance libre'}
           </div>
 
           {(seance.studentIds || []).map((sid) => {
@@ -3242,16 +3522,36 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
             const note = (seance.notes || {})[sid];
             return (
               <div key={sid} className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
-                <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>
-                  {ini ? nomAffiche(donnees, ini) : 'Personne inconnue'}
-                </div>
+                {/* Sortie de cul-de-sac : cet écran listait les personnes d'une
+                    séance sans qu'aucune ne mène à sa fiche — il fallait retenir
+                    des initiales, changer d'onglet et la retrouver à la main. */}
+                {ini ? (
+                  <button onClick={() => onOuvrirPersonne && onOuvrirPersonne(ini, null)}
+                    className="text-sm font-semibold mb-1.5 text-left"
+                    style={{ fontFamily: F_DISPLAY, color: ACCENT }}>
+                    {nomAffiche(donnees, ini)}
+                  </button>
+                ) : (
+                  <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>Personne inconnue</div>
+                )}
                 {objectifs.length === 0 ? (
                   <div className="text-xs" style={{ color: INK_SOFT }}>Aucun objectif sélectionné.</div>
                 ) : objectifs.map((oid) => {
                   const obj = (seance.objectiveSnapshot || {})[oid];
                   if (!obj) return null;
                   const entry = (seance.data || {})[sid] && seance.data[sid][oid];
-                  const score = objectiveScoreValue(obj, entry);
+                  /* `valeurCotation` et non `objectiveScoreValue` : ce dernier
+                     rend null pour l'occurrence et l'intervalle, qui
+                     s'affichaient donc « non coté » — plus d'une cotation sur
+                     trois, dont tous les comportements problèmes comptés à
+                     l'occurrence. La valeur est rendue avec son unité : un
+                     compteur à douze n'est pas un score de douze pour cent. */
+                  const m = valeurCotation(obj, entry, guidancesDe(donnees, seance.source));
+                  /* Compteur et chrono d'appoint : saisis en séance sur
+                     n'importe quel mode, ils n'arrivaient nulle part ici. À
+                     côté de la cotation, jamais à sa place — ce n'est pas un
+                     score. */
+                  const appoint = libelleAppoint(mesuresAppoint(entry));
                   return (
                     <div key={oid} className="flex items-baseline justify-between gap-2 text-xs py-0.5">
                       <span className="min-w-0 break-words">
@@ -3266,9 +3566,10 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                         {obj.type === 'probe' && entry && libelleCreneauProbe(entry.creneau) && (
                           <span style={{ color: INK_SOFT }}> · {libelleCreneauProbe(entry.creneau)}</span>
                         )}
+                        {appoint && <span style={{ color: INK_SOFT }}> · {appoint}</span>}
                       </span>
-                      <span className="shrink-0" style={{ fontFamily: F_MONO, color: score == null ? INK_SOFT : INK }}>
-                        {score == null ? 'non coté' : `${score} %`}
+                      <span className="shrink-0" style={{ fontFamily: F_MONO, color: m == null ? INK_SOFT : INK }}>
+                        {m == null ? 'non coté' : `${m.valeur} ${m.unite}`}
                       </span>
                     </div>
                   );
@@ -3806,7 +4107,7 @@ function crisesRetenues(donnees, config, periode) {
    bord : l'onglet est monté conditionnellement, et tout un bilan réglé —
    personne, type, segmentation, blocs — repartait de zéro au moindre passage
    par un autre onglet. */
-function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPersonne, onFocusConsomme,
+function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, contexte, setContexte, bandeau,
   composition, onValiderBilan, onAnnulerBilan, rapportEnCours, onJoindreAuRapport }) {
   const [reglagesOuverts, setReglagesOuverts] = useState(false);
   const refChrono = useRef(null);
@@ -3814,16 +4115,17 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
 
   const maj = (champs) => setConfig((c) => ({ ...c, ...champs }));
 
-  /* Arrivée depuis la fiche d'une personne, ou depuis un rapport à composer :
-     on préselectionne le filtre, puis on rend la main pour que l'utilisateur
-     puisse le modifier librement.
-     La dépendance se limite à focusPersonne : onFocusConsomme est recréée à
-     chaque rendu du parent, la lister relancerait l'effet en boucle. */
+  /* La personne regardée vient désormais du contexte partagé — la même que sur
+     la fiche, les séances et Explorer. `config.personnes` reste le support :
+     c'est lui que `BlocsCrise`, `BilanCrisesRapport` et un bilan enregistré
+     dans `donnees.rapports` attendent, et le vider ici casserait le document
+     composé. Il est donc tenu à jour depuis le contexte plutôt que saisi deux
+     fois. Le tableau ne porte jamais plus d'une personne : un croisement de
+     plusieurs se lisait comme un profil collectif alors que rien n'agrège
+     leurs crises entre elles. */
   useEffect(() => {
-    if (!focusPersonne) return;
-    setConfig((c) => ({ ...c, personnes: [focusPersonne], type: 'crise' }));
-    onFocusConsomme();
-  }, [focusPersonne]);
+    setConfig((c) => ({ ...c, personnes: contexte.personne ? [contexte.personne] : [] }));
+  }, [contexte.personne]);
 
   /* Reprise d'un bilan déjà composé : on repart de ses réglages exacts plutôt
      que des réglages par défaut, sinon revenir le modifier le reconstruirait
@@ -3836,6 +4138,10 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
     const c = composition.config;
     const personnes = (c.personnes || []).length ? [c.personnes[0]] : [];
     setConfig({ ...c, personnes });
+    /* Le contexte suit le bilan qu'on rouvre, sans quoi l'effet de
+       synchronisation ci-dessus le remettrait aussitôt sur la personne
+       courante et le bilan changerait de sujet en se rouvrant. */
+    setContexte((ctx) => ({ ...ctx, personne: personnes[0] || null }));
   }, [composition && composition.jeton]);
 
   const retenues = crisesRetenues(donnees, config, periode);
@@ -3906,11 +4212,13 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
            leurs crises entre elles. Un appui remplace la sélection ; « Toutes
            les personnes » reste la remise à zéro. */
         <div className="flex flex-wrap gap-1.5 mb-3 no-print">
-          <Chip label="Toutes les personnes" on={!(config.personnes || []).length} onClick={() => maj({ personnes: [] })} />
+          <Chip label="Toutes les personnes" on={!(config.personnes || []).length}
+            onClick={() => setContexte({ ...contexte, personne: null })} />
           {donnees.personnes.map((p) => (
             <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
               on={(config.personnes || []).includes(p.initials)}
-              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials) ? [] : [p.initials] })} />
+              onClick={() => setContexte({ ...contexte,
+                personne: (config.personnes || []).includes(p.initials) ? null : p.initials })} />
           ))}
         </div>
       )}
@@ -3927,6 +4235,7 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
          suivre le défilement. Le `no-print` que portait ce wrapper est déjà
          sur la racine collante de SelecteurPeriode. */}
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant
+        bandeau={bandeau}
         resumeExtra={resumeGrapheCrises}
         extra={(
           <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
@@ -5017,8 +5326,7 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
   );
 }
 
-function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises, onObjectifSuivi }) {
-  const [vue, setVue] = useState('objectifs');
+function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContexte, bandeau, periode, setPeriode, graphe, setGraphe, vue, setVue, onRapport, onRapportCrises, onOuvrirCrises, onObjectifSuivi }) {
   const style = graphe.style;
   const courbes = graphe.courbes;
   const setStyle = (k) => setGraphe((g) => ({ ...g, style: k }));
@@ -5046,7 +5354,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      unique, qui exportait tout ce qui restait affiché. */
   const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
-  const [classeFiltre, setClasseFiltre] = useState('');
+  /* La classe filtrée vient du contexte partagé : elle était locale, donc
+     repassée à « Toutes » au premier aller-retour vers un autre écran. */
+  const classeFiltre = contexte.classe;
   /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
      cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
      peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
@@ -5074,9 +5384,21 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   /* Calculées avant le retour anticipé plus bas : les effets qui suivent
      doivent être appelés à chaque rendu, sans quoi l'ordre des hooks change
      selon qu'une personne existe ou non. */
-  const personne = (focus && focus.initiales)
+  /* La personne vient du contexte partagé — la même que sur Crises, Séances et
+     Explorer. Le repli sur la première de la liste reste : cet écran ne sait
+     rien afficher sans sujet, contrairement aux autres, où « toutes les
+     personnes » est un état légitime. */
+  const personne = contexte.personne
     || (donnees.personnes.length ? donnees.personnes[0].initials : null);
   const objectifOuvert = focus && focus.objectif;
+
+  /* Le repli est écrit dans le contexte, sinon le bandeau annoncerait
+     « toutes les personnes » au-dessus d'une fiche qui en montre une seule —
+     et quitter cet écran pour Crises repartirait sur « toutes » sans que rien
+     ne l'ait demandé. */
+  useEffect(() => {
+    if (!contexte.personne && personne) setContexte({ ...contexte, personne });
+  }, [contexte.personne, personne]);
 
   /* Changer de personne remet la vue à plat : un objectif déplié chez l'une
      n'a pas de raison de l'être chez l'autre, même s'il porte le même nom.
@@ -5160,10 +5482,16 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   }
   function exporterDetailCsv() {
     const detail = detailCotationsPersonne(donnees, personne, periode);
-    const enTete = ['Date', 'Séance', 'Atelier', 'Intervenant', 'Objectif', 'Code', 'Type', 'Unité', 'Repère', 'Valeur'];
+    /* Les deux dernières colonnes sont les mesures d'appoint de la cotation —
+       mêmes cellules que l'export CSV de DatABA, vides tant que rien n'a été
+       validé. Elles valent pour la cotation entière et non pour l'essai : les
+       lignes d'une même cotation les répètent. */
+    const enTete = ['Date', 'Séance', 'Atelier', 'Intervenant', 'Objectif', 'Code', 'Type', 'Unité', 'Repère', 'Valeur',
+      "Compteur d'appoint", "Chrono d'appoint (s)"];
     const rangees = detail.map((l) => [
       new Date(l.date).toLocaleDateString('fr-FR'), l.seanceId, l.atelier, l.intervenant,
       l.objectif, l.code, l.type, l.unite, l.repere, l.valeur,
+      l.compteurAppoint, l.chronoAppoint,
     ]);
     telechargerCsv(enTete, rangees, `detail-${nomFichierDetail('csv')}`);
   }
@@ -5217,19 +5545,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
          comparatif (choisir qui regarder), la fiche de droite fait le reste.
          Reste en flux normal sous lg : un poste étroit garde la liste au-dessus. */}
       <div className="lg:w-64 shrink-0 no-print">
-        {donnees.classes.length > 0 && (
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
-            <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
-              className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
-              <option value="">Toutes</option>
-              {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
-            </select>
-          </div>
-        )}
+        {/* Le filtre par classe a rejoint le bandeau de contexte, en haut : il
+            vaut maintenant pour tous les écrans à la fois, et le garder ici en
+            double aurait donné deux contrôles pour un même réglage. */}
         <div className="flex lg:flex-col flex-wrap gap-2">
           {listePersonnes.map((p) => (
-            <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
+            <button key={p.initials} onClick={() => { setContexte({ ...contexte, personne: p.initials }); setFocus(null); }}
               className="rounded-xl px-4 py-2.5 border font-semibold text-sm lg:text-left"
               style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
                 backgroundColor: personne === p.initials ? ACCENT_WASH : 'transparent', color: personne === p.initials ? ACCENT : INK_SOFT }}>
@@ -5270,7 +5591,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
          plutôt que rendus (et donc collants) sous les quatre autres, où ils
          ne s'appliquent pas. */}
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement' || vue === 'suivi'}
-        avecComparaison collant
+        avecComparaison collant bandeau={bandeau}
         comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'}
         resumeExtra={vue === 'objectifs' ? resumeGraphePersonnes : null}
         extra={vue === 'objectifs' && (
@@ -5500,6 +5821,14 @@ const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
   { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %', hausseFavorable: true },
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  /* Compteur et chronomètre d'appoint, saisis en séance à côté de la cotation.
+     « D'appoint » est dans le libellé et pas seulement dans le commentaire :
+     ce que compte le widget est décidé objectif par objectif, si bien qu'une
+     somme prise sur une dimension qui mélange les objectifs additionne des
+     grandeurs sans rapport. Croisées par Objectif, ou par Personne × Objectif,
+     les deux mesures rendent un chiffre homogène. */
+  { k: 'compteurAppoint', label: "Compteur d'appoint (somme)", source: 'cotations', agg: 'somme', champ: 'compteurAppoint', hausseFavorable: true },
+  { k: 'chronoAppoint', label: "Chronomètre d'appoint (durée cumulée)", source: 'cotations', agg: 'somme', champ: 'chronoAppointMin', suffixe: ' min', hausseFavorable: true },
   { k: 'crises', label: 'Nombre de crises et observations', source: 'crises', agg: 'compte', hausseFavorable: false },
   { k: 'dureeCrises', label: 'Durée totale des crises', source: 'crises', agg: 'somme', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
   { k: 'dureeMoyenneCrise', label: 'Durée moyenne des crises', source: 'crises', agg: 'moyenne', champ: 'minutes', suffixe: ' min', hausseFavorable: false },
@@ -5527,7 +5856,7 @@ const DIMENSIONS = [
   { k: 'aucune', label: 'Aucune', get: () => 'Total' },
   { k: 'personne', label: 'Personne', get: (f) => f.personne },
   { k: 'atelier', label: 'Atelier', get: (f) => f.atelier, sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
-  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'suivi', 'compteurs'] },
+  { k: 'intervenant', label: 'Intervenant', get: (f) => f.intervenant || 'Non renseigné', sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
   { k: 'objectif', label: 'Objectif', get: (f) => f.objectif || '—', sources: ['cotations', 'objectifs'] },
   { k: 'type', label: 'Type', get: (f) => f.type || '—', sources: ['cotations', 'crises', 'objectifs'] },
   { k: 'phase', label: 'Phase', get: (f) => f.phase || '—', sources: ['cotations'] },
@@ -5535,6 +5864,10 @@ const DIMENSIONS = [
   { k: 'axe', label: 'Axe de suivi', get: (f) => f.axe || '—', sources: ['suivi'] },
   { k: 'critere', label: 'Critère de suivi', get: (f) => f.critere || '—', sources: ['suivi'] },
   { k: 'compteur', label: "Compteur d'occurrence", get: (f) => f.compteur || '—', sources: ['compteurs'] },
+  /* Geste qui a produit le relevé : pastille, clôture de journée, saisie
+     manuelle. Ne concerne que les deux tables de relevés — une cotation de
+     séance et une crise ne se font pas à la pastille. */
+  { k: 'origineReleve', label: 'Geste de relevé', get: (f) => f.origine || 'Non renseignée', sources: ['suivi', 'compteurs'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
@@ -5560,10 +5893,17 @@ function agreger(faits, mesure, total) {
   return mesure.agg === 'somme' ? Math.round(somme) : Math.round(somme / valeurs.length);
 }
 
-function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
-  const [ligneDim, setLigneDim] = useState('personne');
-  const [colonneDim, setColonneDim] = useState('semaine');
-  const [mesureK, setMesureK] = useState('autonomie');
+/* Les trois menus du croisement vivent dans ManagerApp (`croisement`) : ils
+   étaient locaux, donc reperdus à chaque sortie d'onglet — et Explorer est
+   précisément l'écran qui fabrique une question à laquelle on va répondre
+   ailleurs. */
+function ExplorerScreen({ donnees, lignes, periode, setPeriode, croisement, setCroisement, bandeau, onOuvrirPersonne }) {
+  const ligneDim = croisement.ligne;
+  const colonneDim = croisement.colonne;
+  const mesureK = croisement.mesure;
+  const setLigneDim = (v) => setCroisement({ ...croisement, ligne: v });
+  const setColonneDim = (v) => setCroisement({ ...croisement, colonne: v });
+  const setMesureK = (v) => setCroisement({ ...croisement, mesure: v });
 
   const faits = useMemo(
     () => construireFaits(donnees, lignes),
@@ -5625,6 +5965,24 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
   };
   const L = trierTemps(ligneDimEff, lignesCles);
   const C = trierTemps(colonneDimEff, colonnesCles);
+
+  /* Attributs d'ouverture d'un en-tête vers la fiche, quand la dimension est
+     « personne » — la valeur de cellule est alors les initiales elles-mêmes
+     (`construireFaits` les pose telles quelles). « Non renseignée » est écarté :
+     c'est le repli d'une crise sans personne, il n'y a pas de fiche derrière.
+     Rend un objet vide dans tous les autres cas, donc rien de cliquable. */
+  const ouvrable = (dim, valeur) => {
+    if (dim !== 'personne' || !onOuvrirPersonne) return {};
+    if (!valeur || valeur === 'Non renseignée') return {};
+    if (!(donnees.personnes || []).some((p) => p.initials === valeur)) return {};
+    return {
+      role: 'button',
+      tabIndex: 0,
+      title: 'Ouvrir la fiche',
+      onClick: () => onOuvrirPersonne(valeur, null),
+      onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOuvrirPersonne(valeur, null); } },
+    };
+  };
 
   /* Dénominateur de `agg: 'part'` : la somme du champ sur toute la base
      filtrée, même convention que la bascule Nombre/Pourcentage ailleurs dans
@@ -5718,7 +6076,7 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
         </p>
       </Card>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
       <Card className="mb-3">
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -5744,7 +6102,10 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
                   </th>
                   {C.map((c) => (
                     <th key={c} className="text-right px-2 py-2 whitespace-nowrap"
-                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0, color: INK_SOFT }}>
+                      {...ouvrable(colonneDimEff, c)}
+                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0,
+                        color: ouvrable(colonneDimEff, c).onClick ? ACCENT : INK_SOFT,
+                        cursor: ouvrable(colonneDimEff, c).onClick ? 'pointer' : undefined }}>
                       {c}
                     </th>
                   ))}
@@ -5757,8 +6118,18 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
               <tbody>
                 {L.map((l) => (
                   <tr key={l}>
+                    {/* Sortie de cul-de-sac : Explorer fabrique la question
+                        (« trois crises pour cette personne cette semaine ») et
+                        n'avait aucun moyen d'y donner suite — il fallait retenir
+                        des initiales et repartir à la main. L'ouverture est posée
+                        sur la cellule et non sur un bouton imbriqué : cet en-tête
+                        est `sticky left`, un bouton transparent laisserait le
+                        contenu défiler dessous. */}
                     <td className="px-2 py-1.5 whitespace-nowrap font-medium"
-                      style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0 }}>
+                      {...ouvrable(ligneDimEff, l)}
+                      style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0,
+                        color: ouvrable(ligneDimEff, l).onClick ? ACCENT : undefined,
+                        cursor: ouvrable(ligneDimEff, l).onClick ? 'pointer' : undefined }}>
                       {l}
                     </td>
                     {C.map((c) => {
@@ -6062,6 +6433,12 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
             const cle = cleAlias(personne, l.objectif);
             const dernier = l.points.length ? l.points[l.points.length - 1].value : null;
             const commentaire = (donnees.commentaires || {})[cle] || '';
+            /* Un objectif suivi en mesure brute n'a pas de `points` : la
+               ligne d'en-tête imprimait « 0 séances sur la période » sur un
+               objectif qui en portait trente. Le corps du bloc distingue déjà
+               les deux séries plus bas, l'en-tête doit le faire aussi. */
+            const enMesureEnTete = !l.points.length && (l.mesures || []).length > 0;
+            const nbCotations = l.points.length + (l.mesures || []).length;
             return (
               <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
                 <div className="flex items-start justify-between gap-3 mb-1">
@@ -6079,7 +6456,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   </span>
                 </div>
                 <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
-                  {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
+                  {nbCotations} {enMesureEnTete ? 'cotation' : 'séance'}{nbCotations !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
                   {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
                   {l.phase && ` · phase ${l.phase}`}
@@ -6378,6 +6755,11 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
      premier séparateur. */
   const objectifsSuivi = {};
   Object.entries(donnees.objectifsSuivi || {}).forEach(([k, v]) => { if (!garder || garder.has(k.split('|')[0])) objectifsSuivi[k] = v; });
+  /* Rapports enregistrés : ils ne partaient pas du tout, si bien qu'un
+     transfert Manager → Manager les perdait tous en silence. Filtrés sur les
+     personnes retenues comme les alias et les commentaires — un rapport dont
+     le sujet n'est pas exporté n'aurait rien à rouvrir à l'arrivée. */
+  const rapports = (donnees.rapports || []).filter((r) => !garder || garder.has(r.personne));
 
   return {
     format: 'aba-manager-export',
@@ -6390,7 +6772,8 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
     _compteurs: donnees._compteurs,
     _intervenants: donnees._intervenants,
     _axesSuivi: donnees._axesSuivi,
-    alias, commentaires, codesEfl, objectifsSuivi,
+    _guidances: donnees._guidances,
+    alias, commentaires, codesEfl, objectifsSuivi, rapports,
   };
 }
 
@@ -6455,6 +6838,10 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
            perdrait les noms de compteurs. */
         compteurs: Object.entries((paquet._compteurs || {})[src] || {}).map(([id, nom]) => ({ id, nom })),
         intervenants: Object.entries((paquet._intervenants || {})[src] || {}).map(([id, name]) => ({ id, name })),
+        /* Même forme que dans la sauvegarde de tablette : sans elle, un
+           aller-retour Manager → Manager perdrait le jeu de guidances de
+           l'établissement et les pourcentages changeraient au passage. */
+        guidances: (paquet._guidances || {})[src] || [],
         sessions: (paquet.seances || []).filter((s) => s.source === src),
         crises: (paquet.crises || []).filter((c) => c.source === src),
         /* Même règle que fusionnerImport : `suivi` prime sur `stabilite`, pour
@@ -6474,6 +6861,9 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
       commentaires: { ...(cumul.commentaires || {}), ...(paquet.commentaires || {}) },
       codesEfl: { ...(cumul.codesEfl || {}), ...(paquet.codesEfl || {}) },
       objectifsSuivi: { ...(cumul.objectifsSuivi || {}), ...(paquet.objectifsSuivi || {}) },
+      /* Rapports enregistrés, dédupliqués par id : le paquet gagne sur un
+         rapport déjà connu, comme partout ailleurs à l'import. */
+      rapports: fusionnerParId(cumul.rapports || [], paquet.rapports || []).liste,
     };
     onImported(cumul);
     setFichier(null); setEnveloppe(null); setPassphrase('');
@@ -6679,6 +7069,8 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         delete axes[src];
                         const compt = { ...(d._compteurs || {}) };
                         delete compt[src];
+                        const guid = { ...(d._guidances || {}) };
+                        delete guid[src];
                         const seances = d.seances.filter((x) => x.source !== src);
                         const crises = d.crises.filter((x) => x.source !== src);
                         const stabilite = (d.stabilite || []).filter((x) => x.source !== src);
@@ -6686,10 +7078,26 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                         /* Une personne qui n'apparaît plus nulle part disparaît aussi */
                         const encore = new Set();
                         Object.values(reste).forEach((t) => Object.values(t).forEach((i) => encore.add(i)));
+                        /* Et ses dictionnaires avec elle. La purge par personne
+                           les traitait déjà, celle-ci les laissait derrière :
+                           libellés, commentaires et réglages de suivi promus
+                           survivaient à la disparition de leur sujet, puis
+                           ressuscitaient si les mêmes initiales revenaient à un
+                           import ultérieur — sur une autre personne. */
+                        const survit = (k) => encore.has(k.split('|')[0]);
+                        const alias = {
+                          personnes: Object.fromEntries(Object.entries(d.alias.personnes || {}).filter(([k]) => encore.has(k))),
+                          objectifs: Object.fromEntries(Object.entries(d.alias.objectifs || {}).filter(([k]) => survit(k))),
+                        };
+                        const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => survit(k)));
+                        const objectifsSuivi = Object.fromEntries(Object.entries(d.objectifsSuivi || {}).filter(([k]) => survit(k)));
+                        const rapports = (d.rapports || []).filter((r) => encore.has(r.personne));
                         return {
                           ...d, seances, crises, stabilite, suivi, sources: d.sources.filter((x) => x !== src),
                           _idVersInitiales: reste, _ateliers: ate, _intervenants: inter, _axesSuivi: axes,
                           _compteurs: compt,
+                          _guidances: guid,
+                          alias, commentaires, objectifsSuivi, rapports,
                           personnes: d.personnes.filter((pp) => encore.has(pp.initials)),
                         };
                       });
@@ -6736,12 +7144,16 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
                       delete alias.personnes[pp.initials];
                       const commentaires = Object.fromEntries(Object.entries(d.commentaires || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
                       const objectifsSuivi = Object.fromEntries(Object.entries(d.objectifsSuivi || {}).filter(([k]) => k.split('|')[0] !== pp.initials));
+                      /* Les rapports enregistrés manquaient au lot : un rapport
+                         dont le sujet vient d'être supprimé s'ouvrait encore,
+                         sur une fiche vide. */
+                      const rapports = (d.rapports || []).filter((r) => r.personne !== pp.initials);
                       const idVers = {};
                       Object.entries(d._idVersInitiales || {}).forEach(([src, t]) => {
                         idVers[src] = Object.fromEntries(Object.entries(t).filter(([, i]) => i !== pp.initials));
                       });
                       return {
-                        ...d, seances, crises, stabilite, suivi, alias, commentaires, objectifsSuivi,
+                        ...d, seances, crises, stabilite, suivi, alias, commentaires, objectifsSuivi, rapports,
                         _idVersInitiales: idVers,
                         personnes: d.personnes.filter((x) => x.initials !== pp.initials),
                       };
@@ -7137,15 +7549,38 @@ function ManagerApp() {
      regarde à l'écran. */
   const [graphePersonnes, setGraphePersonnes] = useState({ style: 'ligne', courbes: [] });
   const [grapheRapport, setGrapheRapport] = useState({ style: 'ligne', courbes: [] });
+  /* Contexte de lecture partagé par les écrans d'analyse : qui on regarde, et
+     dans quelle classe. La personne était choisie séparément dans trois états
+     sans rapport (la liste de la fiche, les pastilles de Crises, le sujet du
+     rapport) et n'existait pas du tout sur Séances ni Explorer : arriver sur un
+     écran par le rail latéral ne reportait rien.
+     `selectionRapport.personne` reste à part, délibérément : ce n'est pas un
+     filtre de lecture mais le sujet d'un document, enregistré dans
+     `donnees.rapports` et restauré par `ouvrirRapport`. Le fusionner ferait
+     qu'ouvrir un rapport enregistré repointerait toute l'application, et que
+     changer de personne ici orphelinerait ses objectifs retenus. Le lien reste
+     unidirectionnel, par `lancerRapport`.
+     Choix de lecture, jamais persisté — et pour celui-ci la règle est plus
+     qu'une convention : les initiales sont la seule donnée nominative du
+     produit, elles n'ont pas à sortir du bloc chiffré pour économiser un clic. */
+  const [contexte, setContexte] = useState({ personne: null, classe: '' });
+  /* Ne garde plus que l'objectif à déplier et vers lequel défiler : la personne
+     vit dans `contexte`. */
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
+  /* Réglages d'écran remontés ici pour la même raison que `uniteBord` : les
+     sept onglets sont montés conditionnellement, et un useState posé dans
+     l'écran repart de sa valeur initiale à chaque retour. Vérifier un accord
+     inter-observateurs, aller lire une fiche et revenir imposait de refaire la
+     recherche, le tri, les déplis et le choix de la paire ; un aller-retour
+     depuis Explorer reperdait les trois menus du croisement. */
+  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null });
+  const [vuePersonne, setVuePersonne] = useState('objectifs');
+  const [croisement, setCroisement] = useState({ ligne: 'personne', colonne: 'semaine', mesure: 'autonomie' });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
      Le jeton force la reprise des réglages à chaque nouvelle demande, même si
      la configuration est identique à la précédente. */
   const [compositionBilan, setCompositionBilan] = useState(null);
-  /* Personne sur laquelle préselectionner le filtre en arrivant dans Crises,
-     consommée aussitôt : l'utilisateur doit pouvoir l'enlever ensuite. */
-  const [focusCrises, setFocusCrises] = useState(null);
 
   /* Le calcul ne dépend que des données analytiques. Sans cette séparation,
      taper une lettre dans un commentaire de rapport relançait l'analyse de
@@ -7153,7 +7588,8 @@ function ManagerApp() {
   const lignes = useMemo(
     () => construireLignes(donnees),
     [donnees.seances, donnees.personnes, donnees.sources, donnees._idVersInitiales,
-      donnees.suivi, donnees.stabilite, donnees._axesSuivi, donnees._compteurs, donnees.objectifsSuivi]
+      donnees.suivi, donnees.stabilite, donnees._axesSuivi, donnees._compteurs, donnees._guidances,
+      donnees.objectifsSuivi]
   );
 
 
@@ -7342,7 +7778,11 @@ function ManagerApp() {
        voient réellement. */
     setTab(fusion.seances.length ? 'bord' : 'personnes');
   }
+  /* Point d'entrée unique vers une fiche : il écrit la personne dans le
+     contexte partagé (donc tous les écrans la suivent) et garde `focus` pour
+     le seul objectif à déplier et vers lequel défiler. */
   function ouvrirPersonne(initiales, objectif) {
+    setContexte((c) => ({ ...c, personne: initiales }));
     setFocus({ initiales, objectif });
     setTab('personnes');
   }
@@ -7451,8 +7891,14 @@ function ManagerApp() {
     setDonnees((d) => ({ ...d, rapports: (d.rapports || []).filter((x) => x.id !== r.id) }));
     notify('Rapport supprimé');
   }
+  /* Aller à l'écran Crises sur une personne. Il n'y a plus de jeton à
+     consommer ni d'effet dans l'écran : la personne vit dans le contexte
+     partagé, et seul le type d'enregistrement affiché reste à poser — venir
+     de la vue Crises d'une fiche veut dire « les crises », pas les
+     observations. `initiales` à null = toutes les personnes. */
   function ouvrirCrises(initiales) {
-    setFocusCrises(initiales || null);
+    setContexte((c) => ({ ...c, personne: initiales || null }));
+    setConfigCrises((c) => ({ ...c, type: 'crise' }));
     setTab('crises');
   }
 
@@ -7478,6 +7924,16 @@ function ManagerApp() {
 
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
+  /* Construit une seule fois et passé aux cinq écrans de lecture, qui l'insèrent
+     dans la bande collante de leur sélecteur de période. Un seul nœud plutôt
+     qu'un composant monté cinq fois : les cinq portent le même contexte, et un
+     second bloc dans la structure de page serait le risque de régression n°1 à
+     l'impression. */
+  const bandeauContexte = donnees.personnes.length ? (
+    <BandeauContexte donnees={donnees} contexte={contexte} setContexte={setContexte}
+      onPalette={() => setPaletteOuverte(true)} />
+  ) : null;
+
   return (
     <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
       <NavigationLaterale onglets={ONGLETS} tab={tab} setTab={setTab}
@@ -7491,20 +7947,27 @@ function ManagerApp() {
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
                 unite={uniteBord} setUnite={setUniteBord}
+                contexte={contexte} bandeau={bandeauContexte}
                 onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
           {tab === 'seances' && (
             <>
               <SectionTitle sub="Consulter ce qui a été importé, et vérifier l'accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
-              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite} />
+              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite}
+                vue={vueSeances} setVue={setVueSeances}
+                periode={periode} setPeriode={setPeriode}
+                contexte={contexte} bandeau={bandeauContexte}
+                onOuvrirPersonne={ouvrirPersonne} />
             </>
           )}
           {tab === 'personnes' && (
             <>
               <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes accompagnées</SectionTitle>
               <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
+                contexte={contexte} setContexte={setContexte} bandeau={bandeauContexte}
                 periode={periode} setPeriode={setPeriode}
+                vue={vuePersonne} setVue={setVuePersonne}
                 graphe={graphePersonnes} setGraphe={setGraphePersonnes}
                 onRapport={lancerRapport}
                 onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises}
@@ -7516,7 +7979,7 @@ function ManagerApp() {
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
                 config={configCrises} setConfig={setConfigCrises}
-                focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
+                contexte={contexte} setContexte={setContexte} bandeau={bandeauContexte}
                 composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan}
                 rapportEnCours={selectionRapport} onJoindreAuRapport={joindreBilanAuRapport} />
             </>
@@ -7524,7 +7987,9 @@ function ManagerApp() {
           {tab === 'explorer' && (
             <>
               <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
-              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} />
+              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
+                croisement={croisement} setCroisement={setCroisement} bandeau={bandeauContexte}
+                onOuvrirPersonne={ouvrirPersonne} />
             </>
           )}
           {tab === 'gestion' && (
@@ -7562,7 +8027,7 @@ function ManagerApp() {
 
       {paletteOuverte && (
         <PaletteCommande donnees={donnees}
-          onChoisir={(p) => { setFocus({ initiales: p.initials, objectif: null }); setTab('personnes'); setPaletteOuverte(false); }}
+          onChoisir={(p) => { ouvrirPersonne(p.initials, null); setPaletteOuverte(false); }}
           onFermer={() => setPaletteOuverte(false)} />
       )}
     </div>
