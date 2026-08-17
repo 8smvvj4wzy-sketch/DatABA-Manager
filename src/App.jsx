@@ -3,7 +3,7 @@ import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
-  ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette,
+  ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette, Star,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -1252,10 +1252,14 @@ function construireFaits(donnees, lignes) {
            calculer que les quatre modes dont le score est un pourcentage
            DIRECT, et rend null pour le mode Intervalle — dont le score est
            pourtant bien un pourcentage, calculé par partNiveauCible. Les
-           cotations en Intervalle sortaient donc du taux d'autonomie moyen,
-           alors qu'elles entrent bien dans les points de analyserObjectif :
-           deux chiffres différents pour la même cotation. L'occurrence reste
-           hors du taux, elle, mais parce que ce n'est pas un pourcentage. */
+           cotations en Intervalle sortaient donc de toute moyenne prise sur ce
+           champ, alors qu'elles entrent bien dans les points de
+           analyserObjectif : deux chiffres différents pour la même cotation.
+           L'occurrence reste hors du pourcentage, elle, mais parce que ce n'en
+           est pas un.
+           Aucune mesure d'Explorer ne lit plus ce champ depuis le retrait du
+           taux d'autonomie moyen : il reste à la table de faits, qui est la
+           couche de données et non la liste des mesures offertes. */
         const m = valeurCotation(obj, entry, guidancesDe(donnees, sess.source));
         const score = m && m.unite === '%' ? m.valeur : null;
         const app = mesuresAppoint(entry);
@@ -1827,15 +1831,23 @@ function SectionTitle({ children, sub, icone: Icone }) {
    Le choix de la personne rouvre la palette de commande (⌘K) plutôt que
    d'aligner une pastille par personne — sur un effectif de quinze, une rangée
    de quinze pastilles collantes mangerait le haut de chaque écran, et la
-   palette est déjà le geste documenté. */
-function BandeauContexte({ donnees, contexte, setContexte, onPalette }) {
+   palette est déjà le geste documenté.
+
+   `sansPersonne` : le Tableau de bord n'applique que la classe (voir
+   `dansLeContexte`). Un bandeau qui y proposerait de choisir une personne
+   annoncerait un filtre que l'écran ignore — il ne garde donc que la classe.
+   Une prop plutôt qu'un second composant : deux bandeaux qui se ressemblent
+   finiraient par diverger. */
+function BandeauContexte({ donnees, contexte, setContexte, onPalette, sansPersonne }) {
   const { personne, classe } = contexte;
   const classes = donnees.classes || [];
   return (
     <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-t-xl border"
       style={{ backgroundColor: CARD, borderColor: BORDER, borderBottom: 'none' }}>
       <Users size={13} style={{ color: INK_SOFT }} />
-      {personne ? (
+      {sansPersonne ? (
+        <span className="text-xs" style={{ color: INK_SOFT }}>Toutes les personnes</span>
+      ) : personne ? (
         <>
           <span className="text-xs font-semibold" style={{ fontFamily: F_DISPLAY, color: ACCENT }}>
             {nomAffiche(donnees, personne)}
@@ -2590,6 +2602,34 @@ function evolutionMoyenne(journalieres) {
   };
 }
 
+/* Ce qu'il faut tracer pour une ligne d'objectif, et sous quelle unité. Deux
+   régimes : les objectifs cotés en pourcentage gardent leur courbe de séances,
+   ceux suivis en mesure brute passent par la moyenne par jour — sans quoi un
+   jour à trois cotations déformerait la courbe et la tendance.
+
+   Extrait de CarteObjectif, qui le calculait en ligne, parce que l'aperçu du
+   Tableau de bord trace exactement la même chose : deux calculs jumeaux
+   auraient fini par diverger, et c'est un objectif en mesure brute qui l'aurait
+   payé en premier (courbe brute contre moyenne journalière, `%` contre son
+   unité réelle). */
+function serieObjectif(ligne) {
+  const enMesure = !ligne.points.length && (ligne.mesures || []).length > 0;
+  const journalieres = enMesure ? moyennesParJour(ligne.mesures) : [];
+  const courbe = enMesure ? journalieres : ligne.points;
+  return {
+    courbe,
+    enMesure,
+    journalieres,
+    /* L'unité de tracé, pas celle de la ligne : une courbe de pourcentages
+       reste en `%` même quand la ligne porte une unité de mesure brute. */
+    unite: enMesure ? ligne.unite : '%',
+    evolution: enMesure ? evolutionMoyenne(journalieres) : null,
+    moyenne: journalieres.length
+      ? Math.round((journalieres.reduce((a, j) => a + j.value, 0) / journalieres.length) * 10) / 10
+      : null,
+  };
+}
+
 /* Imprime une seule zone de l'écran — la chronologie des crises, les courbes
    d'une personne — telle qu'elle est réglée, sans passer par l'onglet Rapport.
    On marque la cible et toute la chaîne de ses ancêtres ; la feuille de style
@@ -2799,8 +2839,11 @@ function Graphique({ points, style, seuil, hauteur = 220, unite = '%', courbes =
    optionnels : la chronologie de crises n'a que deux styles, le bilan
    d'objectif quatre — au lieu d'un menu fixé une fois pour toutes, chaque
    appelant passe ses propres options et son propre état, la modale ne fait
-   qu'afficher les contrôles déjà en vigueur sur l'écran d'où elle vient. */
-function GrapheAgrandi({ titre, sousTitre, styleOptions, style, onStyle, courbes, onBasculerCourbe, onExporterPng, onFermer, children }) {
+   qu'afficher les contrôles déjà en vigueur sur l'écran d'où elle vient.
+   `actions` suit la même règle : un nœud libre posé dans l'en-tête, pour ce
+   qui n'appartient qu'à un appelant — l'aperçu du Tableau de bord y met son
+   accès à la fiche, les autres ne passent rien et gardent leur en-tête. */
+function GrapheAgrandi({ titre, sousTitre, styleOptions, style, onStyle, courbes, onBasculerCourbe, onExporterPng, actions, onFermer, children }) {
   useEffect(() => {
     const surTouche = (e) => { if (e.key === 'Escape') onFermer(); };
     document.addEventListener('keydown', surTouche);
@@ -2824,6 +2867,7 @@ function GrapheAgrandi({ titre, sousTitre, styleOptions, style, onStyle, courbes
             {onExporterPng && (
               <Btn variant="outline" className="text-xs py-1.5" onClick={onExporterPng}><Download size={13} /> PNG</Btn>
             )}
+            {actions}
             <Btn variant="ghost" className="text-xs py-1.5" onClick={onFermer}>Fermer</Btn>
           </div>
         </div>
@@ -3162,18 +3206,36 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
   const [autresOuverts, setAutresOuverts] = useState(false);
+  /* Objectif regardé en grand sans quitter l'écran. Cliquer un objectif
+     envoyait jusqu'ici sur la fiche de la personne : on perdait la vue
+     d'ensemble pour un simple coup d'œil à une courbe. L'aperçu la montre sur
+     place, et l'accès à la fiche reste offert depuis la modale — pour ceux qui
+     y allaient vraiment.
+     État local, contrairement à `unite` : une modale ouverte n'a rien à
+     survivre à un changement d'onglet, elle se ferme avec l'écran. */
+  const [apercu, setApercu] = useState(null);
+  const [styleApercu, setStyleApercu] = useState('ligne');
+  const [courbesApercu, setCourbesApercu] = useState([]);
+  const refApercu = useRef(null);
+  const basculerCourbeApercu = (k) => setCourbesApercu((cur) => (
+    cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+  ));
 
   /* Une ligne survit dès que l'une des deux séries a un point sur la période —
      `mesures` était jusqu'ici jamais filtré, une ligne en mesure brute
      (occurrences, minutes, suivi continu promu en objectif) affichait tout son
      historique quelle que soit la période choisie, avant d'être jetée juste en
      dessous faute de `points`. */
-  /* Le contexte partagé resserre l'écran sur une personne ou une classe. Sans
-     lui, cet écran était une liste plate de tous les objectifs de tout le
-     monde, sans aucun filtre : à quinze personnes et dix objectifs, la seule
-     façon de répondre à « où en est cette personne » était de changer d'écran. */
+  /* Seule la classe resserre cet écran. La personne du contexte partagé n'y
+     est délibérément pas appliquée : le bord est la vue d'ensemble de
+     l'effectif, et son filtre par personne ne pouvait être qu'un héritage subi
+     — on ne le posait jamais d'ici (choisir une personne faisait quitter
+     l'écran), il arrivait tout seul de la fiche ou des crises. Un aller-retour
+     par le rail latéral rouvrait donc le bord sur une seule personne sans que
+     rien ne l'ait demandé. Il montre maintenant tout le monde à chaque fois,
+     sans remise à zéro d'un état partagé que les quatre autres écrans
+     utilisent. */
   const dansLeContexte = (initiales) => {
-    if (contexte.personne && initiales !== contexte.personne) return false;
     if (contexte.classe) {
       const p = (donnees.personnes || []).find((x) => x.initials === initiales);
       if (!p || p.classeId !== contexte.classe) return false;
@@ -3281,11 +3343,11 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           {etatOuvert && (
             <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
               <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-                {ETATS[etatOuvert].label} — appuyez sur une ligne pour ouvrir la fiche
+                {ETATS[etatOuvert].label} — appuyez sur une ligne pour voir le graphique
               </div>
               <div className="space-y-1.5">
                 {recentes.filter((l) => l.etat === etatOuvert).map((l, i) => (
-                  <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
+                  <button key={i} onClick={() => setApercu(l)}
                     className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
                     style={{ backgroundColor: PAPER }}>
                     <span className="text-sm min-w-0 break-words">
@@ -3348,9 +3410,9 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           {prioritaires.length > 0 && (
             <>
               <div className="text-xs uppercase tracking-wide mb-2" style={{ color: INK_SOFT }}>
-                Objectifs prioritaires — appuyez pour ouvrir la fiche
+                Objectifs prioritaires — appuyez pour voir le graphique
               </div>
-              <LigneObjectifs lignes={prioritaires} donnees={donnees} onOuvrir={onOuvrirPersonne} />
+              <LigneObjectifs lignes={prioritaires} donnees={donnees} onOuvrir={setApercu} />
             </>
           )}
 
@@ -3366,20 +3428,61 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                   style={{ color: INK_SOFT, marginTop: repliable ? '1.25rem' : 0, cursor: repliable ? 'pointer' : 'default' }}>
                   {repliable ? 'Autres objectifs travaillés' : 'Objectifs travaillés'} ({autres.length})
                   {repliable && <span style={{ fontFamily: F_MONO }}>{ouverte ? '▾' : '▸'}</span>}
-                  {!repliable && <span className="normal-case">— appuyez pour ouvrir la fiche</span>}
+                  {!repliable && <span className="normal-case">— appuyez pour voir le graphique</span>}
                 </button>
-                {ouverte && <LigneObjectifs lignes={autres} donnees={donnees} onOuvrir={onOuvrirPersonne} />}
+                {ouverte && <LigneObjectifs lignes={autres} donnees={donnees} onOuvrir={setApercu} />}
               </>
             );
           })()}
         </>
       )}
+
+      {apercu && (() => {
+        /* La même modale que la fiche personne (GrapheAgrandi) et le même
+           tracé (serieObjectif) : regarder une courbe depuis le bord ou
+           depuis la fiche doit montrer exactement la même chose.
+           La ligne vient de `recentes`, donc déjà passée par
+           filtrerLignePeriode : la courbe respecte la période affichée. */
+        const { courbe, unite: uniteGraphe } = serieObjectif(apercu);
+        const nom = nomAffiche(donnees, apercu.initials);
+        const libelle = libelleAffiche(donnees, apercu.initials, apercu.objectif);
+        return (
+          <GrapheAgrandi
+            titre={`${nom} · ${libelle}`}
+            sousTitre={libelleSeuil(apercu) || undefined}
+            styleOptions={STYLES_GRAPHIQUE} style={styleApercu} onStyle={setStyleApercu}
+            courbes={courbesApercu} onBasculerCourbe={basculerCourbeApercu}
+            onExporterPng={courbe.length
+              ? () => exporterGraphePng(refApercu.current, `${nomSain(nom)}-${nomSain(libelle)}.png`)
+              : undefined}
+            actions={(
+              <Btn variant="outline" className="text-xs py-1.5"
+                onClick={() => onOuvrirPersonne(apercu.initials, apercu.objectif)}>
+                Ouvrir la fiche
+              </Btn>
+            )}
+            onFermer={() => setApercu(null)}>
+            {courbe.length ? (
+              <div ref={refApercu}>
+                <Graphique points={courbe} style={styleApercu} courbes={courbesApercu}
+                  seuil={apercu.threshold} hauteur="70vh" phases={apercu.phaseHistory}
+                  unite={uniteGraphe} />
+              </div>
+            ) : (
+              <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
+            )}
+          </GrapheAgrandi>
+        );
+      })()}
     </div>
   );
 }
 
 /* Liste d'objectifs du tableau de bord. Extraite pour que les deux groupes —
-   prioritaires et autres — partagent exactement le même rendu. */
+   prioritaires et autres — partagent exactement le même rendu.
+   `onOuvrir` reçoit la ligne entière et non le couple (initiales, objectif) :
+   l'aperçu a besoin de sa série, de son seuil et de ses phases pour tracer la
+   courbe sans aller les rechercher. */
 function LigneObjectifs({ lignes, donnees, onOuvrir }) {
   return (
     <div className="space-y-1.5">
@@ -3392,7 +3495,7 @@ function LigneObjectifs({ lignes, donnees, onOuvrir }) {
         const enPourcent = !!l.points.length;
         const nUnite = l.origineSuivi ? 'journée' : 'séance';
         return (
-          <button key={`${l.initials}|${l.objectif}|${i}`} onClick={() => onOuvrir(l.initials, l.objectif)}
+          <button key={`${l.initials}|${l.objectif}|${i}`} onClick={() => onOuvrir(l)}
             className="w-full rounded-xl border px-3.5 py-3 flex items-center gap-3 text-left"
             style={{ borderColor: BORDER, backgroundColor: CARD }}>
             <div className="min-w-0 flex-1">
@@ -4064,10 +4167,16 @@ const BLOCS_CRISE = [
 ];
 const TOUS_LES_BLOCS = BLOCS_CRISE.map((b) => b.k);
 
+/* `segmentation: 'aucune'` : la chronologie s'ouvre sur le nombre
+   d'occurrences, une seule série. Elle s'ouvrait découpée par intensité, une
+   lecture plus fine que celle qu'on vient chercher en premier — et une
+   intensité manquante sort la crise de toutes les barres. Le découpage reste
+   à un clic (« Découper par »), et le bloc « Occurrences par intensité » du
+   bilan est inchangé. */
 const configCriseVide = () => ({
   personnes: [],
   type: 'crise',
-  segmentation: 'intensite',
+  segmentation: 'aucune',
   forme: 'barres',
   mesure: 'nombre',
   unite: 'nombre',
@@ -4759,16 +4868,9 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
   const libelle = libelleAffiche(donnees, ligne.initials, ligne.objectif);
   const code = codeEflDe(donnees, ligne.objectif);
 
-  /* Deux régimes d'affichage. Les objectifs cotés en pourcentage gardent leur
-     courbe de séances et leur seuil. Ceux suivis en mesure brute passent par
-     la moyenne par jour : sans ça, un jour à trois cotations déformerait la
-     courbe et la tendance. */
-  const enMesure = !ligne.points.length && (ligne.mesures || []).length > 0;
-  const journalieres = enMesure ? moyennesParJour(ligne.mesures) : [];
-  const evolution = enMesure ? evolutionMoyenne(journalieres) : null;
-  const courbe = enMesure ? journalieres : ligne.points;
-  const moyenne = journalieres.length
-    ? Math.round((journalieres.reduce((a, j) => a + j.value, 0) / journalieres.length) * 10) / 10 : null;
+  /* Deux régimes d'affichage, résolus par `serieObjectif` — le même calcul que
+     l'aperçu du Tableau de bord, pas une seconde version. */
+  const { courbe, enMesure, journalieres, unite: uniteGraphe, evolution, moyenne } = serieObjectif(ligne);
 
   /* Une hausse de latence — ou d'un critère de suivi continu réglé « au plus »
      (un comportement-problème à faire baisser) — n'est pas un progrès : la
@@ -4805,6 +4907,17 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
         <button onClick={onBasculerDeplie} className="flex-1 min-w-0 flex items-start justify-between gap-3 text-left">
           <div className="min-w-0">
             <div className="text-sm font-medium break-words">
+              {/* Prioritaire selon la tablette : étoile posée sur l'objectif,
+                  ou objectif prioritaire de l'atelier. Ces cartes sont aussi
+                  remontées en tête de la liste (voir `siennes`) — la marque
+                  dit pourquoi elles y sont. Pas de `no-print` : elle part au
+                  PDF avec la carte. */}
+              {ligne.prioritaire && (
+                <span className="text-xs mr-1.5 px-1.5 py-0.5 rounded inline-flex items-center gap-1 align-middle"
+                  style={{ fontFamily: F_DISPLAY, backgroundColor: ACCENT, color: ACCENT_INK }}>
+                  <Star size={11} /> Prioritaire
+                </span>
+              )}
               {code && (
                 <span className="text-xs mr-1.5 px-1.5 py-0.5 rounded"
                   style={{ fontFamily: F_MONO, backgroundColor: PAPER, color: INK_SOFT, border: `1px solid ${BORDER}` }}>
@@ -4892,7 +5005,7 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
               critère ne vaut pour cette série. */}
           <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
             hauteur={surligne ? 300 : 220} phases={ligne.phaseHistory}
-            unite={enMesure ? ligne.unite : '%'} />
+            unite={uniteGraphe} />
         </div>
       ) : (
         <p className="text-xs text-center py-6" style={{ color: INK_SOFT }}>Aucune donnée sur cette période.</p>
@@ -4913,7 +5026,7 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
         onFermer={onAgrandir}>
         <div ref={refGrapheAgrandi}>
           <Graphique points={courbe} style={style} courbes={courbes} seuil={ligne.threshold}
-            hauteur="70vh" phases={ligne.phaseHistory} unite={enMesure ? ligne.unite : '%'} />
+            hauteur="70vh" phases={ligne.phaseHistory} unite={uniteGraphe} />
         </div>
       </GrapheAgrandi>
     )}
@@ -5830,9 +5943,17 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
     telechargerCsv(enTete, rangees, `detail-${nomFichierDetail('csv')}`);
   }
 
+  /* Les objectifs prioritaires en tête. Le drapeau vient de la tablette
+     (étoile posée sur l'objectif, ou objectif prioritaire d'un atelier) et
+     n'était lu que par le Tableau de bord : sur la fiche, rien ne distinguait
+     un objectif étoilé du reste de la liste, dans un ordre qui n'était que
+     celui d'apparition en séance.
+     Tri stable (garanti par la spécification) : à l'intérieur de chaque
+     groupe, l'ordre d'origine est conservé. */
   const siennes = lignes
     .filter((l) => l.initials === personne)
-    .map((l) => filtrerLignePeriode(l, periode));
+    .map((l) => filtrerLignePeriode(l, periode))
+    .sort((a, b) => (b.prioritaire ? 1 : 0) - (a.prioritaire ? 1 : 0));
 
   /* Même construction que `siennes`, sur la période de comparaison réglée
      dans le sélecteur — sert au radar, pour opposer deux moments plutôt que
@@ -6153,7 +6274,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
    neutres, laissées à true par convention plutôt que sans couleur du tout. */
 const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
-  { k: 'autonomie', label: "Taux d'autonomie moyen", source: 'cotations', agg: 'moyenne', champ: 'score', suffixe: ' %', hausseFavorable: true },
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
   /* Compteur et chronomètre d'appoint, saisis en séance à côté de la cotation.
      « D'appoint » est dans le libellé et pas seulement dans le commentaire :
@@ -7921,7 +8041,10 @@ function ManagerApp() {
      depuis Explorer reperdait les trois menus du croisement. */
   const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null });
   const [vuePersonne, setVuePersonne] = useState('objectifs');
-  const [croisement, setCroisement] = useState({ ligne: 'personne', colonne: 'semaine', mesure: 'autonomie' });
+  /* `mesure` ne peut pas rester sur le taux d'autonomie moyen, retiré de
+     MESURES : la clé n'existant plus, `MESURES.find` rendrait `undefined` et
+     l'écran planterait au premier accès à `mesure.label`. */
+  const [croisement, setCroisement] = useState({ ligne: 'personne', colonne: 'semaine', mesure: 'cotations' });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
      Le jeton force la reprise des réglages à chaque nouvelle demande, même si
      la configuration est identique à la précédente. */
@@ -8302,6 +8425,13 @@ function ManagerApp() {
     <BandeauContexte donnees={donnees} contexte={contexte} setContexte={setContexte}
       onPalette={() => setPaletteOuverte(true)} />
   ) : null;
+  /* Variante du Tableau de bord, qui n'applique que la classe. Un second nœud
+     n'enfreint pas la règle ci-dessus : les onglets sont montés
+     conditionnellement, jamais plus d'un des deux ne vit à la fois. */
+  const bandeauClasse = donnees.personnes.length ? (
+    <BandeauContexte donnees={donnees} contexte={contexte} setContexte={setContexte}
+      onPalette={() => setPaletteOuverte(true)} sansPersonne />
+  ) : null;
 
   return (
     <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
@@ -8320,7 +8450,7 @@ function ManagerApp() {
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
                 unite={uniteBord} setUnite={setUniteBord}
-                contexte={contexte} bandeau={bandeauContexte}
+                contexte={contexte} bandeau={bandeauClasse}
                 onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
