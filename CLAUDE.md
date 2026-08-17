@@ -16,8 +16,11 @@ disent, ils ne se lissent pas.
 Tout tient dans `src/App.jsx` (~7 600 lignes). Assumé, ne pas proposer de
 découpage sans que je le demande.
 
-Données consolidées : un seul bloc JSON dans `localStorage`, chiffré, sous la
-clé `aba-cadre:data`. Structure dans la constante `VIDE`.
+Données consolidées : un seul bloc JSON chiffré, dans **IndexedDB** (base
+`aba-cadre`, table `bloc`, clé `data`), avec repli sur `localStorage`
+(`aba-cadre:data`) quand IndexedDB est indisponible. Structure dans la
+constante `VIDE`. Toute écriture passe par `sauverDonnees` — voir le piège
+« Le bloc consolidé ne tient pas dans localStorage ».
 
 Poste PC : navigation latérale persistante (`NavigationLaterale`, sept
 destinations, repliable en rail), pas d'onglets ni de balayage tactile —
@@ -40,7 +43,7 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 24 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 27 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
@@ -54,7 +57,40 @@ rouge.
   déjà effacé les données de production de la tablette. Toute suppression est
   bornée au préfixe `aba-cadre:`. Jamais de clear global — y compris pour toute
   nouvelle clé (les clés d'apparence, `aba-cadre:theme` et
-  `aba-cadre:accent`, suivent la même règle).
+  `aba-cadre:accent`, suivent la même règle). La base IndexedDB `aba-cadre`
+  n'appartient qu'à Manager, mais la même règle vaut : jamais de
+  `deleteDatabase` sur autre chose.
+- **Le bloc consolidé ne tient pas dans `localStorage`.** Son quota est de
+  ~5 Mo par origine, compté en UTF-16, et le bloc chiffré est du base64
+  (≈ 1,33× le JSON) : quelques centaines de séances et les relevés de suivi
+  continu de plusieurs tablettes le dépassent. `setItem` lève alors
+  `QuotaExceededError` — que l'ancien code avalait en silence. L'import
+  s'affichait, la session entière fonctionnait, rien n'était jamais écrit, et
+  le poste rouvrait vide. D'où trois règles :
+  1. **IndexedDB d'abord**, `localStorage` en repli et en migration seulement.
+     Le doublon `localStorage` est retiré dès la première écriture IndexedDB
+     réussie — deux copies, c'est une copie périmée qui ressuscite le jour où
+     la bonne disparaît.
+  2. **Toute écriture est relue avant d'être annoncée réussie**, et un échec
+     remonte à l'écran (`BandeauStockage`, `CarteStockage`). Un `setItem` qui
+     ne lève pas ne prouve rien : une session éphémère l'accepte puis ne rend
+     rien. Côté IndexedDB, la réussite se lit sur `tx.oncomplete`, jamais sur
+     `req.onsuccess` : un dépassement de quota laisse la requête réussir puis
+     avorte la transaction.
+  3. **Le bloc ne s'écrit que par `sauverDonnees`.** `retirerProtection`
+     faisait son propre `setItem` et sautait ainsi repli et relecture.
+     Contrôle « 2 octies » de `verifier.sh`.
+  Les écritures y sont sérialisées : sans file, de deux `setDonnees`
+  rapprochés le plus lent validait après le plus récent et remettait l'état
+  précédent.
+- **Une lecture ratée n'est pas un poste vide.** `chargerDonnees` rendait
+  `VIDE` sur toute erreur, et l'effet d'enregistrement écrasait aussitôt le
+  bloc encore intact par cet état vide : une lecture ratée détruisait les
+  données. Elle rend maintenant `{ donnees, etat }` avec `etat` à `'vide'`
+  (rien de stocké) ou `'illisible'` (un bloc existe, il n'a pas pu être lu) —
+  et sur `'illisible'` toute écriture est suspendue, écran bloquant
+  (`EcranBlocIllisible`). `tests/test_stockage.mjs` couvre les deux états, le
+  quota, le repli, la migration et la sérialisation.
 - **Le champ `source`.** Ici il désigne la tablette d'origine ; côté DatABA il
   désigne l'origine d'un relevé. Renommé `origine` à l'import, dans
   `fusionnerImport`. Toute nouvelle donnée importée qui porte un `source` doit

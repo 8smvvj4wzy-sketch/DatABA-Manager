@@ -287,23 +287,197 @@ function normaliser(d) {
     objectifsSuivi: d.objectifsSuivi || {},
   };
 }
-async function chargerDonnees() {
+/* --- Où vit le bloc consolidé ---
+   IndexedDB d'abord, `localStorage` en repli. Le bloc a longtemps vécu dans
+   `localStorage` seul, et c'est ce qui a fait perdre des imports entiers :
+   son quota est de l'ordre de 5 Mo *par origine*, compté en UTF-16, et le
+   bloc chiffré est du base64 (≈ 1,33× le JSON). Quelques centaines de
+   séances et les relevés de suivi continu de plusieurs tablettes le
+   dépassent. `setItem` lève alors QuotaExceededError — que l'ancien code
+   avalait en silence : l'import s'affichait, la session entière
+   fonctionnait, et rien n'avait jamais été écrit. Au relancement, tout
+   était vide.
+
+   IndexedDB n'a pas ce plafond (part du disque, plusieurs centaines de Mo au
+   minimum). Il n'est pas non plus à l'abri d'un poste réglé pour effacer les
+   données de site à la fermeture : `demanderStockagePersistant` demande au
+   navigateur de ne pas évincer, et l'écran Gestion affiche ce qu'il a
+   répondu.
+
+   Le doublon `localStorage` est retiré dès la première écriture IndexedDB
+   réussie : deux copies, c'est une copie périmée qui ressuscite le jour où
+   la bonne disparaît. */
+const IDB_BASE = 'aba-cadre';
+const IDB_TABLE = 'bloc';
+const IDB_CLE = 'data';
+
+let basePromesse = null;
+function ouvrirBase() {
+  if (basePromesse) return basePromesse;
+  basePromesse = new Promise((resolve) => {
+    try {
+      if (!window.indexedDB) { resolve(null); return; }
+      const req = window.indexedDB.open(IDB_BASE, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_TABLE)) db.createObjectStore(IDB_TABLE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    } catch (e) { resolve(null); /* navigation privée sur certains navigateurs */ }
+  });
+  return basePromesse;
+}
+/* `null` = aucun bloc stocké, `undefined` = IndexedDB indisponible.
+   Les deux se distinguent : le premier est un premier lancement, le second
+   impose le repli sur localStorage. */
+async function lireIDB() {
+  const db = await ouvrirBase();
+  if (!db) return undefined;
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction(IDB_TABLE, 'readonly');
+      const req = tx.objectStore(IDB_TABLE).get(IDB_CLE);
+      req.onsuccess = () => resolve(req.result === undefined ? null : req.result);
+      req.onerror = () => reject(req.error || new Error('lecture IndexedDB'));
+      tx.onabort = () => reject(tx.error || new Error('lecture IndexedDB interrompue'));
+    } catch (e) { reject(e); }
+  });
+}
+/* La réussite se lit sur `oncomplete` de la transaction, pas sur le
+   `onsuccess` de la requête : un dépassement de quota laisse la requête
+   réussir puis avorte la transaction. Attendre la requête seule
+   rapporterait une écriture qui n'a jamais été validée. */
+async function ecrireIDB(valeur) {
+  const db = await ouvrirBase();
+  if (!db) throw new Error('IndexedDB indisponible');
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction(IDB_TABLE, 'readwrite');
+      tx.objectStore(IDB_TABLE).put(valeur, IDB_CLE);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('écriture IndexedDB'));
+      tx.onabort = () => reject(tx.error || new Error('écriture IndexedDB interrompue'));
+    } catch (e) { reject(e); }
+  });
+}
+async function effacerIDB() {
+  const db = await ouvrirBase();
+  if (!db) return;
+  await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_TABLE, 'readwrite');
+      tx.objectStore(IDB_TABLE).delete(IDB_CLE);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch (e) { resolve(); }
+  });
+}
+function estQuota(e) {
+  if (!e) return false;
+  return e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || e.code === 22 || e.code === 1014;
+}
+/* Demandée une fois au démarrage. Un refus n'est pas une panne : le
+   navigateur garde les données mais se réserve de les évincer sous pression
+   disque. C'est dit dans Gestion plutôt que deviné. */
+async function demanderStockagePersistant() {
   try {
-    const raw = window.localStorage.getItem(STORE_KEY);
-    if (!raw) return VIDE;
-    const texte = dataKey ? await decryptValue(raw, dataKey) : raw;
-    return normaliser(JSON.parse(texte));
+    if (!navigator.storage || !navigator.storage.persist) return null;
+    if (navigator.storage.persisted && await navigator.storage.persisted()) return true;
+    return await navigator.storage.persist();
+  } catch (e) { return null; }
+}
+
+/* Résultat d'une lecture. `etat` vaut :
+   - 'ok'        : bloc lu et déchiffré ;
+   - 'vide'      : rien de stocké (premier lancement, ou tout effacé) ;
+   - 'illisible' : un bloc existe mais n'a pas pu être lu — déchiffrement,
+                   JSON, ou stockage en erreur.
+   Le troisième cas ne rendait autrefois qu'un `VIDE` indiscernable du
+   deuxième, et l'effet d'enregistrement écrasait aussitôt le bloc encore
+   intact par cet état vide : une lecture ratée détruisait les données.
+   L'appelant doit suspendre toute écriture sur 'illisible'. */
+async function chargerDonnees() {
+  let brut;
+  let ou = null;
+  /* Une lecture IndexedDB en panne n'interrompt pas la recherche : le bloc
+     des versions précédentes vit dans localStorage, et il n'y a jamais deux
+     copies — celle de localStorage est retirée dès la première écriture
+     IndexedDB réussie. Chercher plus loin ne peut donc pas rendre une
+     version périmée. La panne n'est retenue que si rien n'est trouvé
+     ensuite : dire « vide » alors qu'IndexedDB n'a pas répondu ferait
+     écraser un bloc peut-être intact. */
+  let panne = null;
+  try {
+    brut = await lireIDB();
+    if (brut != null) ou = 'indexeddb';
   } catch (e) {
-    return VIDE;
+    panne = 'indexeddb';
+  }
+  if (brut == null) {
+    /* Repli et migration : la première écriture déplacera ce bloc dans
+       IndexedDB. */
+    try {
+      brut = window.localStorage.getItem(STORE_KEY);
+      if (brut != null) ou = 'localstorage';
+    } catch (e) {
+      panne = panne || 'localstorage';
+    }
+  }
+  if (brut == null) {
+    if (panne) return { donnees: VIDE, etat: 'illisible', ou: panne, raison: 'lecture' };
+    return { donnees: VIDE, etat: 'vide', ou: null };
+  }
+  try {
+    const texte = dataKey ? await decryptValue(brut, dataKey) : brut;
+    return { donnees: normaliser(JSON.parse(texte)), etat: 'ok', ou, taille: brut.length };
+  } catch (e) {
+    return { donnees: VIDE, etat: 'illisible', ou, raison: 'dechiffrement', taille: brut.length };
   }
 }
-async function sauverDonnees(d) {
+
+/* Les écritures sont sérialisées : deux `setDonnees` rapprochés lancent deux
+   chiffrements de durées différentes, et sans file la plus lente pouvait
+   valider après la plus récente et remettre l'état précédent. */
+let chaineEcriture = Promise.resolve();
+function sauverDonnees(d) {
+  const suite = chaineEcriture.then(() => ecrireBloc(d), () => ecrireBloc(d));
+  chaineEcriture = suite.catch(() => {});
+  return suite;
+}
+/* Toute écriture est relue avant d'être annoncée réussie. `setItem` qui ne
+   lève pas ne prouve pas que la donnée est là : un stockage en lecture seule
+   ou une session éphémère l'acceptent puis ne la rendent pas. */
+async function ecrireBloc(d) {
+  let charge;
   try {
     const texte = JSON.stringify(d);
-    window.localStorage.setItem(STORE_KEY, dataKey ? await encryptValue(texte, dataKey) : texte);
-  } catch (e) { /* écriture impossible : l'usage n'est pas interrompu */ }
+    charge = dataKey ? await encryptValue(texte, dataKey) : texte;
+  } catch (e) {
+    return { ok: false, raison: 'chiffrement', quand: Date.now() };
+  }
+  try {
+    await ecrireIDB(charge);
+    if (await lireIDB() === charge) {
+      try { window.localStorage.removeItem(STORE_KEY); } catch (e) { /* rien à retirer */ }
+      return { ok: true, ou: 'indexeddb', taille: charge.length, quand: Date.now() };
+    }
+  } catch (e) { /* repli sur localStorage, avec son plafond */ }
+  try {
+    window.localStorage.setItem(STORE_KEY, charge);
+    if (window.localStorage.getItem(STORE_KEY) === charge) {
+      return { ok: true, ou: 'localstorage', taille: charge.length, quand: Date.now() };
+    }
+    return { ok: false, raison: 'relecture', taille: charge.length, quand: Date.now() };
+  } catch (e) {
+    return { ok: false, raison: estQuota(e) ? 'quota' : 'stockage', taille: charge.length, quand: Date.now() };
+  }
 }
-function effacerDonneesManager() {
+
+async function effacerDonneesManager() {
   try {
     const cles = [];
     for (let i = 0; i < window.localStorage.length; i++) {
@@ -312,6 +486,10 @@ function effacerDonneesManager() {
     }
     cles.forEach((k) => window.localStorage.removeItem(k));
   } catch (e) { /* stockage indisponible */ }
+  /* La base IndexedDB porte le même préfixe et n'appartient qu'à Manager :
+     l'effacement s'y borne comme il se borne à `aba-cadre:` côté
+     localStorage. Jamais de `deleteDatabase` sur autre chose. */
+  await effacerIDB();
 }
 
 /* ==================== Import et fusion ==================== */
@@ -2807,7 +2985,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
               le dossier partagé. <strong>DatABA n'est pas touchée.</strong>
             </p>
             <div className="flex gap-2">
-              <Btn onClick={() => { effacerDonneesManager(); window.location.reload(); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS, color: texteLisibleSur(NON_ACQUIS) }}>
+              <Btn onClick={() => { effacerDonneesManager().then(() => window.location.reload()); }} className="flex-1 text-sm" style={{ backgroundColor: NON_ACQUIS, color: texteLisibleSur(NON_ACQUIS) }}>
                 Effacer et recommencer
               </Btn>
               <Btn variant="ghost" onClick={() => setReset(false)} className="text-sm">Annuler</Btn>
@@ -2816,6 +2994,162 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
         )}
       </div>
     </div>
+  );
+}
+
+/* ==================== Stockage : ce qui se voit ====================
+   Trois textes pour trois causes distinctes. Les confondre en un « erreur
+   d'enregistrement » ne dit pas quoi faire : le quota se règle en purgeant
+   ou en exportant, un stockage refusé se règle dans le navigateur. */
+const RAISONS_STOCKAGE = {
+  quota: {
+    titre: "Le stockage de ce navigateur est plein",
+    detail: "Le bloc consolidé dépasse ce que ce poste accepte de conserver. Exportez vos données maintenant, puis purgez les séances les plus anciennes depuis Gestion.",
+  },
+  relecture: {
+    titre: "Ce navigateur n'a rien conservé",
+    detail: "L'écriture a été acceptée puis relue vide. C'est le comportement d'une fenêtre de navigation privée, ou d'un poste réglé pour effacer les données de site. Exportez vos données avant de fermer.",
+  },
+  stockage: {
+    titre: "Le stockage de ce navigateur est refusé",
+    detail: "Ni IndexedDB ni le stockage local n'acceptent d'écrire. Vérifiez que les données de site ne sont pas bloquées pour cette adresse. Exportez vos données avant de fermer.",
+  },
+  chiffrement: {
+    titre: "Le chiffrement du bloc a échoué",
+    detail: "Les données n'ont pas pu être préparées pour l'enregistrement. Exportez-les avant de fermer.",
+  },
+};
+
+/* Bandeau permanent tant que la dernière écriture a échoué. Il ne se ferme
+   pas : le seul geste utile est d'exporter, et une croix transformerait un
+   avertissement en dérangement à faire taire. */
+function BandeauStockage({ etat }) {
+  if (!etat || etat.ok) return null;
+  const r = RAISONS_STOCKAGE[etat.raison] || RAISONS_STOCKAGE.stockage;
+  return (
+    <div className="no-print rounded-xl border px-4 py-3 mb-4"
+      role="alert"
+      style={{ borderColor: NON_ACQUIS, backgroundColor: NON_ACQUIS, color: texteLisibleSur(NON_ACQUIS), printColorAdjust: 'exact' }}>
+      <div className="flex items-start gap-2">
+        <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+        <div>
+          <div className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>
+            {r.titre} — rien n'est enregistré
+          </div>
+          <p className="text-xs mt-1">
+            {r.detail} Tout ce qui est à l'écran disparaîtra à la fermeture de l'application.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Écran bloquant : un bloc est stocké mais illisible. Deux causes, deux
+   issues — et surtout, aucune écriture entre-temps. */
+function EcranBlocIllisible({ etat, securite }) {
+  const dechiffrement = etat.raison === 'dechiffrement';
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER, fontFamily: F_BODY }}>
+      <div className="w-full max-w-md">
+        <h1 className="text-xl font-semibold text-center mb-1" style={{ fontFamily: F_DISPLAY, color: INK }}>
+          Données consolidées illisibles
+        </h1>
+        <p className="text-sm text-center mb-5" style={{ color: INK_SOFT }}>
+          {dechiffrement
+            ? 'Un bloc est bien stocké sur ce poste, mais il ne se déchiffre pas avec ce mot de passe.'
+            : "Le stockage de ce navigateur n'a pas répondu à la lecture."}
+        </p>
+        <Card className="mb-3">
+          <p className="text-sm" style={{ color: INK_SOFT }}>
+            <strong style={{ color: INK }}>Rien n'a été écrit.</strong> L'enregistrement est suspendu tant que
+            ce bloc n'est pas lu : si le problème est passager — un stockage momentanément
+            indisponible — les données sont toujours là et rouvrir suffit.
+            {dechiffrement && securite && !securite.disabled
+              ? " Si le mot de passe de ce poste a été changé depuis, c'est l'ancien qui déchiffre ce bloc."
+              : ''}
+          </p>
+        </Card>
+        <Btn onClick={() => window.location.reload()} className="w-full mb-2">Réessayer</Btn>
+        <Btn variant="ghost"
+          onClick={() => {
+            if (!window.confirm("Effacer le bloc illisible et repartir de zéro ?\n\nSes données ne seront pas récupérables sur ce poste. Les tablettes DatABA ne sont pas touchées : une réimportation depuis le dossier partagé reste possible.\n\nSuppression définitive.")) return;
+            effacerDonneesManager().then(() => window.location.reload());
+          }}
+          className="w-full text-sm" style={{ color: NON_ACQUIS }}>
+          Effacer et repartir de zéro
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+function tailleLisible(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} caractères`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} Ko`;
+  return `${(n / (1024 * 1024)).toFixed(1)} Mo`;
+}
+
+/* État de l'enregistrement, en clair et à demeure. Ce qu'un poste qui perd
+   ses imports ne disait nulle part : où le bloc est écrit, ce qu'il pèse,
+   quand la dernière écriture a réussi, et si le navigateur s'engage à ne pas
+   l'évincer. */
+function CarteStockage({ etat, persistant }) {
+  const ou = etat && etat.ok
+    ? (etat.ou === 'indexeddb' ? 'IndexedDB (sans plafond de 5 Mo)' : 'stockage local du navigateur (plafonné à ~5 Mo)')
+    : null;
+  const r = etat && !etat.ok ? (RAISONS_STOCKAGE[etat.raison] || RAISONS_STOCKAGE.stockage) : null;
+  return (
+    <Card className="mb-4">
+      <div className="flex items-center gap-1.5 mb-2">
+        <Layers size={16} style={{ color: INK_SOFT }} />
+        <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Enregistrement sur ce poste</span>
+      </div>
+      {r ? (
+        <p className="text-xs mb-3 rounded-lg px-2.5 py-2"
+          style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS, printColorAdjust: 'exact' }}>
+          <strong>{r.titre}.</strong> {r.detail}
+        </p>
+      ) : (
+        <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+          Les données consolidées sont écrites à chaque modification, puis relues pour vérifier
+          qu'elles sont bien là. Une écriture qui échoue n'est plus passée sous silence.
+        </p>
+      )}
+      <dl className="text-xs" style={{ color: INK_SOFT }}>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Dernière écriture</dt>
+          <dd style={{ color: INK }}>
+            {!etat ? 'aucune depuis l\'ouverture'
+              : etat.ok ? `réussie à ${new Date(etat.quand).toLocaleTimeString('fr-FR')}`
+                : `échouée à ${new Date(etat.quand).toLocaleTimeString('fr-FR')}`}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Emplacement</dt>
+          <dd className="text-right" style={{ color: INK }}>{ou || 'aucun — rien n\'est conservé'}</dd>
+        </div>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Taille du bloc</dt>
+          <dd style={{ color: INK }}>{tailleLisible(etat && etat.taille)}</dd>
+        </div>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Conservation garantie</dt>
+          <dd className="text-right" style={{ color: INK }}>
+            {persistant === true ? 'oui, accordée par le navigateur'
+              : persistant === false ? 'non — le navigateur peut effacer sous pression disque'
+                : 'inconnue sur ce navigateur'}
+          </dd>
+        </div>
+      </dl>
+      {persistant === false && (
+        <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+          Un poste réglé pour effacer les données de site à la fermeture les effacera malgré cet
+          enregistrement. Un export régulier reste la seule sauvegarde qui ne dépend pas du navigateur.
+        </p>
+      )}
+    </Card>
   );
 }
 
@@ -6777,7 +7111,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
   };
 }
 
-function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify }) {
+function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify, etatStockage, persistant }) {
   const [fichier, setFichier] = useState(null);
   const [enveloppe, setEnveloppe] = useState(null);
   const [passphrase, setPassphrase] = useState('');
@@ -6977,6 +7311,8 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
           <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
         )}
       </Card>
+
+      <CarteStockage etat={etatStockage} persistant={persistant} />
 
       <Card className="mb-4">
         <div className="flex items-center gap-1.5 mb-2">
@@ -7518,6 +7854,15 @@ function ManagerApp() {
   };
   const [donnees, setDonnees] = useState(VIDE);
   const [loaded, setLoaded] = useState(false);
+  /* État de la dernière écriture du bloc consolidé. Un échec ne s'avale
+     plus : il barre l'écran tant qu'il dure, parce qu'un poste qui
+     n'enregistre pas ressemble en tout point à un poste qui enregistre
+     jusqu'au moment où l'on ferme l'application. */
+  const [etatStockage, setEtatStockage] = useState(null);
+  /* Lecture ratée sur un bloc existant : l'écriture est suspendue pour ne
+     pas écraser des données peut-être encore intactes. */
+  const [blocIllisible, setBlocIllisible] = useState(null);
+  const [persistant, setPersistant] = useState(null);
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
   const [secuLue, setSecuLue] = useState(false);
   const [verrouille, setVerrouille] = useState(true);
@@ -7607,11 +7952,23 @@ function ManagerApp() {
       setAssociation(window.localStorage.getItem(`${PREFIXE}association`) || '');
     } catch (e) { /* réglages illisibles */ }
     setSecuLue(true);
+    demanderStockagePersistant().then(setPersistant);
   }, []);
 
   function ecrireSecurite(s) {
     setSecurite(s);
     try { window.localStorage.setItem(SECU_KEY, JSON.stringify(s)); } catch (e) {}
+  }
+
+  /* Point d'entrée unique du chargement : les trois chemins (déverrouillage,
+     protection retirée, création du mot de passe) doivent traiter le cas
+     'illisible' de la même façon, sinon l'un d'eux réintroduit l'écrasement
+     du bloc par un état vide. */
+  async function chargerDansEtat() {
+    const r = await chargerDonnees();
+    setDonnees(r.donnees);
+    setBlocIllisible(r.etat === 'illisible' ? r : null);
+    setLoaded(true);
   }
 
   async function deverrouiller(motDePasse) {
@@ -7620,8 +7977,7 @@ function ManagerApp() {
     if (sec.failedAttempts || sec.lockUntil) { sec = { ...sec, failedAttempts: 0, lockUntil: 0 }; ecrireSecurite(sec); }
     dataKey = await deriveDataKey(motDePasse, sec.dataSalt);
     setVerrouille(false);
-    setDonnees(await chargerDonnees());
-    setLoaded(true);
+    await chargerDansEtat();
   }
 
   /* Protection retirée : les données repassent en clair, aucun verrouillage */
@@ -7629,12 +7985,15 @@ function ManagerApp() {
     if (!secuLue || loaded || !securite.disabled) return;
     dataKey = null;
     setVerrouille(false);
-    (async () => { setDonnees(await chargerDonnees()); setLoaded(true); })();
+    chargerDansEtat();
   }, [secuLue, securite.disabled, loaded]);
 
   useEffect(() => {
-    if (loaded) sauverDonnees(donnees);
-  }, [donnees, loaded]);
+    if (!loaded || blocIllisible) return undefined;
+    let annule = false;
+    sauverDonnees(donnees).then((r) => { if (!annule) setEtatStockage(r); });
+    return () => { annule = true; };
+  }, [donnees, loaded, blocIllisible]);
 
   useEffect(() => {
     if (!securite.pinHash || verrouille || securite.disabled) return undefined;
@@ -7697,17 +8056,22 @@ function ManagerApp() {
     const pinHash = await hashPin(nouveau, pinSalt);
     ecrireSecurite({ ...securite, disabled: false, pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 });
     dataKey = await deriveDataKey(nouveau, dataSalt);
-    await sauverDonnees(donnees); // rechiffrées avec la nouvelle clé
-    notify('Mot de passe modifié');
+    const r = await sauverDonnees(donnees); // rechiffrées avec la nouvelle clé
+    setEtatStockage(r);
+    notify(r.ok ? 'Mot de passe modifié' : "Mot de passe modifié, mais l'enregistrement a échoué");
   }
 
+  /* Le bloc repasse en clair par la même écriture vérifiée que les autres :
+     l'ancien `setItem` direct sautait le repli IndexedDB et le contrôle de
+     relecture, si bien que retirer la protection sur un bloc trop gros pour
+     localStorage perdait tout en silence. */
   async function retirerProtection() {
-    const texte = JSON.stringify(donnees);
     dataKey = null;
-    try { window.localStorage.setItem(STORE_KEY, texte); } catch (e) {}
+    const r = await sauverDonnees(donnees);
+    setEtatStockage(r);
     ecrireSecurite({ disabled: true, pinHash: null, pinSalt: null, dataSalt: null, failedAttempts: 0, lockUntil: 0 });
     setVerrouille(false);
-    notify('Protection retirée, données déchiffrées');
+    notify(r.ok ? 'Protection retirée, données déchiffrées' : "Protection retirée, mais l'enregistrement a échoué");
   }
 
   function enregistrerLogo(v) {
@@ -7915,14 +8279,19 @@ function ManagerApp() {
           ecrireSecurite({ pinHash, pinSalt, dataSalt, failedAttempts: 0, lockUntil: 0 });
           dataKey = await deriveDataKey(motDePasse, dataSalt);
           setVerrouille(false);
-          setDonnees(await chargerDonnees());
-          setLoaded(true);
+          await chargerDansEtat();
         }}
       />
     );
   }
 
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
+
+  /* Un bloc existe mais n'a pas pu être lu. Écran bloquant, et non bandeau :
+     l'application n'a rien à montrer, et laisser entrer dans une interface
+     vide invite à réimporter par-dessus des données qui sont peut-être
+     encore là. Rien n'est écrit tant que ce choix n'est pas fait. */
+  if (blocIllisible) return <EcranBlocIllisible etat={blocIllisible} securite={securite} />;
 
   /* Construit une seule fois et passé aux cinq écrans de lecture, qui l'insèrent
      dans la bande collante de leur sélecteur de période. Un seul nœud plutôt
@@ -7941,6 +8310,10 @@ function ManagerApp() {
         replie={railReplie} onReplier={setRailReplie}
         densite={densite} onDensite={setDensite} />
       <div className="flex-1 min-w-0 px-6 py-6 lg:px-8">
+        {/* Hors du bloc `no-print` des écrans, mais lui-même `no-print` :
+            l'onglet Rapport s'imprime en pleine page et sort de ce bloc, un
+            bandeau posé dedans y serait invisible. */}
+        <BandeauStockage etat={etatStockage} />
         <div className="no-print">
           {tab === 'bord' && (
             <>
@@ -7998,7 +8371,8 @@ function ManagerApp() {
               <GestionScreen donnees={donnees} securite={securite}
                 accent={accent} onAccent={choisirAccent} onImported={onImported}
                 onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection}
-                onPurger={purger} notify={notify} />
+                onPurger={purger} notify={notify}
+                etatStockage={etatStockage} persistant={persistant} />
             </>
           )}
         </div>
