@@ -1003,7 +1003,10 @@ function construireFaits(donnees, lignes) {
   };
 
   donnees.seances.forEach((sess) => {
-    const atelier = nomAtelier(donnees, sess.source, sess.atelierId);
+    /* `libelleSeance` et non `nomAtelier` : sans quoi les séances libres et les
+       séances Équilibre tombent toutes dans un même « Hors atelier » et la
+       dimension Atelier d'Explorer les confond. */
+    const atelier = libelleSeance(donnees, sess);
     const intervenant = nomIntervenant(sess.source, sess.intervenantId);
     const table = (donnees._idVersInitiales || {})[sess.source] || {};
 
@@ -1015,7 +1018,16 @@ function construireFaits(donnees, lignes) {
         const obj = (sess.objectiveSnapshot || {})[oid];
         const entry = (sess.data || {})[sid] && sess.data[sid][oid];
         if (!obj) return;
-        const score = objectiveScoreValue(obj, entry);
+        /* `valeurCotation` et non `objectiveScoreValue` : ce dernier ne sait
+           calculer que les quatre modes dont le score est un pourcentage
+           DIRECT, et rend null pour le mode Intervalle — dont le score est
+           pourtant bien un pourcentage, calculé par partNiveauCible. Les
+           cotations en Intervalle sortaient donc du taux d'autonomie moyen,
+           alors qu'elles entrent bien dans les points de analyserObjectif :
+           deux chiffres différents pour la même cotation. L'occurrence reste
+           hors du taux, elle, mais parce que ce n'est pas un pourcentage. */
+        const m = valeurCotation(obj, entry);
+        const score = m && m.unite === '%' ? m.valeur : null;
         cotations.push({
           seanceId: sess.id,
           date: sess.date,
@@ -1144,6 +1156,22 @@ const TYPES_COTATION = {
 };
 
 const nomAtelier = (d, source, id) => (id && ((d._ateliers || {})[source] || {})[id]) || 'Hors atelier';
+
+/* DatABA connaît trois natures de séance, mais son modèle n'en nomme que deux :
+   `mode` vaut 'atelier' ou 'balance', et la séance libre est un 'atelier' SANS
+   atelier. Manager les résolvait toutes par `nomAtelier`, qui rend « Hors
+   atelier » dès que l'identifiant est nul : une séance libre et une séance
+   Équilibre s'affichaient à l'identique, introuvables par la recherche et
+   fondues sous une même valeur dans la dimension Atelier d'Explorer.
+
+   Même règle que côté DatABA, où elle est écrite deux fois (export Excel et
+   liste des séances) — ici une seule fois, et tout le monde l'appelle. */
+function libelleSeance(d, sess) {
+  if (!sess) return 'Hors atelier';
+  if (sess.atelierId) return nomAtelier(d, sess.source, sess.atelierId);
+  return sess.mode === 'balance' ? 'Équilibre' : 'Séance libre';
+}
+
 /* Nom d'un compteur d'occurrence, même patron. Le repli dit « retiré » et non
    « sans nom » : un compteur sans nom a été enregistré comme tel à l'import
    (voir fusionnerImport), donc arriver ici signifie que l'identifiant n'est
@@ -2650,7 +2678,17 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const intensiteMoy = notees.length
     ? Math.round((notees.reduce((a, c) => a + c.intensite, 0) / notees.length) * 10) / 10
     : null;
-  const compte = (e) => lignes.filter((l) => l.etat === e).length;
+  /* Compté sur `recentes`, comme tout le reste de l'écran. Sur `lignes` brut,
+     les sept pastilles et leur liste dépliée ignoraient le sélecteur de
+     période posé juste au-dessus d'elles : à sept jours, les pastilles
+     annonçaient cent objectifs quand la liste en dessous en montrait
+     cinquante, et cliquer une pastille ouvrait des objectifs absents de cette
+     liste. */
+  const compte = (e) => recentes.filter((l) => l.etat === e).length;
+  /* Nombre de cotations d'une ligne, quelle que soit la série qui les porte :
+     un objectif suivi en mesure brute (occurrences, minutes) n'a pas de
+     `points` et s'affichait « 0 séance » alors qu'il en portait des dizaines. */
+  const nbCotations = (l) => l.points.length + l.mesures.length;
 
   /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
      de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
@@ -2684,7 +2722,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           <div className="flex flex-wrap gap-2">
             {['acquis', 'bientot', 'plateau', 'en_cours', 'dormant', 'mesure', 'non_acquis'].map((e) => {
               const n = compte(e);
-              const tot = lignes.length || 1;
+              const tot = recentes.length || 1;
               const on = etatOuvert === e;
               return (
                 <button key={e} onClick={() => setEtatOuvert(on ? null : e)} disabled={!n}
@@ -2705,7 +2743,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                 {ETATS[etatOuvert].label} — appuyez sur une ligne pour ouvrir la fiche
               </div>
               <div className="space-y-1.5">
-                {lignes.filter((l) => l.etat === etatOuvert).map((l, i) => (
+                {recentes.filter((l) => l.etat === etatOuvert).map((l, i) => (
                   <button key={i} onClick={() => onOuvrirPersonne(l.initials, l.objectif)}
                     className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
                     style={{ backgroundColor: PAPER }}>
@@ -2715,8 +2753,8 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                     </span>
                     <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: ETATS[etatOuvert].color }}>
                       {l.origineSuivi
-                        ? `${l.points.length + l.mesures.length} journée${(l.points.length + l.mesures.length) !== 1 ? 's' : ''}`
-                        : `${l.points.length} séance${l.points.length !== 1 ? 's' : ''}`}
+                        ? `${nbCotations(l)} journée${nbCotations(l) !== 1 ? 's' : ''}`
+                        : `${nbCotations(l)} séance${nbCotations(l) !== 1 ? 's' : ''}`}
                     </span>
                   </button>
                 ))}
@@ -2921,8 +2959,10 @@ function trouverPaires(donnees) {
   const cand = (donnees.seances || []).filter((s) => s.doubleCotation);
   const parJour = new Map();
   cand.forEach((s) => {
-    const atelier = s.atelierId ? nomAtelier(donnees, s.source, s.atelierId) : 'libre';
-    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${atelier}`;
+    /* Même résolution qu'à l'affichage : une séance libre et une séance
+       Équilibre du même jour ne sont pas la même situation d'observation et
+       n'ont pas à s'apparier, ce que le repli commun « libre » permettait. */
+    const cle = `${new Date(s.date).toLocaleDateString('fr-FR')}|${libelleSeance(donnees, s)}`;
     if (!parJour.has(cle)) parJour.set(cle, []);
     parJour.get(cle).push(s);
   });
@@ -2989,7 +3029,13 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       ((s.selectedObjectives || {})[sid] || []).forEach((oid) => {
         const obj = (s.objectiveSnapshot || {})[oid];
         const entry = (s.data || {})[sid] && s.data[sid][oid];
-        if (obj && entry && objectiveScoreValue(obj, entry) != null) cotations += 1;
+        /* `valeurCotation` et non `objectiveScoreValue` : ce dernier ignore
+           l'occurrence et l'intervalle, si bien que le compte annoncé était
+           inférieur d'un bon tiers au nombre de cotations réellement saisies,
+           sur toutes les séances à la fois — et que le tri « Par cotations »
+           reléguait en fin de liste les séances les plus denses dans ces deux
+           modes. */
+        if (obj && entry && valeurCotation(obj, entry) != null) cotations += 1;
       });
     });
     const table = (donnees._idVersInitiales || {})[s.source] || {};
@@ -3003,7 +3049,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
     const champs = [
       new Date(s.date).toLocaleDateString('fr-FR'),
       s.source || '',
-      nomAtelier(donnees, s.source, s.atelierId),
+      /* `libelleSeance` : chercher « libre » ou « équilibre » ne rendait rien,
+         les deux natures étant résolues en « Hors atelier » comme n'importe
+         quelle séance sans atelier. */
+      libelleSeance(donnees, s),
       ...s.initiales.map((i) => nomAffiche(donnees, i)),
     ].join(' ').toLowerCase();
     return champs.includes(q);
@@ -3217,7 +3266,7 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
           </div>
           {!compact && (
             <div className="text-xs break-words" style={{ color: INK_SOFT }}>
-              {seance.source} · {nomAtelier(donnees, seance.source, seance.atelierId)}
+              {seance.source} · {libelleSeance(donnees, seance)}
               {seance.initiales.length > 0 && ` · ${seance.initiales.map((i) => nomAffiche(donnees, i)).join(', ')}`}
             </div>
           )}
@@ -3233,7 +3282,10 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
           <div className="text-xs mb-3 mt-2" style={{ color: INK_SOFT }}>
             {intervenant && <>Intervenant : <strong style={{ color: INK }}>{intervenant}</strong> · </>}
             {dureeMin != null && <>Durée : <strong style={{ color: INK }}>{dureeMin} min</strong> · </>}
-            Mode : {seance.mode === 'balance' ? 'Balance Program' : 'atelier'}
+            {/* Les trois natures de DatABA, et non les deux valeurs de `mode` :
+                une séance libre est un `mode: 'atelier'` sans atelier, et
+                s'annonçait donc « atelier » ici. */}
+            Nature : {seance.mode === 'balance' ? 'Équilibre' : seance.atelierId ? 'Atelier' : 'Séance libre'}
           </div>
 
           {(seance.studentIds || []).map((sid) => {
@@ -3251,7 +3303,13 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                   const obj = (seance.objectiveSnapshot || {})[oid];
                   if (!obj) return null;
                   const entry = (seance.data || {})[sid] && seance.data[sid][oid];
-                  const score = objectiveScoreValue(obj, entry);
+                  /* `valeurCotation` et non `objectiveScoreValue` : ce dernier
+                     rend null pour l'occurrence et l'intervalle, qui
+                     s'affichaient donc « non coté » — plus d'une cotation sur
+                     trois, dont tous les comportements problèmes comptés à
+                     l'occurrence. La valeur est rendue avec son unité : un
+                     compteur à douze n'est pas un score de douze pour cent. */
+                  const m = valeurCotation(obj, entry);
                   return (
                     <div key={oid} className="flex items-baseline justify-between gap-2 text-xs py-0.5">
                       <span className="min-w-0 break-words">
@@ -3267,8 +3325,8 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
                           <span style={{ color: INK_SOFT }}> · {libelleCreneauProbe(entry.creneau)}</span>
                         )}
                       </span>
-                      <span className="shrink-0" style={{ fontFamily: F_MONO, color: score == null ? INK_SOFT : INK }}>
-                        {score == null ? 'non coté' : `${score} %`}
+                      <span className="shrink-0" style={{ fontFamily: F_MONO, color: m == null ? INK_SOFT : INK }}>
+                        {m == null ? 'non coté' : `${m.valeur} ${m.unite}`}
                       </span>
                     </div>
                   );
@@ -6062,6 +6120,12 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
             const cle = cleAlias(personne, l.objectif);
             const dernier = l.points.length ? l.points[l.points.length - 1].value : null;
             const commentaire = (donnees.commentaires || {})[cle] || '';
+            /* Un objectif suivi en mesure brute n'a pas de `points` : la
+               ligne d'en-tête imprimait « 0 séances sur la période » sur un
+               objectif qui en portait trente. Le corps du bloc distingue déjà
+               les deux séries plus bas, l'en-tête doit le faire aussi. */
+            const enMesureEnTete = !l.points.length && (l.mesures || []).length > 0;
+            const nbCotations = l.points.length + (l.mesures || []).length;
             return (
               <div key={i} className="mb-6 pb-5" style={{ breakInside: 'avoid', borderBottom: i < retenus.length - 1 ? `1px solid ${BORDER}` : 'none' }}>
                 <div className="flex items-start justify-between gap-3 mb-1">
@@ -6079,7 +6143,7 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   </span>
                 </div>
                 <div className="text-xs mb-3" style={{ color: INK_SOFT }}>
-                  {l.points.length} séance{l.points.length !== 1 ? 's' : ''} sur la période
+                  {nbCotations} {enMesureEnTete ? 'cotation' : 'séance'}{nbCotations !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
                   {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
                   {l.phase && ` · phase ${l.phase}`}
