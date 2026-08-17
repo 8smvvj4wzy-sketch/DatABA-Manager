@@ -14,6 +14,7 @@
 #   2 quinquies. imports dupliqués
 #   2 sexies. couleur hexadécimale hors palette catégorielle
 #   2 septies. localStorage touché sans passer par le préfixe aba-cadre:
+#   2 octies. écriture du bloc consolidé hors de sa couche de stockage
 #   3. suite de tests Node autonome
 
 set -u
@@ -310,6 +311,26 @@ if [ -n "$LOCALSTORAGE_SANS_PREFIXE" ]; then
   ECHECS=$((ECHECS + 1))
 else
   echo "  ✓ tout accès localStorage passe par le préfixe"
+fi
+
+# ── 2 octies. Écriture du bloc consolidé hors de sa couche ─────────────
+# Le bloc consolidé (STORE_KEY) ne s'écrit que par `sauverDonnees`, qui
+# essaie IndexedDB puis localStorage et relit ce qu'il vient d'écrire. Un
+# `setItem(STORE_KEY, …)` posé ailleurs saute ce contrôle : `retirerProtection`
+# le faisait, et sur un bloc trop gros pour le quota de localStorage il
+# perdait tout en silence. Seul `ecrireBloc` a le droit de l'appeler ;
+# `removeItem` reste libre, il ne peut rien faire perdre d'autre que le
+# doublon laissé par l'ancien emplacement.
+echo
+echo "── 2 octies. Écriture du bloc consolidé hors de sa couche ──"
+ECRITURE_DIRECTE=$(grep -n "localStorage.setItem(STORE_KEY" src/App.jsx \
+  | grep -v "window.localStorage.setItem(STORE_KEY, charge)")
+if [ -n "$ECRITURE_DIRECTE" ]; then
+  echo "  ✗ le bloc consolidé est écrit sans passer par sauverDonnees :"
+  echo "$ECRITURE_DIRECTE" | sed 's/^/      /' | head -10
+  ECHECS=$((ECHECS + 1))
+else
+  echo "  ✓ le bloc consolidé ne s'écrit que par sauverDonnees"
 fi
 
 # ── 3. Tests ───────────────────────────────────────────────────────────
