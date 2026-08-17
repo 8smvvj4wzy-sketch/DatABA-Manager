@@ -173,6 +173,73 @@ fi
 
 [ "$RENOMMAGES" -eq 0 ] && echo "  ✓ aucun résidu détecté" || ECHECS=$((ECHECS + 1))
 
+# ── 2 quater bis. Score de cotation lu par le mauvais bout ─────────────
+# `objectiveScoreValue` est l'auxiliaire interne de `valeurCotation` : il ne
+# sait calculer que les modes dont le score est un pourcentage DIRECT et rend
+# null pour l'occurrence comme pour l'intervalle. L'appeler depuis un écran y
+# fait donc disparaître ces deux modes, sans le moindre signal — et c'est
+# arrivé à trois endroits à la fois : le détail d'une séance affichait
+# « non coté » sur plus d'une cotation sur trois, le compteur de la liste des
+# séances sous-comptait les 134 séances du jeu de démonstration, et la table
+# de faits sortait les cotations en Intervalle du taux d'autonomie. Les 24
+# suites étaient vertes pendant ce temps : la faute n'est pas dans le calcul,
+# elle est dans le choix de la fonction appelée.
+#
+# Un seul appel est légitime, celui que `valeurCotation` fait lui-même.
+# Contrôle validé par test négatif : rétablir un des trois appels d'origine
+# fait bien échouer la ligne ci-dessous.
+echo
+echo "── 2 quater bis. Aiguillage du score de cotation ──"
+APPELS=$(grep -n 'objectiveScoreValue(' src/App.jsx \
+  | grep -v '^[0-9]*:function objectiveScoreValue(' \
+  | grep -v '^[0-9]*: *\*' \
+  | grep -v '^[0-9]*: *//')
+# L'appel légitime est celui du corps de valeurCotation ; on le retrouve par sa
+# forme exacte plutôt que par un numéro de ligne, qui bougerait à chaque édition.
+FAUTIFS=$(echo "$APPELS" | grep -v 'const score = objectiveScoreValue(obj, entry, guidances);' | grep .)
+if [ -n "$FAUTIFS" ]; then
+  echo "  ✗ objectiveScoreValue appelée hors de valeurCotation :"
+  echo "$FAUTIFS" | sed 's/^/      /' | head -10
+  echo "      → passer par valeurCotation, sinon l'occurrence et l'intervalle disparaissent."
+  ECHECS=$((ECHECS + 1))
+else
+  echo "  ✓ le score de cotation ne se lit que par valeurCotation"
+fi
+
+# Même classe de faute, autre bout : le Tableau de bord porte un sélecteur de
+# période et lisait `lignes` NON filtré pour ses sept pastilles, leur
+# pourcentage et leur liste dépliée, pendant que le reste de l'écran lisait
+# `recentes`. À sept jours, cent objectifs annoncés en haut pour cinquante
+# affichés en dessous, et un clic sur une pastille ouvrait des objectifs
+# absents de la liste. `lignes` n'a qu'un usage légitime dans ce composant :
+# produire `recentes`.
+CORPS_BORD=$(awk '
+  index($0, "function TableauDeBord(") == 1 { grab = 1 }
+  grab { print }
+  grab && /^\}/ && index($0, "function TableauDeBord(") != 1 { exit }
+' src/App.jsx)
+if [ -z "$CORPS_BORD" ]; then
+  echo "  ✗ composant TableauDeBord introuvable"
+  ECHECS=$((ECHECS + 1))
+else
+  # Seuls les accès `lignes.xxx` sont cherchés : c'est la forme des trois
+  # fautes d'origine (`lignes.filter`, `lignes.length`, `lignes.map`). Une prop
+  # JSX `lignes={…}` passée à un sous-composant est un autre sujet, et une
+  # mention entre accents graves dans un commentaire n'en est pas un.
+  BORD_BRUT=$(echo "$CORPS_BORD" | grep -n 'lignes\.' \
+    | grep -v 'const recentes = lignes' \
+    | grep -v '^[0-9]*: *\*' \
+    | grep -v '^[0-9]*: *//')
+  if [ -n "$BORD_BRUT" ]; then
+    echo "  ✗ TableauDeBord lit \`lignes\` ailleurs que pour produire \`recentes\` :"
+    echo "$BORD_BRUT" | sed 's/^/      /' | head -10
+    echo "      → passer par \`recentes\`, sinon la période affichée ne s'applique pas."
+    ECHECS=$((ECHECS + 1))
+  else
+    echo "  ✓ le Tableau de bord ne compte que sur la période affichée"
+  fi
+fi
+
 # ── 2 quinquies. Imports dupliqués ─────────────────────────────────────
 # Un identifiant importé deux fois (copier-coller d'une icône déjà présente
 # plus haut dans la liste, le plus souvent) est une erreur de syntaxe pour

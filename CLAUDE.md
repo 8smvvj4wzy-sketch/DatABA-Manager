@@ -61,10 +61,15 @@ rouge.
   passer par le même traitement.
 - **Les purges doivent être exhaustives.** Une suppression par date, par source
   ou par personne doit atteindre *tous* les tableaux — séances, crises,
-  relevés de suivi continu (`suivi` **et** `stabilite`). Un tableau oublié
-  laisse des données d'usager derrière une purge que l'utilisateur croit
-  complète. C'est déjà arrivé ; `tests/test_purge.mjs` couvre les trois purges
-  sur les trois tableaux.
+  relevés de suivi continu (`suivi` **et** `stabilite`) — **et tous les
+  dictionnaires** : `alias`, `commentaires`, `objectifsSuivi`, `rapports`. Un
+  tableau oublié laisse des données d'usager derrière une purge que
+  l'utilisateur croit complète ; un dictionnaire oublié laisse des réglages
+  orphelins qui ressuscitent sur quelqu'un d'autre au premier import ramenant
+  les mêmes initiales. Les deux sont déjà arrivés — la purge par source ne
+  nettoyait aucun dictionnaire, la purge par personne oubliait les rapports.
+  `tests/test_purge.mjs` couvre les trois purges sur tous les tableaux et tous
+  les dictionnaires.
 - **`suivi` prime sur `stabilite`, jamais les deux.** Un fichier v4 contient
   les mêmes relevés dans les deux clés (alias de compatibilité côté DatABA) ;
   les additionner les dupliquerait. `fusionnerImport` regarde si `backup.suivi`
@@ -80,6 +85,47 @@ rouge.
   dans `_compteurs` par source comme `_ateliers` — une nouvelle table par
   source doit être ajoutée aussi à la purge par source, à
   `construirePaquetExport` et au backup synthétique d'`integrerManager`.
+- **Les cinq tables par source se complètent, elles ne se remplacent pas.**
+  `_idVersInitiales`, `_ateliers`, `_intervenants`, `_compteurs`, `_axesSuivi`
+  et `_guidances` fusionnent par identifiant à l'import, le fichier entrant
+  gagnant sur une entrée déjà connue. `_axesSuivi` a été la dernière à
+  remplacer : un second export de la même tablette ayant perdu un axe faisait
+  basculer en « Suivi retiré » tous les relevés passés qui s'y rattachaient,
+  alors qu'ils restaient bien en base. `_guidances` est le jeu de guidances de
+  l'établissement (`backup.guidances`), repli d'`objectiveScoreValue` quand
+  l'objectif ne porte pas son propre `config.guidanceSet` — sans lui, Manager
+  retombait en dur sur le code `I` là où la tablette lit cette liste, et deux
+  pourcentages divergeaient sans le dire dès qu'un établissement renommait son
+  code d'indépendance.
+- **`objectiveScoreValue` est un auxiliaire de `valeurCotation`, pas une
+  fonction d'écran.** Il ne calcule que les modes dont le score est un
+  pourcentage *direct* et rend `null` pour l'occurrence comme pour
+  l'intervalle. L'appeler depuis un écran y fait disparaître ces deux modes
+  sans le moindre signal : le détail d'une séance affichait « non coté » sur
+  plus d'une cotation sur trois, la liste des séances sous-comptait toutes ses
+  séances, et la table de faits sortait l'intervalle du taux d'autonomie —
+  trois écrans à la fois, pendant que les 24 suites étaient vertes. **Toute
+  lecture d'une cotation passe par `valeurCotation`**, qui rend une valeur
+  *et son unité* ; le contrôle « 2 quater bis » de `verifier.sh` interdit
+  désormais tout autre appel. Corollaire d'affichage : une valeur se montre
+  avec son unité, jamais en pourcentage par défaut — un compteur à douze n'est
+  pas un score de douze pour cent.
+- **Un écran qui porte un sélecteur de période ne lit pas `lignes` brut.**
+  `filtrerLignePeriode` d'abord, et tout ce que l'écran compte se compte sur le
+  résultat. Le Tableau de bord lisait `lignes` pour ses sept pastilles et leur
+  liste dépliée pendant que le reste de l'écran lisait `recentes` : à sept
+  jours, cent objectifs annoncés en haut pour cinquante affichés en dessous, et
+  un clic sur une pastille ouvrait des objectifs absents de la liste. Contrôle
+  structurel dans `verifier.sh`, même section. Corollaire : le nombre de
+  cotations d'une ligne est `points.length + mesures.length` — une ligne en
+  mesure brute n'a pas de `points` et s'annonçait « 0 séance ».
+- **Les trois natures de séance de DatABA, pour deux valeurs de `mode`.**
+  `mode: 'balance'` est une séance Équilibre ; `mode: 'atelier'` **sans**
+  `atelierId` est une séance libre ; avec, c'est une séance d'atelier.
+  `nomAtelier` rend « Hors atelier » dès que l'identifiant est nul et
+  confondait donc les deux premières — invisibles à la recherche, fondues dans
+  la dimension Atelier d'Explorer. `libelleSeance` porte la règle une seule
+  fois : liste, recherche, détail, table de faits, appariement IOA.
 - **Le fichier importé gagne.** `fusionnerParId` remplace un enregistrement
   déjà connu par sa version entrante — c'est ce qui fait remonter une séance
   re-cotée ou une crise complétée après coup. Contrepartie assumée :
