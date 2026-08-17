@@ -1635,6 +1635,59 @@ function SectionTitle({ children, sub, icone: Icone }) {
   );
 }
 
+/* Contexte de lecture partagé : la personne et la classe qu'on regarde, valables
+   pour tous les écrans d'analyse à la fois.
+
+   Le grief auquel il répond : la personne était choisie trois fois, dans trois
+   états sans rapport — la liste de gauche de la fiche, les pastilles de l'écran
+   Crises, le sujet du rapport — et les écrans Séances et Explorer n'en avaient
+   même pas la notion. Passer de l'un à l'autre par le rail latéral ne reportait
+   rien.
+
+   Rendu par ManagerApp une seule fois et passé à `SelecteurPeriode`, qui
+   l'insère dans sa bande collante. Ni état ni logique ici : c'est un affichage.
+   Le choix de la personne rouvre la palette de commande (⌘K) plutôt que
+   d'aligner une pastille par personne — sur un effectif de quinze, une rangée
+   de quinze pastilles collantes mangerait le haut de chaque écran, et la
+   palette est déjà le geste documenté. */
+function BandeauContexte({ donnees, contexte, setContexte, onPalette }) {
+  const { personne, classe } = contexte;
+  const classes = donnees.classes || [];
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-t-xl border"
+      style={{ backgroundColor: CARD, borderColor: BORDER, borderBottom: 'none' }}>
+      <Users size={13} style={{ color: INK_SOFT }} />
+      {personne ? (
+        <>
+          <span className="text-xs font-semibold" style={{ fontFamily: F_DISPLAY, color: ACCENT }}>
+            {nomAffiche(donnees, personne)}
+          </span>
+          <Btn variant="ghost" onClick={onPalette} className="text-xs py-1">Changer</Btn>
+          <Btn variant="ghost" onClick={() => setContexte({ ...contexte, personne: null })} className="text-xs py-1">
+            Toutes les personnes
+          </Btn>
+        </>
+      ) : (
+        <>
+          <span className="text-xs" style={{ color: INK_SOFT }}>Toutes les personnes</span>
+          <Btn variant="ghost" onClick={onPalette} className="text-xs py-1">Choisir une personne</Btn>
+        </>
+      )}
+      {classes.length > 0 && (
+        <label className="flex items-center gap-1.5 ml-auto">
+          <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
+          <select value={classe} onChange={(e) => setContexte({ ...contexte, classe: e.target.value })}
+            className="rounded-lg border px-2 py-1 text-xs bg-transparent"
+            style={{ borderColor: classe ? ACCENT : BORDER, color: INK }}>
+            <option value="">Toutes</option>
+            {classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+          </select>
+        </label>
+      )}
+    </div>
+  );
+}
+
 /* Sélecteur de période, partagé par tous les écrans */
 /* `collant` : la carte se réduit à une bande fine posée en position sticky,
    qui reste atteignable au défilement sous les graphiques — sans lui,
@@ -1652,8 +1705,15 @@ function SectionTitle({ children, sub, icone: Icone }) {
    verbeux.
    Absent (RapportScreen, où le sélecteur est un champ de formulaire parmi
    d'autres, pas un filtre d'écran) : comportement d'origine, toujours
-   déplié, jamais collant, `extra` ignoré. */
-function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true, extra, resumeExtra }) {
+   déplié, jamais collant, `extra` ignoré.
+   `bandeau` : le nœud de sélection personne/classe partagé par les écrans de
+   lecture (BandeauContexte), construit une seule fois par ManagerApp. Il vit ici, dans la bande
+   collante, et non dans un second bandeau posé au-dessus des écrans : cette
+   bande porte déjà `no-print`, elle est déjà couverte par test_impression, et
+   un bloc de plus dans la structure de page est le risque de régression n°1 à
+   l'impression. Ignoré quand `!collant`, donc absent du Rapport — un document
+   composé ne porte pas le contexte de lecture de l'écran. */
+function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaison, collant, comparaisonUtile = true, extra, resumeExtra, bandeau }) {
   const p = periode;
   const maj = (champs) => setPeriode({ ...p, ...champs });
   const cmp = p.comparer;
@@ -1754,8 +1814,9 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
 
   return (
     <div className="sticky top-0 z-10 mb-4 no-print">
+      {bandeau}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl border"
-        style={{ backgroundColor: CARD, borderColor: BORDER }}>
+        style={{ backgroundColor: CARD, borderColor: BORDER, borderTopLeftRadius: bandeau ? 0 : undefined, borderTopRightRadius: bandeau ? 0 : undefined }}>
         <span className="text-xs font-medium shrink-0" style={{ color: INK, fontFamily: F_MONO }}>{libellePeriode(p)}</span>
         {resumeExtra && (
           <span className="text-xs shrink-0" style={{ color: INK_SOFT }}>· {resumeExtra}</span>
@@ -2762,7 +2823,7 @@ function LockScreen({ security, onUnlock, onSetup, onFailedAttempt }) {
 /* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
    montés conditionnellement, un état local d'écran ne survit pas à un
    aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, onOuvrirPersonne, onOuvrirCrises }) {
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -2773,7 +2834,20 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      (occurrences, minutes, suivi continu promu en objectif) affichait tout son
      historique quelle que soit la période choisie, avant d'être jetée juste en
      dessous faute de `points`. */
+  /* Le contexte partagé resserre l'écran sur une personne ou une classe. Sans
+     lui, cet écran était une liste plate de tous les objectifs de tout le
+     monde, sans aucun filtre : à quinze personnes et dix objectifs, la seule
+     façon de répondre à « où en est cette personne » était de changer d'écran. */
+  const dansLeContexte = (initiales) => {
+    if (contexte.personne && initiales !== contexte.personne) return false;
+    if (contexte.classe) {
+      const p = (donnees.personnes || []).find((x) => x.initials === initiales);
+      if (!p || p.classeId !== contexte.classe) return false;
+    }
+    return true;
+  };
   const recentes = lignes
+    .filter((l) => dansLeContexte(l.initials))
     .map((l) => filtrerLignePeriode(l, periode))
     .filter((l) => l.points.length > 0 || l.mesures.length > 0);
   /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
@@ -2787,7 +2861,8 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const prioritaires = recentes.filter((l) => l.prioritaire).sort(parEtat);
   const autres = recentes.filter((l) => !l.prioritaire).sort(parEtat);
 
-  const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise');
+  const crises = (donnees.crises || []).filter((c) => (c.kind || 'crise') === 'crise'
+    && dansLeContexte(((donnees._idVersInitiales || {})[c.source] || {})[c.studentId]));
   const recentesCrises = crises.filter((c) => dansPeriode(c.date, periode));
 
   /* Période de référence : celle réglée dans le sélecteur si elle l'est, sinon
@@ -2838,7 +2913,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
 
   return (
     <div>
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
@@ -3136,22 +3211,27 @@ function comparerPaire(paire, donnees) {
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
    observateurs. */
-function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
-  const [choisie, setChoisie] = useState(null);
-  const [ouverte, setOuverte] = useState(null);      // séance dépliée
-  const [recherche, setRecherche] = useState('');
-  /* Par jour d'office : à dix séances par jour, une liste à plat déborde vite.
-     « Par date » a disparu — le regroupement par jour en tient lieu, avec le
-     même ordre antéchronologique. */
-  const [tri, setTri] = useState('jour');
-  const [toutes, setToutes] = useState(false);       // au-delà des 25 premiers
-  /* Groupes ouverts, par clé de tranche. Vide = tout replié, le défaut : à
-     dix séances par jour, tout déplié rendrait la liste plus longue que la
-     liste à plat qu'elle est censée remplacer. La liste est vidée en
-     changeant de tri — une clé de semaine ne veut rien dire pour un
-     regroupement par mois. */
-  const [groupesOuverts, setGroupesOuverts] = useState([]);
-  const changerTri = (k) => { setTri(k); setGroupesOuverts([]); };
+/* Les six réglages de cet écran vivent dans ManagerApp (`vueSeances`) : ils
+   étaient locaux, donc détruits au moindre changement d'onglet. Vérifier une
+   paire d'observateurs, aller lire une fiche et revenir imposait de refaire la
+   recherche, le tri, les déplis et le choix de la paire.
+   Les accesseurs ci-dessous gardent le corps du composant inchangé. */
+function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, periode, setPeriode, contexte, bandeau, onOuvrirPersonne }) {
+  const majVue = (champs) => setVue({ ...vue, ...champs });
+  const { recherche, tri, toutes, groupesOuverts, ouverte, paire: choisie } = vue;
+  const setChoisie = (v) => majVue({ paire: v });
+  const setOuverte = (v) => majVue({ ouverte: v });
+  const setRecherche = (v) => majVue({ recherche: v });
+  const setToutes = (v) => majVue({ toutes: v });
+  const setGroupesOuverts = (f) => majVue({ groupesOuverts: typeof f === 'function' ? f(groupesOuverts) : f });
+  /* Le tri est « par jour » d'office : à dix séances par jour, une liste à plat
+     déborde vite. « Par date » a disparu — le regroupement par jour en tient
+     lieu, avec le même ordre antéchronologique. Les groupes ouverts sont vidés
+     en changeant de tri (une clé de semaine ne veut rien dire pour un
+     regroupement par mois) mais surtout pas en changeant de période : une clé
+     absente est inoffensive, et les vider annulerait le dépli à chaque
+     ajustement du sélecteur. */
+  const changerTri = (k) => setVue({ ...vue, tri: k, groupesOuverts: [] });
 
   const LOT = 25;
 
@@ -3176,7 +3256,17 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
   });
 
   const q = recherche.trim().toLowerCase();
+  /* Trois filtres, dans cet ordre : la période partagée avec les autres écrans,
+     la personne du contexte, puis la recherche libre. Cet écran était le seul
+     écran de lecture à ignorer la période — se restreindre dans le temps y
+     supposait de taper une date au clavier dans le champ de recherche. */
   const filtrees = seances.filter((s) => {
+    if (!dansPeriode(s.date, periode)) return false;
+    if (contexte.personne && !s.initiales.includes(contexte.personne)) return false;
+    if (contexte.classe && !s.initiales.some((i) => {
+      const p = (donnees.personnes || []).find((x) => x.initials === i);
+      return p && p.classeId === contexte.classe;
+    })) return false;
     if (!q) return true;
     const champs = [
       new Date(s.date).toLocaleDateString('fr-FR'),
@@ -3231,6 +3321,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
 
   return (
     <div>
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} collant bandeau={bandeau} />
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
           placeholder="Rechercher une date, une personne, un atelier…"
@@ -3247,7 +3338,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
           {filtrees.length} séance{filtrees.length !== 1 ? 's' : ''}
-          {q && ` sur ${seances.length}`} — appuyez pour voir le détail
+          {/* « sur N » dès qu'un des trois filtres retire quelque chose, et non
+              plus seulement sur la recherche : avec la période et le contexte,
+              des séances disparaissaient de la liste sans que rien ne le dise. */}
+          {filtrees.length !== seances.length && ` sur ${seances.length}`} — appuyez pour voir le détail
         </span>
         {groupes && (
           <Btn variant="ghost" className="text-xs py-1 ml-auto"
@@ -3279,7 +3373,8 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
                     <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
                       ouverte={ouverte === s.id}
                       onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-                      onSupprimer={() => onSupprimerSeance(s)} />
+                      onSupprimer={() => onSupprimerSeance(s)}
+                      onOuvrirPersonne={onOuvrirPersonne} />
                   ))}
                 </div>
               )}
@@ -3291,7 +3386,8 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
               <DetailSeance key={s.id} seance={s} donnees={donnees} densite={densite}
                 ouverte={ouverte === s.id}
                 onBasculer={() => setOuverte(ouverte === s.id ? null : s.id)}
-                onSupprimer={() => onSupprimerSeance(s)} />
+                onSupprimer={() => onSupprimerSeance(s)}
+                onOuvrirPersonne={onOuvrirPersonne} />
             ))}
           </div>
         )}
@@ -3379,7 +3475,7 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite }) {
 /* Une séance dans la liste, dépliable sur son détail complet.
    Les cotations ne sont pas modifiables ici : la tablette reste la source, et
    un réimport de la même séance rétablirait de toute façon ses valeurs. */
-function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite }) {
+function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densite, onOuvrirPersonne }) {
   const table = (donnees._idVersInitiales || {})[seance.source] || {};
   const intervenant = ((donnees._intervenants || {})[seance.source] || {})[seance.intervenantId];
   const dureeMin = seance.endedAt && seance.startedAt
@@ -3426,9 +3522,18 @@ function DetailSeance({ seance, donnees, ouverte, onBasculer, onSupprimer, densi
             const note = (seance.notes || {})[sid];
             return (
               <div key={sid} className="mb-3 rounded-xl px-3 py-2.5" style={{ backgroundColor: PAPER }}>
-                <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>
-                  {ini ? nomAffiche(donnees, ini) : 'Personne inconnue'}
-                </div>
+                {/* Sortie de cul-de-sac : cet écran listait les personnes d'une
+                    séance sans qu'aucune ne mène à sa fiche — il fallait retenir
+                    des initiales, changer d'onglet et la retrouver à la main. */}
+                {ini ? (
+                  <button onClick={() => onOuvrirPersonne && onOuvrirPersonne(ini, null)}
+                    className="text-sm font-semibold mb-1.5 text-left"
+                    style={{ fontFamily: F_DISPLAY, color: ACCENT }}>
+                    {nomAffiche(donnees, ini)}
+                  </button>
+                ) : (
+                  <div className="text-sm font-semibold mb-1.5" style={{ fontFamily: F_DISPLAY }}>Personne inconnue</div>
+                )}
                 {objectifs.length === 0 ? (
                   <div className="text-xs" style={{ color: INK_SOFT }}>Aucun objectif sélectionné.</div>
                 ) : objectifs.map((oid) => {
@@ -4002,7 +4107,7 @@ function crisesRetenues(donnees, config, periode) {
    bord : l'onglet est monté conditionnellement, et tout un bilan réglé —
    personne, type, segmentation, blocs — repartait de zéro au moindre passage
    par un autre onglet. */
-function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPersonne, onFocusConsomme,
+function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, contexte, setContexte, bandeau,
   composition, onValiderBilan, onAnnulerBilan, rapportEnCours, onJoindreAuRapport }) {
   const [reglagesOuverts, setReglagesOuverts] = useState(false);
   const refChrono = useRef(null);
@@ -4010,16 +4115,17 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
 
   const maj = (champs) => setConfig((c) => ({ ...c, ...champs }));
 
-  /* Arrivée depuis la fiche d'une personne, ou depuis un rapport à composer :
-     on préselectionne le filtre, puis on rend la main pour que l'utilisateur
-     puisse le modifier librement.
-     La dépendance se limite à focusPersonne : onFocusConsomme est recréée à
-     chaque rendu du parent, la lister relancerait l'effet en boucle. */
+  /* La personne regardée vient désormais du contexte partagé — la même que sur
+     la fiche, les séances et Explorer. `config.personnes` reste le support :
+     c'est lui que `BlocsCrise`, `BilanCrisesRapport` et un bilan enregistré
+     dans `donnees.rapports` attendent, et le vider ici casserait le document
+     composé. Il est donc tenu à jour depuis le contexte plutôt que saisi deux
+     fois. Le tableau ne porte jamais plus d'une personne : un croisement de
+     plusieurs se lisait comme un profil collectif alors que rien n'agrège
+     leurs crises entre elles. */
   useEffect(() => {
-    if (!focusPersonne) return;
-    setConfig((c) => ({ ...c, personnes: [focusPersonne], type: 'crise' }));
-    onFocusConsomme();
-  }, [focusPersonne]);
+    setConfig((c) => ({ ...c, personnes: contexte.personne ? [contexte.personne] : [] }));
+  }, [contexte.personne]);
 
   /* Reprise d'un bilan déjà composé : on repart de ses réglages exacts plutôt
      que des réglages par défaut, sinon revenir le modifier le reconstruirait
@@ -4032,6 +4138,10 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
     const c = composition.config;
     const personnes = (c.personnes || []).length ? [c.personnes[0]] : [];
     setConfig({ ...c, personnes });
+    /* Le contexte suit le bilan qu'on rouvre, sans quoi l'effet de
+       synchronisation ci-dessus le remettrait aussitôt sur la personne
+       courante et le bilan changerait de sujet en se rouvrant. */
+    setContexte((ctx) => ({ ...ctx, personne: personnes[0] || null }));
   }, [composition && composition.jeton]);
 
   const retenues = crisesRetenues(donnees, config, periode);
@@ -4102,11 +4212,13 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
            leurs crises entre elles. Un appui remplace la sélection ; « Toutes
            les personnes » reste la remise à zéro. */
         <div className="flex flex-wrap gap-1.5 mb-3 no-print">
-          <Chip label="Toutes les personnes" on={!(config.personnes || []).length} onClick={() => maj({ personnes: [] })} />
+          <Chip label="Toutes les personnes" on={!(config.personnes || []).length}
+            onClick={() => setContexte({ ...contexte, personne: null })} />
           {donnees.personnes.map((p) => (
             <Chip key={p.initials} label={nomAffiche(donnees, p.initials)}
               on={(config.personnes || []).includes(p.initials)}
-              onClick={() => maj({ personnes: (config.personnes || []).includes(p.initials) ? [] : [p.initials] })} />
+              onClick={() => setContexte({ ...contexte,
+                personne: (config.personnes || []).includes(p.initials) ? null : p.initials })} />
           ))}
         </div>
       )}
@@ -4123,6 +4235,7 @@ function CrisesScreen({ donnees, periode, setPeriode, config, setConfig, focusPe
          suivre le défilement. Le `no-print` que portait ce wrapper est déjà
          sur la racine collante de SelecteurPeriode. */}
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite avecComparaison collant
+        bandeau={bandeau}
         resumeExtra={resumeGrapheCrises}
         extra={(
           <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
@@ -5213,8 +5326,7 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
   );
 }
 
-function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode, graphe, setGraphe, onRapport, onRapportCrises, onOuvrirCrises, onObjectifSuivi }) {
-  const [vue, setVue] = useState('objectifs');
+function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContexte, bandeau, periode, setPeriode, graphe, setGraphe, vue, setVue, onRapport, onRapportCrises, onOuvrirCrises, onObjectifSuivi }) {
   const style = graphe.style;
   const courbes = graphe.courbes;
   const setStyle = (k) => setGraphe((g) => ({ ...g, style: k }));
@@ -5242,7 +5354,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
      unique, qui exportait tout ce qui restait affiché. */
   const [nonRetenusPdf, setNonRetenusPdf] = useState([]);
   const [agrandi, setAgrandi] = useState(null);
-  const [classeFiltre, setClasseFiltre] = useState('');
+  /* La classe filtrée vient du contexte partagé : elle était locale, donc
+     repassée à « Toutes » au premier aller-retour vers un autre écran. */
+  const classeFiltre = contexte.classe;
   /* Après un clic sur le bouton PDF, il faut attendre que les objectifs
      cochés (potentiellement repliés à l'écran) aient fini de se déplier et de
      peindre leur graphique avant d'imprimer — sinon la zone ciblée capture
@@ -5270,9 +5384,21 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
   /* Calculées avant le retour anticipé plus bas : les effets qui suivent
      doivent être appelés à chaque rendu, sans quoi l'ordre des hooks change
      selon qu'une personne existe ou non. */
-  const personne = (focus && focus.initiales)
+  /* La personne vient du contexte partagé — la même que sur Crises, Séances et
+     Explorer. Le repli sur la première de la liste reste : cet écran ne sait
+     rien afficher sans sujet, contrairement aux autres, où « toutes les
+     personnes » est un état légitime. */
+  const personne = contexte.personne
     || (donnees.personnes.length ? donnees.personnes[0].initials : null);
   const objectifOuvert = focus && focus.objectif;
+
+  /* Le repli est écrit dans le contexte, sinon le bandeau annoncerait
+     « toutes les personnes » au-dessus d'une fiche qui en montre une seule —
+     et quitter cet écran pour Crises repartirait sur « toutes » sans que rien
+     ne l'ait demandé. */
+  useEffect(() => {
+    if (!contexte.personne && personne) setContexte({ ...contexte, personne });
+  }, [contexte.personne, personne]);
 
   /* Changer de personne remet la vue à plat : un objectif déplié chez l'une
      n'a pas de raison de l'être chez l'autre, même s'il porte le même nom.
@@ -5419,19 +5545,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
          comparatif (choisir qui regarder), la fiche de droite fait le reste.
          Reste en flux normal sous lg : un poste étroit garde la liste au-dessus. */}
       <div className="lg:w-64 shrink-0 no-print">
-        {donnees.classes.length > 0 && (
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs" style={{ color: INK_SOFT }}>Classe</span>
-            <select value={classeFiltre} onChange={(e) => setClasseFiltre(e.target.value)}
-              className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
-              <option value="">Toutes</option>
-              {donnees.classes.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
-            </select>
-          </div>
-        )}
+        {/* Le filtre par classe a rejoint le bandeau de contexte, en haut : il
+            vaut maintenant pour tous les écrans à la fois, et le garder ici en
+            double aurait donné deux contrôles pour un même réglage. */}
         <div className="flex lg:flex-col flex-wrap gap-2">
           {listePersonnes.map((p) => (
-            <button key={p.initials} onClick={() => setFocus({ initiales: p.initials, objectif: null })}
+            <button key={p.initials} onClick={() => { setContexte({ ...contexte, personne: p.initials }); setFocus(null); }}
               className="rounded-xl px-4 py-2.5 border font-semibold text-sm lg:text-left"
               style={{ fontFamily: F_DISPLAY, borderColor: personne === p.initials ? ACCENT : BORDER,
                 backgroundColor: personne === p.initials ? ACCENT_WASH : 'transparent', color: personne === p.initials ? ACCENT : INK_SOFT }}>
@@ -5472,7 +5591,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, periode, setPeriode
          plutôt que rendus (et donc collants) sous les quatre autres, où ils
          ne s'appliquent pas. */}
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement' || vue === 'suivi'}
-        avecComparaison collant
+        avecComparaison collant bandeau={bandeau}
         comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'}
         resumeExtra={vue === 'objectifs' ? resumeGraphePersonnes : null}
         extra={vue === 'objectifs' && (
@@ -5774,10 +5893,17 @@ function agreger(faits, mesure, total) {
   return mesure.agg === 'somme' ? Math.round(somme) : Math.round(somme / valeurs.length);
 }
 
-function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
-  const [ligneDim, setLigneDim] = useState('personne');
-  const [colonneDim, setColonneDim] = useState('semaine');
-  const [mesureK, setMesureK] = useState('autonomie');
+/* Les trois menus du croisement vivent dans ManagerApp (`croisement`) : ils
+   étaient locaux, donc reperdus à chaque sortie d'onglet — et Explorer est
+   précisément l'écran qui fabrique une question à laquelle on va répondre
+   ailleurs. */
+function ExplorerScreen({ donnees, lignes, periode, setPeriode, croisement, setCroisement, bandeau, onOuvrirPersonne }) {
+  const ligneDim = croisement.ligne;
+  const colonneDim = croisement.colonne;
+  const mesureK = croisement.mesure;
+  const setLigneDim = (v) => setCroisement({ ...croisement, ligne: v });
+  const setColonneDim = (v) => setCroisement({ ...croisement, colonne: v });
+  const setMesureK = (v) => setCroisement({ ...croisement, mesure: v });
 
   const faits = useMemo(
     () => construireFaits(donnees, lignes),
@@ -5839,6 +5965,24 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
   };
   const L = trierTemps(ligneDimEff, lignesCles);
   const C = trierTemps(colonneDimEff, colonnesCles);
+
+  /* Attributs d'ouverture d'un en-tête vers la fiche, quand la dimension est
+     « personne » — la valeur de cellule est alors les initiales elles-mêmes
+     (`construireFaits` les pose telles quelles). « Non renseignée » est écarté :
+     c'est le repli d'une crise sans personne, il n'y a pas de fiche derrière.
+     Rend un objet vide dans tous les autres cas, donc rien de cliquable. */
+  const ouvrable = (dim, valeur) => {
+    if (dim !== 'personne' || !onOuvrirPersonne) return {};
+    if (!valeur || valeur === 'Non renseignée') return {};
+    if (!(donnees.personnes || []).some((p) => p.initials === valeur)) return {};
+    return {
+      role: 'button',
+      tabIndex: 0,
+      title: 'Ouvrir la fiche',
+      onClick: () => onOuvrirPersonne(valeur, null),
+      onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOuvrirPersonne(valeur, null); } },
+    };
+  };
 
   /* Dénominateur de `agg: 'part'` : la somme du champ sur toute la base
      filtrée, même convention que la bascule Nombre/Pourcentage ailleurs dans
@@ -5932,7 +6076,7 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
         </p>
       </Card>
 
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant />
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
       <Card className="mb-3">
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -5958,7 +6102,10 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
                   </th>
                   {C.map((c) => (
                     <th key={c} className="text-right px-2 py-2 whitespace-nowrap"
-                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0, color: INK_SOFT }}>
+                      {...ouvrable(colonneDimEff, c)}
+                      style={{ borderBottom: `2px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', top: 0,
+                        color: ouvrable(colonneDimEff, c).onClick ? ACCENT : INK_SOFT,
+                        cursor: ouvrable(colonneDimEff, c).onClick ? 'pointer' : undefined }}>
                       {c}
                     </th>
                   ))}
@@ -5971,8 +6118,18 @@ function ExplorerScreen({ donnees, lignes, periode, setPeriode }) {
               <tbody>
                 {L.map((l) => (
                   <tr key={l}>
+                    {/* Sortie de cul-de-sac : Explorer fabrique la question
+                        (« trois crises pour cette personne cette semaine ») et
+                        n'avait aucun moyen d'y donner suite — il fallait retenir
+                        des initiales et repartir à la main. L'ouverture est posée
+                        sur la cellule et non sur un bouton imbriqué : cet en-tête
+                        est `sticky left`, un bouton transparent laisserait le
+                        contenu défiler dessous. */}
                     <td className="px-2 py-1.5 whitespace-nowrap font-medium"
-                      style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0 }}>
+                      {...ouvrable(ligneDimEff, l)}
+                      style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: CARD, position: 'sticky', left: 0,
+                        color: ouvrable(ligneDimEff, l).onClick ? ACCENT : undefined,
+                        cursor: ouvrable(ligneDimEff, l).onClick ? 'pointer' : undefined }}>
                       {l}
                     </td>
                     {C.map((c) => {
@@ -7392,15 +7549,38 @@ function ManagerApp() {
      regarde à l'écran. */
   const [graphePersonnes, setGraphePersonnes] = useState({ style: 'ligne', courbes: [] });
   const [grapheRapport, setGrapheRapport] = useState({ style: 'ligne', courbes: [] });
+  /* Contexte de lecture partagé par les écrans d'analyse : qui on regarde, et
+     dans quelle classe. La personne était choisie séparément dans trois états
+     sans rapport (la liste de la fiche, les pastilles de Crises, le sujet du
+     rapport) et n'existait pas du tout sur Séances ni Explorer : arriver sur un
+     écran par le rail latéral ne reportait rien.
+     `selectionRapport.personne` reste à part, délibérément : ce n'est pas un
+     filtre de lecture mais le sujet d'un document, enregistré dans
+     `donnees.rapports` et restauré par `ouvrirRapport`. Le fusionner ferait
+     qu'ouvrir un rapport enregistré repointerait toute l'application, et que
+     changer de personne ici orphelinerait ses objectifs retenus. Le lien reste
+     unidirectionnel, par `lancerRapport`.
+     Choix de lecture, jamais persisté — et pour celui-ci la règle est plus
+     qu'une convention : les initiales sont la seule donnée nominative du
+     produit, elles n'ont pas à sortir du bloc chiffré pour économiser un clic. */
+  const [contexte, setContexte] = useState({ personne: null, classe: '' });
+  /* Ne garde plus que l'objectif à déplier et vers lequel défiler : la personne
+     vit dans `contexte`. */
   const [focus, setFocus] = useState(null);
   const [selectionRapport, setSelectionRapport] = useState({ personne: null, objectifs: [], periode: periodeVide(), bilanCrises: null });
+  /* Réglages d'écran remontés ici pour la même raison que `uniteBord` : les
+     sept onglets sont montés conditionnellement, et un useState posé dans
+     l'écran repart de sa valeur initiale à chaque retour. Vérifier un accord
+     inter-observateurs, aller lire une fiche et revenir imposait de refaire la
+     recherche, le tri, les déplis et le choix de la paire ; un aller-retour
+     depuis Explorer reperdait les trois menus du croisement. */
+  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null });
+  const [vuePersonne, setVuePersonne] = useState('objectifs');
+  const [croisement, setCroisement] = useState({ ligne: 'personne', colonne: 'semaine', mesure: 'autonomie' });
   /* Composition d'un bilan de crise en cours, déclenchée depuis le rapport.
      Le jeton force la reprise des réglages à chaque nouvelle demande, même si
      la configuration est identique à la précédente. */
   const [compositionBilan, setCompositionBilan] = useState(null);
-  /* Personne sur laquelle préselectionner le filtre en arrivant dans Crises,
-     consommée aussitôt : l'utilisateur doit pouvoir l'enlever ensuite. */
-  const [focusCrises, setFocusCrises] = useState(null);
 
   /* Le calcul ne dépend que des données analytiques. Sans cette séparation,
      taper une lettre dans un commentaire de rapport relançait l'analyse de
@@ -7598,7 +7778,11 @@ function ManagerApp() {
        voient réellement. */
     setTab(fusion.seances.length ? 'bord' : 'personnes');
   }
+  /* Point d'entrée unique vers une fiche : il écrit la personne dans le
+     contexte partagé (donc tous les écrans la suivent) et garde `focus` pour
+     le seul objectif à déplier et vers lequel défiler. */
   function ouvrirPersonne(initiales, objectif) {
+    setContexte((c) => ({ ...c, personne: initiales }));
     setFocus({ initiales, objectif });
     setTab('personnes');
   }
@@ -7707,8 +7891,14 @@ function ManagerApp() {
     setDonnees((d) => ({ ...d, rapports: (d.rapports || []).filter((x) => x.id !== r.id) }));
     notify('Rapport supprimé');
   }
+  /* Aller à l'écran Crises sur une personne. Il n'y a plus de jeton à
+     consommer ni d'effet dans l'écran : la personne vit dans le contexte
+     partagé, et seul le type d'enregistrement affiché reste à poser — venir
+     de la vue Crises d'une fiche veut dire « les crises », pas les
+     observations. `initiales` à null = toutes les personnes. */
   function ouvrirCrises(initiales) {
-    setFocusCrises(initiales || null);
+    setContexte((c) => ({ ...c, personne: initiales || null }));
+    setConfigCrises((c) => ({ ...c, type: 'crise' }));
     setTab('crises');
   }
 
@@ -7734,6 +7924,16 @@ function ManagerApp() {
 
   if (!loaded) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER }}>Chargement…</div>;
 
+  /* Construit une seule fois et passé aux cinq écrans de lecture, qui l'insèrent
+     dans la bande collante de leur sélecteur de période. Un seul nœud plutôt
+     qu'un composant monté cinq fois : les cinq portent le même contexte, et un
+     second bloc dans la structure de page serait le risque de régression n°1 à
+     l'impression. */
+  const bandeauContexte = donnees.personnes.length ? (
+    <BandeauContexte donnees={donnees} contexte={contexte} setContexte={setContexte}
+      onPalette={() => setPaletteOuverte(true)} />
+  ) : null;
+
   return (
     <div className="min-h-screen flex" style={{ background: PAPER, color: INK, fontFamily: F_BODY }}>
       <NavigationLaterale onglets={ONGLETS} tab={tab} setTab={setTab}
@@ -7747,20 +7947,27 @@ function ManagerApp() {
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
                 unite={uniteBord} setUnite={setUniteBord}
+                contexte={contexte} bandeau={bandeauContexte}
                 onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
             </>
           )}
           {tab === 'seances' && (
             <>
               <SectionTitle sub="Consulter ce qui a été importé, et vérifier l'accord entre observateurs." icone={CalendarDays}>Séances</SectionTitle>
-              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite} />
+              <SeancesScreen donnees={donnees} onSupprimerSeance={supprimerSeance} densite={densite}
+                vue={vueSeances} setVue={setVueSeances}
+                periode={periode} setPeriode={setPeriode}
+                contexte={contexte} bandeau={bandeauContexte}
+                onOuvrirPersonne={ouvrirPersonne} />
             </>
           )}
           {tab === 'personnes' && (
             <>
               <SectionTitle sub="Le suivi complet, personne par personne." icone={Users}>Personnes accompagnées</SectionTitle>
               <PersonnesScreen donnees={donnees} lignes={lignes} focus={focus} setFocus={setFocus}
+                contexte={contexte} setContexte={setContexte} bandeau={bandeauContexte}
                 periode={periode} setPeriode={setPeriode}
+                vue={vuePersonne} setVue={setVuePersonne}
                 graphe={graphePersonnes} setGraphe={setGraphePersonnes}
                 onRapport={lancerRapport}
                 onRapportCrises={lancerRapportCrises} onOuvrirCrises={ouvrirCrises}
@@ -7772,7 +7979,7 @@ function ManagerApp() {
               <SectionTitle icone={AlertTriangle} sub="Ce qui déclenche, ce qui se produit, ce qui suit.">Crises</SectionTitle>
               <CrisesScreen donnees={donnees} periode={periode} setPeriode={setPeriode}
                 config={configCrises} setConfig={setConfigCrises}
-                focusPersonne={focusCrises} onFocusConsomme={() => setFocusCrises(null)}
+                contexte={contexte} setContexte={setContexte} bandeau={bandeauContexte}
                 composition={compositionBilan} onValiderBilan={validerBilan} onAnnulerBilan={annulerBilan}
                 rapportEnCours={selectionRapport} onJoindreAuRapport={joindreBilanAuRapport} />
             </>
@@ -7780,7 +7987,9 @@ function ManagerApp() {
           {tab === 'explorer' && (
             <>
               <SectionTitle icone={Grid3x3} sub="Croiser librement deux axes, comme un tableau croisé dynamique.">Explorer</SectionTitle>
-              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode} />
+              <ExplorerScreen donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
+                croisement={croisement} setCroisement={setCroisement} bandeau={bandeauContexte}
+                onOuvrirPersonne={ouvrirPersonne} />
             </>
           )}
           {tab === 'gestion' && (
@@ -7818,7 +8027,7 @@ function ManagerApp() {
 
       {paletteOuverte && (
         <PaletteCommande donnees={donnees}
-          onChoisir={(p) => { setFocus({ initiales: p.initials, objectif: null }); setTab('personnes'); setPaletteOuverte(false); }}
+          onChoisir={(p) => { ouvrirPersonne(p.initials, null); setPaletteOuverte(false); }}
           onFermer={() => setPaletteOuverte(false)} />
       )}
     </div>
