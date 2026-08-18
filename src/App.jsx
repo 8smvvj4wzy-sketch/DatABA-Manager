@@ -1667,6 +1667,39 @@ function joursDepuis(jour, maintenant) {
   return Math.floor((maintenant - t) / 86400000);
 }
 
+/* Ce que chaque tablette a remonté, et jusqu'à quand. `donnees.sources` n'est
+   qu'une liste de noms : une tablette qui a cessé de remonter est aujourd'hui
+   parfaitement invisible — les données consolidées restent, l'écran reste
+   plein, et le cadre décide sur une photo périmée sans rien qui le lui dise.
+
+   La date rendue est celle de la donnée la plus récente, pas celle du dernier
+   import : c'est la question qui compte (« jusqu'où va ce qu'on sait de cette
+   tablette »), et Manager ne consigne de toute façon aucune date d'import.
+
+   Une source présente dans les données mais absente de `donnees.sources` est
+   ajoutée en fin de liste plutôt qu'ignorée : c'est une anomalie, la montrer
+   vaut mieux que la taire. L'ordre d'`donnees.sources` — celui des imports —
+   fait sinon l'ordre d'affichage. */
+function remonteesParSource(donnees) {
+  const par = new Map();
+  const entree = (source) => {
+    if (!par.has(source)) par.set(source, { source, seances: 0, crises: 0, releves: 0, derniere: null });
+    return par.get(source);
+  };
+  (donnees.sources || []).forEach((s) => { if (s) entree(s); });
+  const poser = (source, champ, d) => {
+    if (!source) return;
+    const e = entree(source);
+    e[champ] += 1;
+    const j = jourLocal(d);
+    if (j && (!e.derniere || j > e.derniere)) e.derniere = j;
+  };
+  (donnees.seances || []).forEach((s) => poser(s.source, 'seances', s.date));
+  (donnees.crises || []).forEach((c) => poser(c.source, 'crises', c.date));
+  [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => poser(r.source, 'releves', r.timestamp));
+  return Array.from(par.values());
+}
+
 /* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
    les relevés déjà résolus par suiviDePersonne (un seul axe, un seul jour,
    triés du plus ancien au plus récent) — contrairement à `segmentsJournee`
@@ -4181,6 +4214,59 @@ function comparerPaire(paire, donnees) {
   return { lignes, points, pct: points ? Math.round((accords / points) * 100) : null };
 }
 
+/* En dessous de trois cotations, un objectif n'a rien à dire sur qui l'a coté :
+   un seul observateur sur deux séances n'est pas une habitude, c'est un
+   calendrier. */
+const MONO_OBSERVATEUR_MIN = 3;
+
+/* Le complément de l'accord inter-observateurs : les couples personne ×
+   objectif dont toutes les cotations portent le même intervenant.
+
+   `trouverPaires` ne peut montrer que les paires QUI EXISTENT — deux séances
+   du même jour marquées « double cotation ». Là où la double cotation n'a
+   jamais eu lieu, rien ne signale que la série entière repose sur une seule
+   main. C'est ce que cette liste dit, et elle ne dit que cela.
+
+   L'intervenant est identifié par son NOM et non par son identifiant, pour la
+   même raison que `trouverPaires` regroupe par nom d'atelier : les identifiants
+   sont propres à chaque tablette, et la même personne y porte deux id
+   différents. Un intervenant non renseigné écarte le couple : « on ne sait pas
+   qui a coté » n'est pas « une seule personne a coté ».
+
+   Une cotation compte si `valeurCotation` en tire quelque chose — même règle
+   qu'`analyserObjectif`. Un objectif sélectionné mais non coté ne pèse pas. */
+function objectifsMonoObservateur(donnees, minCotations) {
+  const par = new Map();
+  (donnees.seances || []).forEach((sess) => {
+    const table = (donnees._idVersInitiales || {})[sess.source] || {};
+    const nom = ((donnees._intervenants || {})[sess.source] || {})[sess.intervenantId] || null;
+    const guidances = guidancesDe(donnees, sess.source);
+    (sess.studentIds || []).forEach((sid) => {
+      const initiales = table[sid];
+      if (!initiales) return;
+      ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
+        const snap = (sess.objectiveSnapshot || {})[oid];
+        const entry = (sess.data || {})[sid] && sess.data[sid][oid];
+        if (!snap || !entry || !valeurCotation(snap, entry, guidances)) return;
+        const cle = `${initiales}|${snap.name}`;
+        if (!par.has(cle)) par.set(cle, { initiales, objectif: snap.name, cotations: 0, intervenants: new Set() });
+        const e = par.get(cle);
+        e.cotations += 1;
+        e.intervenants.add(nom);
+      });
+    });
+  });
+  return Array.from(par.values())
+    .filter((e) => e.cotations >= minCotations && e.intervenants.size === 1 && !e.intervenants.has(null))
+    .map((e) => ({
+      initiales: e.initiales,
+      objectif: e.objectif,
+      cotations: e.cotations,
+      intervenant: Array.from(e.intervenants)[0],
+    }))
+    .sort((a, b) => b.cotations - a.cotations);
+}
+
 /* ==================== Séances ====================
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
@@ -4197,6 +4283,11 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
   const setOuverte = (v) => majVue({ ouverte: v });
   const setRecherche = (v) => majVue({ recherche: v });
   const setToutes = (v) => majVue({ toutes: v });
+  /* Le dépli de la liste des objectifs mono-observateur rejoint les autres
+     réglages d'écran : il survit à un aller-retour vers une fiche, comme le
+     choix de la paire juste au-dessus de lui. */
+  const monoToutes = !!vue.monoToutes;
+  const setMonoToutes = (f) => majVue({ monoToutes: typeof f === 'function' ? f(monoToutes) : f });
   const setGroupesOuverts = (f) => majVue({ groupesOuverts: typeof f === 'function' ? f(groupesOuverts) : f });
   /* Le tri est « par jour » d'office : à dix séances par jour, une liste à plat
      déborde vite. « Par date » a disparu — le regroupement par jour en tient
@@ -4288,6 +4379,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
   const resteAAfficher = groupe ? groupesTous.length - groupesTous.slice(0, LOT).length : filtrees.length - LOT;
 
   const paires = trouverPaires(donnees);
+  /* Porte sur toute la base et non sur la période : c'est l'histoire complète
+     d'un objectif qui dit s'il n'a jamais eu qu'un observateur, pas la fenêtre
+     regardée aujourd'hui. */
+  const mono = objectifsMonoObservateur(donnees, MONO_OBSERVATEUR_MIN);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
   const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
 
@@ -4441,6 +4536,57 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
             )}
           </div>
         </div>
+      )}
+
+      {/* Le complément de ce qui précède : là où l'accord inter-observateurs
+          montre les doubles cotations qui ont eu lieu, ce bloc montre les
+          séries où elle n'a jamais eu lieu. Il vit ici parce que c'est la même
+          question — sur quoi repose ce chiffre — et non dans un écran de plus. */}
+      <div className="text-xs uppercase tracking-wide mb-2 mt-6" style={{ color: INK_SOFT }}>
+        Objectifs cotés par un seul observateur
+      </div>
+      {mono.length === 0 ? (
+        <Card>
+          <p className="text-sm" style={{ color: INK_SOFT }}>
+            Aucun objectif d'au moins {MONO_OBSERVATEUR_MIN} cotations n'est resté entre les mains
+            d'un seul intervenant.
+          </p>
+        </Card>
+      ) : (
+        <Card>
+          <div className="space-y-1.5">
+            {mono.slice(0, monoToutes ? mono.length : LOT).map((m, i) => (
+              <button key={`${m.initiales}|${m.objectif}|${i}`}
+                onClick={() => onOuvrirPersonne(m.initiales, m.objectif)}
+                className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
+                style={{ backgroundColor: PAPER }}>
+                <span className="text-sm min-w-0 break-words">
+                  <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAffiche(donnees, m.initiales)}
+                  </span>
+                  {' · '}{libelleAffiche(donnees, m.initiales, m.objectif)}
+                  <span className="block text-xs" style={{ color: INK_SOFT }}>{m.intervenant}</span>
+                </span>
+                <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: INK_SOFT }}>
+                  {m.cotations} cotations
+                </span>
+              </button>
+            ))}
+          </div>
+          {mono.length > LOT && (
+            <button onClick={() => setMonoToutes((v) => !v)} className="text-xs mt-2.5"
+              style={{ color: INK_SOFT }}>
+              {monoToutes ? 'Replier' : `Voir les ${mono.length - LOT} autres`}
+            </button>
+          )}
+          <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+            Comptés à partir de {MONO_OBSERVATEUR_MIN} cotations, sur toute la base et non sur la
+            période affichée. DatABA ne note qu'un intervenant par séance : c'est celui qui l'a
+            ouverte qui compte ici, même si d'autres y sont intervenus. Un objectif dont
+            l'intervenant n'est pas renseigné n'apparaît pas — ne pas savoir qui a coté n'est pas
+            savoir qu'une seule personne l'a fait.
+          </p>
+        </Card>
       )}
     </div>
   );
@@ -7866,6 +8012,9 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
   const [changement, setChangement] = useState(null);
   const [avant, setAvant] = useState('');
 
+  const remontees = remonteesParSource(donnees);
+  const maintenant = Date.now();
+
   const limiteAvant = avant ? new Date(`${avant}T00:00:00`) : null;
   const nbAvant = limiteAvant ? donnees.seances.filter((x) => new Date(x.date) < limiteAvant).length : 0;
   const nbCrisesAvant = limiteAvant ? donnees.crises.filter((x) => new Date(x.date) < limiteAvant).length : 0;
@@ -8050,10 +8199,47 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
           </>
         )}
         {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
-        {donnees.sources.length > 0 && (
-          <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
-        )}
       </Card>
+
+      {/* Ce que chaque tablette a remonté, et jusqu'à quand. Remplace
+          l'énumération « Sources importées : A, B, C » qui tenait lieu de
+          réponse : une tablette qui a cessé de remonter y était indiscernable
+          d'une tablette à jour, et le poste continuait d'afficher des chiffres
+          complets sur une photo périmée. */}
+      {remontees.length > 0 && (
+        <Card className="mb-4">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Clock size={16} style={{ color: INK_SOFT }} />
+            <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>Remontées par tablette</span>
+          </div>
+          <div className="space-y-1.5">
+            {remontees.map((r) => {
+              const jours = joursDepuis(r.derniere, maintenant);
+              const muette = jours != null && jours >= DORMANT_JOURS;
+              return (
+                <div key={r.source} className="rounded-xl px-3 py-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"
+                  style={{ backgroundColor: PAPER }}>
+                  <span className="text-sm font-medium" style={{ fontFamily: F_DISPLAY }}>{r.source}</span>
+                  <span className="text-xs" style={{ color: INK_SOFT }}>
+                    <span style={{ fontFamily: F_MONO }}>{r.seances}</span> séance{r.seances !== 1 ? 's' : ''}
+                    {' · '}<span style={{ fontFamily: F_MONO }}>{r.crises}</span> crise{r.crises !== 1 ? 's' : ''}
+                    {' · '}<span style={{ fontFamily: F_MONO }}>{r.releves}</span> relevé{r.releves !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-xs" style={{ fontFamily: F_MONO, color: muette ? ETATS.dormant.color : INK }}>
+                    {r.derniere == null ? 'aucune donnée'
+                      : jours === 0 ? "jusqu'à aujourd'hui"
+                        : `rien depuis ${jours} j`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+            La date lue est celle de la donnée la plus récente venue de cette tablette, pas celle du
+            dernier import : c'est jusque-là que va ce qu'on sait d'elle.
+          </p>
+        </Card>
+      )}
 
       <CarteStockage etat={etatStockage} persistant={persistant} />
 
@@ -8683,7 +8869,7 @@ function ManagerApp() {
      inter-observateurs, aller lire une fiche et revenir imposait de refaire la
      recherche, le tri, les déplis et le choix de la paire ; un aller-retour
      depuis Explorer reperdait les trois menus du croisement. */
-  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null });
+  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null, monoToutes: false });
   const [vuePersonne, setVuePersonne] = useState('objectifs');
   /* `mesure` ne peut pas rester sur le taux d'autonomie moyen, retiré de
      MESURES : la clé n'existant plus, `MESURES.find` rendrait `undefined` et
