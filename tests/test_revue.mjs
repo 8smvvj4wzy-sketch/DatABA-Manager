@@ -82,11 +82,14 @@ const donnees = {
 
 const pt = (date, value) => ({ date, value });
 const recentes = [
-  { initials: 'L.M.', objectif: 'Demander', etat: 'acquis', points: [pt('2026-06-02', 90), pt('2026-06-09', 95)], mesures: [] },
-  { initials: 'L.M.', objectif: 'Attendre', etat: 'bientot', points: [pt('2026-06-09', 80)], mesures: [] },
+  /* Acquis pendant la période. */
+  { initials: 'L.M.', objectif: 'Demander', etat: 'acquis', acquisLe: '2026-06-09', points: [pt('2026-06-02', 90), pt('2026-06-09', 95)], mesures: [] },
+  { initials: 'L.M.', objectif: 'Attendre', etat: 'bientot', acquisLe: null, points: [pt('2026-06-09', 80)], mesures: [] },
   /* Une ligne en mesure brute : aucun `points`, mais bien deux cotations. */
-  { initials: 'L.M.', objectif: 'Demandes spontanées', etat: 'mesure', points: [], mesures: [pt('2026-06-02', 4), pt('2026-06-09', 6)] },
-  { initials: 'T.B.', objectif: 'Saluer', etat: 'en_cours', points: [pt('2026-06-02', 40)], mesures: [] },
+  { initials: 'L.M.', objectif: 'Demandes spontanées', etat: 'mesure', acquisLe: null, points: [], mesures: [pt('2026-06-02', 4), pt('2026-06-09', 6)] },
+  /* Acquis avant la période : l'état reste « acquis », mais l'acquisition
+     n'appartient pas à ce bilan-ci. */
+  { initials: 'T.B.', objectif: 'Saluer', etat: 'en_cours', acquisLe: '2026-02-11', points: [pt('2026-06-02', 40)], mesures: [] },
 ];
 
 const revue = revueParPersonne(donnees, donnees.personnes, recentes, juin, mai, {
@@ -108,6 +111,15 @@ t('une ligne en mesure brute est bien comptée dans le total', de('L.M.').total,
 t('les sept états sont présents', Object.keys(de('L.M.').etats).sort(), Object.keys(ETATS).sort());
 t('la répartition compte chaque état', [de('L.M.').etats.acquis, de('L.M.').etats.bientot, de('L.M.').etats.mesure], [1, 1, 1]);
 t('un état non représenté vaut zéro', de('L.M.').etats.non_acquis, 0);
+
+/* « Acquis » compte les acquisitions DE la période, pas l'état du moment : un
+   objectif atteint en février est acquis toute l'année, il n'a été acquis
+   qu'une fois. Sans cette distinction, un bilan trimestriel recompte chaque
+   trimestre les mêmes acquisitions. */
+t('un objectif acquis pendant la période est compté', de('L.M.').acquisPeriode, 1);
+t('un objectif acquis avant la période ne l’est pas', de('T.B.').acquisPeriode, 0);
+t('mais il garde son état, lui', de('T.B.').etats.en_cours, 1);
+t('sans date d’acquisition, rien n’est compté', de('A.R.').acquisPeriode, 0);
 
 /* Séances et crises sont bornées par la période. */
 t('les séances de la période, dédupliquées par personne', de('L.M.').seances, 2);

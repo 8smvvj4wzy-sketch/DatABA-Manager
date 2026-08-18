@@ -853,6 +853,42 @@ function suiteAuSeuil(points, crit) {
   return suite;
 }
 
+/* Date à laquelle le critère a été atteint pour la première fois, ou null.
+   Pendant exact de `suiteAuSeuil`, qui compte depuis la fin : celle-ci balaie
+   depuis le début et s'arrête au premier point où la suite atteint `needed`.
+
+   `etatDeSerie` ne rend que l'état du moment, si bien que « combien
+   d'objectifs acquis ce trimestre ? » — la question même du bilan — était sans
+   réponse : un objectif acquis en janvier et un autre acquis la semaine
+   dernière s'y lisaient à l'identique.
+
+   Rend la date de la cotation, pas un jour normalisé : c'est celle que
+   `dansPeriode` sait comparer, comme n'importe quelle autre date de
+   l'application. Quand le critère s'exprime en jours, `serieCritere` regroupe
+   par journée et la date rendue est celle de la première cotation de la
+   journée qui a emporté l'acquisition.
+
+   Appelée depuis `analyserObjectif` et `lignesSuiviContinu`, jamais depuis
+   `etatDeSerie` : y ajouter une clé changerait le retour que
+   test_acquisition.mjs compare entier, pour un champ qui n'a rien à voir avec
+   la cascade d'états.
+
+   Limite assumée : c'est la PREMIÈRE atteinte sur les données présentes. Un
+   objectif retombé puis réacquis garde la première, et réimporter une
+   sauvegarde plus complète peut la faire remonter dans le temps — même
+   contrepartie que « le fichier importé gagne ». */
+function dateAcquisition(points, mesures, critere) {
+  if (!critere) return null;
+  const serie = critere.pourcent ? points : mesures;
+  const jugee = serieCritere(serie || [], critere);
+  let suite = 0;
+  for (let i = 0; i < jugee.length; i++) {
+    suite = tientLeSeuil(jugee[i].value, critere) ? suite + 1 : 0;
+    if (suite >= critere.needed) return jugee[i].date;
+  }
+  return null;
+}
+
 /* `guidancesParSource` est `donnees._guidances` : le jeu de l'établissement,
    par tablette, dont `objectiveScoreValue` se sert de repli quand l'objectif
    ne porte pas le sien. Optionnel — sans lui le repli reste celui d'avant. */
@@ -927,6 +963,10 @@ function analyserObjectif(seances, tableParSource, obj, guidancesParSource) {
     sens: critere ? critere.sens : null,
     critPourcent: critere ? critere.pourcent : null,
     prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
+    /* Posée à côté de la cascade d'états, pas dedans : elle répond à « quand »
+       et non à « où en est-on », et `etatDeSerie` est comparée entière par
+       test_acquisition.mjs. */
+    acquisLe: dateAcquisition(points, mesures, critere),
   };
 
   return { ...base, ...etatDeSerie(points, mesures, critere) };
@@ -1166,6 +1206,10 @@ function lignesSuiviContinu(donnees, dejaCotes) {
            ligne qu'un réglage vient de produire, sans reconstituer le nom. */
         origineSuivi: type,
         cleSuivi: cleReg,
+        /* Même champ que sur un objectif de séance : une série promue traverse
+           la même cascade d'états, elle doit aussi savoir dire quand son
+           critère a été atteint. */
+        acquisLe: dateAcquisition(points, mesures, critere),
         ...etatDeSerie(points, mesures, critere),
       });
     };
@@ -3428,6 +3472,13 @@ function revueParPersonne(donnees, personnes, recentes, periode, reference, dern
       initiales: p.initials,
       etats,
       total: siennes.length,
+      /* Acquis PENDANT la période, ce qui n'est pas l'état « acquis »
+         d'aujourd'hui : un objectif atteint en janvier est acquis toute
+         l'année, il n'a été acquis qu'une fois. C'est le premier des deux
+         chiffres que demande un bilan trimestriel, et il n'existait pas.
+         La date vient de `dateAcquisition`, calculée sur la série entière —
+         `filtrerLignePeriode` ne retaille que `points` et `mesures`. */
+      acquisPeriode: siennes.filter((l) => l.acquisLe && dansPeriode(l.acquisLe, periode)).length,
       /* Le nombre de cotations, quelle que soit la série qui les porte : une
          ligne en mesure brute n'a pas de `points` et s'annoncerait à zéro. */
       cotations: siennes.reduce((a, l) => a + l.points.length + l.mesures.length, 0),
@@ -3575,14 +3626,14 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const COLONNES_REVUE = [
     { k: 'nom', label: 'Personne', aide: null },
     { k: 'total', label: 'Objectifs', aide: 'Objectifs cotés sur la période' },
-    { k: 'acquis', label: 'Acquis', aide: 'Objectifs à l’état Acquis' },
+    { k: 'acquis', label: 'Acquis', aide: 'Objectifs dont le critère a été atteint pendant la période' },
     { k: 'bientot', label: 'À un pas', aide: 'À une cotation du critère d’acquisition' },
     { k: 'crises', label: 'Crises', aide: 'Crises sur la période, hors observations' },
     { k: 'cotations', label: 'Cotations', aide: 'Cotations et séances sur la période' },
     { k: 'trace', label: 'Dernière trace', aide: 'Dernière séance, crise ou relevé' },
   ];
   const valeurTri = (r) => {
-    if (tri.colonne === 'acquis') return r.etats.acquis;
+    if (tri.colonne === 'acquis') return r.acquisPeriode;
     if (tri.colonne === 'bientot') return r.etats.bientot;
     if (tri.colonne === 'trace') return r.joursDepuisTrace == null ? Infinity : r.joursDepuisTrace;
     return r[tri.colonne];
@@ -3845,8 +3896,9 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                         </span>
                       )}
                     </td>
-                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{ fontFamily: F_MONO }}>
-                      {r.etats.acquis || '—'}
+                    <td className="px-2 py-2 text-right whitespace-nowrap"
+                      style={{ fontFamily: F_MONO, color: r.acquisPeriode ? ETATS.acquis.color : INK_SOFT }}>
+                      {r.acquisPeriode || '—'}
                     </td>
                     <td className="px-2 py-2 text-right whitespace-nowrap"
                       style={{ fontFamily: F_MONO, color: r.etats.bientot ? ETATS.bientot.color : INK_SOFT }}>
@@ -3875,9 +3927,12 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
               </tbody>
             </table>
             <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
-              Les objectifs, les cotations et les crises portent sur la période choisie. La dernière
-              trace, non : elle remonte à la plus récente séance, crise ou relevé enregistré, même
-              hors période.
+              Les objectifs, les cotations et les crises portent sur la période choisie.
+              {' '}<strong style={{ color: INK }}>Acquis</strong> compte les objectifs dont le critère
+              a été atteint pendant cette période — pas ceux qui sont acquis aujourd'hui, qui le
+              restent d'une période à l'autre et se lisent sur la barre des états. La dernière trace
+              ne suit pas la période : elle remonte à la plus récente séance, crise ou relevé
+              enregistré, même hors fenêtre.
             </p>
             </div>
           </Card>
@@ -7476,6 +7531,11 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   {nbCotations} {enMesureEnTete ? 'cotation' : 'séance'}{nbCotations !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
                   {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
+                  {/* La date d'acquisition est calculée sur toute la série, pas
+                      sur la seule période composée : un objectif atteint avant
+                      la fenêtre du bilan reste acquis, et le document doit
+                      pouvoir le dater. */}
+                  {l.acquisLe && ` · acquis le ${new Date(l.acquisLe).toLocaleDateString('fr-FR')}`}
                   {l.phase && ` · phase ${l.phase}`}
                 </div>
 

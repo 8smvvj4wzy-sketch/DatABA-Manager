@@ -48,7 +48,8 @@ function extraireLigne(nom) {
 }
 
 const NOMS = [
-  'etatDeSerie', 'suiteAuSeuil', 'serieCritere', 'tientLeSeuil', 'ecartAuSeuil', 'pointsParJour',
+  'etatDeSerie', 'dateAcquisition', 'suiteAuSeuil', 'serieCritere', 'tientLeSeuil', 'ecartAuSeuil',
+  'pointsParJour',
   'jourLocal', 'segmentsJournee', 'segmentsSuivi',
   'axeDe', 'metaCritereSuivi', 'axeEtCritereDuReleve', 'suiviDePersonne', 'compteursDePersonne',
   'valeurJourSuivi', 'lignesSuiviContinu',
