@@ -4,6 +4,7 @@ import {
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette, Star,
+  ListChecks, Clock,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -1574,6 +1575,54 @@ function joursObserves(donnees, initiales) {
   return jours;
 }
 
+/* Date de la trace la plus récente de chaque personne — `{ initiales: jour }`.
+   Même notion de trace que `joursObserves` juste au-dessus (une séance, une
+   crise, un relevé d'état ou un appui de compteur suffisent) et même
+   `jourLocal`, mais tout l'effectif en une seule passe : `joursObserves`
+   appelée personne par personne rebalaie les quatre tableaux à chaque appel,
+   soit autant de balayages que de personnes là où un seul suffit.
+   `joursObserves` reste l'autorité sur les jours observés — celle-ci ne répond
+   qu'à « à quand remonte la dernière trace », ce que le Tableau de bord a
+   besoin de savoir pour tout le monde d'un coup.
+
+   Les deux clés de relevés sont lues ensemble, contrairement à
+   `fusionnerImport` qui choisit l'une ou l'autre : sur un bloc consolidé
+   l'une des deux est vide, et une personne dont la tablette n'a pas encore
+   migré n'a de trace que dans `stabilite`.
+
+   Les jours sont comparés comme des chaînes : `AAAA-MM-JJ` se trie dans
+   l'ordre chronologique, aucune conversion en date n'est nécessaire ici. */
+function derniereTraceParPersonne(donnees) {
+  const derniere = {};
+  const iniDe = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+  const poser = (initiales, d) => {
+    if (!initiales) return;
+    const j = jourLocal(d);
+    if (!j) return;
+    if (!derniere[initiales] || j > derniere[initiales]) derniere[initiales] = j;
+  };
+
+  (donnees.seances || []).forEach((s) => {
+    (s.studentIds || []).forEach((sid) => poser(iniDe(s.source, sid), s.date));
+  });
+  (donnees.crises || []).forEach((c) => poser(iniDe(c.source, c.studentId), c.date));
+  [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => {
+    poser(iniDe(r.source, r.studentId), r.timestamp);
+  });
+  return derniere;
+}
+
+/* Nombre de jours entiers écoulés depuis un jour `AAAA-MM-JJ`, à minuit local
+   — la même arithmétique que `etatDeSerie` applique à sa dernière cotation.
+   `maintenant` est passé plutôt que lu sur l'horloge : c'est ce qui rend la
+   dormance testable sans figer le temps du processus. */
+function joursDepuis(jour, maintenant) {
+  if (!jour) return null;
+  const t = new Date(`${jour}T00:00:00`).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((maintenant - t) / 86400000);
+}
+
 /* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
    les relevés déjà résolus par suiviDePersonne (un seul axe, un seul jour,
    triés du plus ancien au plus récent) — contrairement à `segmentsJournee`
@@ -2031,13 +2080,25 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
    l'écran crierait sur du bruit. En dessous du seuil on affiche « stable »,
    pas rien : l'absence de mouvement est une réponse, le silence n'en est pas
    une. `—` est réservé au cas où la référence n'existe pas. */
+/* Un écart mérite-t-il d'être annoncé ? Deux gardes cumulées : au moins 1 en
+   valeur absolue — deux crises contre une n'est pas un mouvement — et au moins
+   un quart de la référence, sans quoi 182 minutes contre 180 se lirait comme
+   une hausse. Extraite du corps d'`Ecart` pour que la file « À arbitrer »
+   remonte exactement les hausses que le reste de l'application affiche déjà en
+   couleur : une seconde règle écrite en dur ailleurs finirait par diverger,
+   comme le rappelle `tientLeSeuil` pour les seuils d'acquisition. */
+function ecartNet(valeur, reference) {
+  if (valeur == null || reference == null) return false;
+  const delta = valeur - reference;
+  return Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
+}
+
 function Ecart({ valeur, reference, unite = '', hausseFavorable = true, className = '' }) {
   if (valeur == null || reference == null) {
     return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>—</span>;
   }
   const delta = valeur - reference;
-  const net = Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
-  if (!net) {
+  if (!ecartNet(valeur, reference)) {
     return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>stable</span>;
   }
   const arrondi = Math.round(delta * 10) / 10;
@@ -3225,7 +3286,160 @@ function CarteStockage({ etat, persistant }) {
 /* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
    montés conditionnellement, un état local d'écran ne survit pas à un
    aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
+/* Ordre de remontée de la file « À arbitrer ». Il est éditorial et l'assume :
+   une hausse de crises se regarde avant une acquisition qui approche, et une
+   personne dont on n'a plus aucune nouvelle avant un objectif qui stagne. Il
+   ne dit pas quoi décider — chaque ligne n'énonce que le fait et ses chiffres,
+   l'arbitrage reste au cadre. Même forme que le `rang` des états plus bas, et
+   même raison : un ordre écrit une seule fois plutôt qu'un tri recopié. */
+const POIDS_ARBITRAGE = { crises_hausse: 0, bientot: 1, sans_trace: 2, plateau: 3, dormant: 4 };
+
+/* Pastille de couleur de chaque type de situation. Reprend la palette des
+   états là où le type en désigne un — un « bientôt » se reconnaît au même cyan
+   dans la file que dans les pastilles du haut — et `--crisis` pour la hausse
+   de crises, qui n'est pas un état d'acquisition : c'est le token de l'alerte,
+   pas une teinte catégorielle détournée. */
+const COULEUR_ARBITRAGE = {
+  crises_hausse: CRISE,
+  bientot: CAT_CYAN,
+  sans_trace: CAT_SLATE,
+  plateau: CAT_AMBER,
+  dormant: CAT_SLATE,
+};
+
+/* Longueur de la file avant repli. Huit lignes tiennent sous les deux cartes
+   sans repousser la liste des objectifs hors de l'écran ; au-delà, « voir les
+   N autres » déplie. */
+const FILE_ARBITRAGE_REPLIEE = 8;
+
+/* Les situations qui appellent un arbitrage, classées. Ne calcule rien de
+   neuf : `etatDeSerie` produit déjà `streak`, `jours` et `moyenne`, et
+   `ecartNet` décide déjà de ce qu'est une hausse nette. Tout ce que cette
+   fonction fait, c'est les réunir et les ordonner — ils n'existaient jusqu'ici
+   qu'éparpillés derrière sept pastilles à cliquer.
+
+   Rend des données, jamais des phrases : le libellé se compose dans le JSX, où
+   vit le design, et le test porte alors sur les chiffres plutôt que sur une
+   tournure. `recentes` est la liste déjà passée par `filtrerLignePeriode`.
+   `maintenant` est passé plutôt que lu sur l'horloge, pour la même raison que
+   dans `joursDepuis`. */
+function situationsAArbitrer(recentes, crisesPeriode, crisesReference, derniereTrace, maintenant) {
+  const situations = [];
+
+  /* Une personne sans aucune trace récente : le fait porte sur elle, pas sur
+     l'un de ses objectifs. Ses lignes dormantes sont écartées plus bas —
+     quinze lignes qui disent toutes « plus rien depuis trois semaines »
+     noieraient le reste alors qu'elles racontent la même absence. */
+  const sansTrace = new Set();
+  Object.keys(derniereTrace || {}).forEach((initiales) => {
+    const jours = joursDepuis(derniereTrace[initiales], maintenant);
+    if (jours != null && jours >= DORMANT_JOURS) {
+      sansTrace.add(initiales);
+      situations.push({ kind: 'sans_trace', poids: POIDS_ARBITRAGE.sans_trace, initiales, objectif: null, jours });
+    }
+  });
+
+  /* Hausse de crises. Sans période de comparaison il n'y a rien à comparer et
+     aucune ligne n'est produite — le Tableau de bord, lui, retombe toujours
+     sur la période précédente, donc le cas ne s'y présente pas. */
+  if (crisesReference) {
+    Object.keys(crisesPeriode || {}).forEach((initiales) => {
+      const n = crisesPeriode[initiales] || 0;
+      const reference = crisesReference[initiales] || 0;
+      if (n > reference && ecartNet(n, reference)) {
+        situations.push({ kind: 'crises_hausse', poids: POIDS_ARBITRAGE.crises_hausse, initiales, objectif: null, n, reference });
+      }
+    });
+  }
+
+  (recentes || []).forEach((l) => {
+    const base = { initiales: l.initials, objectif: l.objectif };
+    if (l.etat === 'bientot') {
+      situations.push({ kind: 'bientot', poids: POIDS_ARBITRAGE.bientot, ...base, streak: l.streak, needed: l.needed });
+    } else if (l.etat === 'plateau') {
+      situations.push({ kind: 'plateau', poids: POIDS_ARBITRAGE.plateau, ...base, moyenne: l.moyenne, seuil: l.threshold });
+    } else if (l.etat === 'dormant' && !sansTrace.has(l.initials)) {
+      situations.push({ kind: 'dormant', poids: POIDS_ARBITRAGE.dormant, ...base, jours: l.jours });
+    }
+  });
+
+  /* Le poids d'abord, puis l'ampleur du fait à l'intérieur d'un même type : la
+     plus forte hausse en tête des hausses, l'absence la plus longue en tête
+     des dormants. Le plateau n'a pas d'ampleur qui se compare (deux moyennes
+     sous deux seuils différents ne se classent pas) : il rend 0, et le tri
+     stable — garanti par la spécification, comme s'y fie déjà le tri des
+     objectifs prioritaires — lui laisse l'ordre de `recentes`. */
+  const ampleur = (s) => {
+    if (s.kind === 'crises_hausse') return s.n - s.reference;
+    if (s.kind === 'bientot') return s.streak;
+    if (s.kind === 'plateau') return 0;
+    return s.jours || 0;
+  };
+  return situations.sort((a, b) => a.poids - b.poids || ampleur(b) - ampleur(a));
+}
+
+/* Une ligne par personne pour la vue « Par personne » du Tableau de bord.
+
+   Part de `personnes` et non de `recentes` : une personne sans aucune cotation
+   sur la période est précisément celle qu'il faut voir, elle doit apparaître
+   avec ses compteurs à zéro plutôt que disparaître du tableau — c'est
+   exactement l'information que le cadre cherche.
+
+   `derniereTrace` est passée plutôt que recalculée ici : elle ne dépend pas de
+   la période et n'a donc aucune raison d'être refaite à chaque changement de
+   fenêtre. `reference` à null (aucune comparaison réglée) laisse `crisesRef` à
+   null plutôt qu'à zéro : « pas de comparaison » et « zéro crise avant » ne
+   sont pas la même chose, et `Ecart` sait déjà rendre « — » sur null. */
+function revueParPersonne(donnees, personnes, recentes, periode, reference, derniereTrace, maintenant) {
+  const iniDe = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+
+  const lignesDe = new Map();
+  (recentes || []).forEach((l) => {
+    if (!lignesDe.has(l.initials)) lignesDe.set(l.initials, []);
+    lignesDe.get(l.initials).push(l);
+  });
+
+  const crises = {};
+  const crisesRef = {};
+  (donnees.crises || []).forEach((c) => {
+    if ((c.kind || 'crise') !== 'crise') return;
+    const ini = iniDe(c.source, c.studentId);
+    if (!ini) return;
+    if (dansPeriode(c.date, periode)) crises[ini] = (crises[ini] || 0) + 1;
+    if (reference && dansPeriode(c.date, reference)) crisesRef[ini] = (crisesRef[ini] || 0) + 1;
+  });
+
+  const seances = {};
+  (donnees.seances || []).forEach((s) => {
+    if (!dansPeriode(s.date, periode)) return;
+    /* Dédupliqué par personne : une séance ne compte qu'une fois pour elle,
+       même si la tablette a listé deux fois le même identifiant. */
+    new Set((s.studentIds || []).map((sid) => iniDe(s.source, sid))).forEach((ini) => {
+      if (ini) seances[ini] = (seances[ini] || 0) + 1;
+    });
+  });
+
+  return (personnes || []).map((p) => {
+    const siennes = lignesDe.get(p.initials) || [];
+    const etats = {};
+    Object.keys(ETATS).forEach((e) => { etats[e] = 0; });
+    siennes.forEach((l) => { etats[l.etat] = (etats[l.etat] || 0) + 1; });
+    return {
+      initiales: p.initials,
+      etats,
+      total: siennes.length,
+      /* Le nombre de cotations, quelle que soit la série qui les porte : une
+         ligne en mesure brute n'a pas de `points` et s'annoncerait à zéro. */
+      cotations: siennes.reduce((a, l) => a + l.points.length + l.mesures.length, 0),
+      crises: crises[p.initials] || 0,
+      crisesRef: reference ? (crisesRef[p.initials] || 0) : null,
+      seances: seances[p.initials] || 0,
+      joursDepuisTrace: joursDepuis((derniereTrace || {})[p.initials], maintenant),
+    };
+  });
+}
+
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, vue, setVue, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -3241,6 +3455,22 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const [styleApercu, setStyleApercu] = useState('ligne');
   const [courbesApercu, setCourbesApercu] = useState([]);
   const refApercu = useRef(null);
+  /* File d'arbitrage repliée à ses premières lignes : c'est un rappel en tête
+     d'écran, pas la page elle-même. Local, comme la modale d'aperçu. */
+  const [fileDepliee, setFileDepliee] = useState(false);
+  /* Tri du tableau par personne. Alphabétique au départ, volontairement : la
+     file « À arbitrer » fait déjà le travail de remontée, ce tableau fait
+     celui de la comparaison — et on y cherche quelqu'un par son nom. */
+  const [tri, setTri] = useState({ colonne: 'nom', sens: 1 });
+  const refRevue = useRef(null);
+  /* La dernière trace de chacun ne dépend pas de la période : la recalculer à
+     chaque changement de fenêtre relirait les quatre tableaux pour rien. */
+  const derniereTrace = useMemo(() => derniereTraceParPersonne(donnees),
+    [donnees.seances, donnees.crises, donnees.suivi, donnees.stabilite, donnees._idVersInitiales]);
+  /* Une seule lecture de l'horloge pour tout le rendu : deux appels à
+     `Date.now()` dans la même passe pourraient tomber de part et d'autre de
+     minuit et faire diverger la file et le tableau d'un jour. */
+  const maintenant = Date.now();
   const basculerCourbeApercu = (k) => setCourbesApercu((cur) => (
     cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
   ));
@@ -3317,6 +3547,59 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      `points` et s'affichait « 0 séance » alors qu'il en portait des dizaines. */
   const nbCotations = (l) => l.points.length + l.mesures.length;
 
+  /* ── L'effectif : la file d'arbitrage et le tableau par personne ──
+     Les deux partent de `recentes` comme le reste de l'écran, jamais de
+     `lignes` brut — c'est la faute que le contrôle « 2 quater bis » de
+     verifier.sh verrouille, et elle ferait ici diverger le tableau des sept
+     pastilles posées juste au-dessus. */
+  const personnesRevue = (donnees.personnes || []).filter((p) => dansLeContexte(p.initials));
+  const dansRevue = new Set(personnesRevue.map((p) => p.initials));
+  const parPersonneCrises = (liste) => {
+    const m = {};
+    liste.forEach((c) => {
+      const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+      if (ini) m[ini] = (m[ini] || 0) + 1;
+    });
+    return m;
+  };
+  /* Bornée aux personnes connues et retenues par la classe : `derniereTrace`
+     couvre tout le bloc, y compris un identifiant d'usager qu'aucune personne
+     ne réclame plus après une purge partielle. */
+  const traceRevue = {};
+  Object.keys(derniereTrace).forEach((ini) => {
+    if (dansRevue.has(ini)) traceRevue[ini] = derniereTrace[ini];
+  });
+  const file = situationsAArbitrer(recentes, parPersonneCrises(recentesCrises),
+    reference ? parPersonneCrises(precedentes) : null, traceRevue, maintenant);
+  const revue = revueParPersonne(donnees, personnesRevue, recentes, periode, reference, traceRevue, maintenant);
+  const COLONNES_REVUE = [
+    { k: 'nom', label: 'Personne', aide: null },
+    { k: 'total', label: 'Objectifs', aide: 'Objectifs cotés sur la période' },
+    { k: 'acquis', label: 'Acquis', aide: 'Objectifs à l’état Acquis' },
+    { k: 'bientot', label: 'À un pas', aide: 'À une cotation du critère d’acquisition' },
+    { k: 'crises', label: 'Crises', aide: 'Crises sur la période, hors observations' },
+    { k: 'cotations', label: 'Cotations', aide: 'Cotations et séances sur la période' },
+    { k: 'trace', label: 'Dernière trace', aide: 'Dernière séance, crise ou relevé' },
+  ];
+  const valeurTri = (r) => {
+    if (tri.colonne === 'acquis') return r.etats.acquis;
+    if (tri.colonne === 'bientot') return r.etats.bientot;
+    if (tri.colonne === 'trace') return r.joursDepuisTrace == null ? Infinity : r.joursDepuisTrace;
+    return r[tri.colonne];
+  };
+  const revueTriee = [...revue].sort((a, b) => {
+    if (tri.colonne === 'nom') {
+      return tri.sens * nomAffiche(donnees, a.initiales).localeCompare(nomAffiche(donnees, b.initiales), 'fr');
+    }
+    return tri.sens * (valeurTri(a) - valeurTri(b));
+  });
+  /* Un clic sur une colonne déjà triée inverse le sens. Le nom part croissant,
+     les chiffres décroissants : sur « Crises » ou « À un pas », c'est le haut
+     du tableau qu'on vient regarder. */
+  const trierPar = (k) => setTri((t) => (
+    t.colonne === k ? { colonne: k, sens: -t.sens } : { colonne: k, sens: k === 'nom' ? 1 : -1 }
+  ));
+
   /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
      de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
      vers un import qui vient d'avoir lieu. */
@@ -3335,9 +3618,19 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
     <div>
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
-      <div className="flex items-center justify-between gap-3 mb-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
-        <BasculeUnite unite={unite} setUnite={setUnite} />
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Deux façons de lire le même effectif sur la même période : la
+              liste des objectifs de tout le monde, ou une ligne par personne.
+              Les deux cartes du haut ne changent pas — elles portent déjà sur
+              l'effectif entier. */}
+          <div className="flex gap-1.5">
+            <Chip label="Par objectif" on={vue === 'objectif'} onClick={() => setVue('objectif')} />
+            <Chip label="Par personne" on={vue === 'personne'} onClick={() => setVue('personne')} />
+          </div>
+          <BasculeUnite unite={unite} setUnite={setUnite} />
+        </div>
       </div>
 
       <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
@@ -3390,7 +3683,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           )}
         </Card>
 
-        <button onClick={onOuvrirCrises} className="rounded-2xl border p-4 text-left"
+        <button onClick={() => onOuvrirCrises(null)} className="rounded-2xl border p-4 text-left"
           style={{ borderColor: BORDER, backgroundColor: CARD }}>
           <div className="flex items-center gap-1.5 mb-3">
             <AlertTriangle size={14} style={{ color: INK_SOFT }} />
@@ -3427,7 +3720,171 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
         </button>
       </div>
 
-      {recentes.length === 0 ? (
+      {file.length > 0 && (() => {
+        /* Chaque ligne énonce un fait et ses chiffres, puis mène là où on peut
+           le vérifier. Elle ne dit pas quoi en faire : le classement remonte,
+           l'arbitrage reste au cadre. */
+        const visibles = fileDepliee ? file : file.slice(0, FILE_ARBITRAGE_REPLIEE);
+        const phrase = (s) => {
+          if (s.kind === 'crises_hausse') {
+            return `${s.n} crise${s.n > 1 ? 's' : ''} sur la période, contre ${s.reference} sur ${libelleComparaison(periode) || 'la précédente'}.`;
+          }
+          if (s.kind === 'bientot') {
+            return `Au seuil sur ${s.streak} cotation${s.streak > 1 ? 's' : ''} consécutive${s.streak > 1 ? 's' : ''}, le critère en demande ${s.needed}.`;
+          }
+          if (s.kind === 'sans_trace') return `Aucune séance, crise ni relevé depuis ${s.jours} jours.`;
+          if (s.kind === 'plateau') {
+            return `Moyenne ${s.moyenne} % sur les cinq dernières cotations, pour un seuil à ${s.seuil} %.`;
+          }
+          return `Plus coté depuis ${s.jours} jours.`;
+        };
+        return (
+          <Card className="mb-4">
+            <div className="flex items-center gap-1.5 mb-3">
+              <ListChecks size={14} style={{ color: INK_SOFT }} />
+              <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+                À arbitrer · {file.length}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {visibles.map((s, i) => (
+                <button key={`${s.kind}|${s.initiales}|${s.objectif || ''}|${i}`}
+                  onClick={() => (s.kind === 'crises_hausse'
+                    ? onOuvrirCrises(s.initiales)
+                    : onOuvrirPersonne(s.initiales, s.objectif || null))}
+                  className="w-full text-left rounded-xl px-3 py-2 flex items-start gap-2.5"
+                  style={{ backgroundColor: PAPER }}>
+                  <span className="mt-1 shrink-0 rounded-full" aria-hidden="true"
+                    style={{ width: 8, height: 8, backgroundColor: COULEUR_ARBITRAGE[s.kind] }} />
+                  <span className="text-sm min-w-0">
+                    <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                      {nomAffiche(donnees, s.initiales)}
+                    </span>
+                    {s.objectif && <> · {libelleAffiche(donnees, s.initiales, s.objectif)}</>}
+                    <span className="block text-xs" style={{ color: INK_SOFT }}>{phrase(s)}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            {file.length > FILE_ARBITRAGE_REPLIEE && (
+              <button onClick={() => setFileDepliee((v) => !v)} className="text-xs mt-2.5 flex items-center gap-1.5"
+                style={{ color: INK_SOFT }}>
+                {fileDepliee ? 'Replier' : `Voir les ${file.length - FILE_ARBITRAGE_REPLIEE} autres`}
+                <span style={{ fontFamily: F_MONO }}>{fileDepliee ? '▴' : '▾'}</span>
+              </button>
+            )}
+          </Card>
+        );
+      })()}
+
+      {vue === 'personne' && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+              L'effectif sur la période — appuyez sur une ligne pour ouvrir la fiche
+            </span>
+            {/* La zone imprimée est le tableau seul : `imprimerZone` marque ses
+                ancêtres et masque leurs frères, donc ni le rail, ni les cartes,
+                ni ce bouton n'en sont. Aucun conteneur `no-print` ne l'englobe
+                — ce serait la page blanche garantie. */}
+            <Btn variant="outline" className="text-xs py-1.5 no-print"
+              onClick={() => imprimerZone(refRevue.current)}>
+              <Printer size={13} /> PDF
+            </Btn>
+          </div>
+          <Card className="overflow-x-auto">
+            {/* La cible d'impression est ce div, pas la Card : `Card` est un
+                composant fonction, il ne reçoit pas de `ref`. La Card devient
+                simplement l'un des ancêtres marqués par `imprimerZone`. */}
+            <div ref={refRevue}>
+            <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  {COLONNES_REVUE.map((c) => (
+                    <th key={c.k} title={c.aide || undefined}
+                      className={`px-2 py-2 font-medium whitespace-nowrap ${c.k === 'nom' ? 'text-left' : 'text-right'}`}
+                      style={{ borderBottom: `1px solid ${BORDER}`, color: INK_SOFT }}>
+                      <button onClick={() => trierPar(c.k)} className="inline-flex items-center gap-1"
+                        style={{ color: tri.colonne === c.k ? ACCENT : INK_SOFT }}>
+                        {c.label}
+                        {tri.colonne === c.k && (
+                          <span style={{ fontFamily: F_MONO }}>{tri.sens > 0 ? '▴' : '▾'}</span>
+                        )}
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {revueTriee.map((r) => (
+                  <tr key={r.initiales} onClick={() => onOuvrirPersonne(r.initiales, null)}
+                    className="cursor-pointer" style={{ borderBottom: `1px solid ${BORDER}` }}>
+                    <td className="px-2 py-2">
+                      <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                        {nomAffiche(donnees, r.initiales)}
+                      </span>
+                      {nomClasseDe(donnees, r.initiales) && (
+                        <span className="ml-1.5" style={{ color: INK_SOFT }}>· {nomClasseDe(donnees, r.initiales)}</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap">
+                      {r.total === 0 ? (
+                        <span style={{ color: INK_SOFT }}>aucune cotation</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 justify-end">
+                          {/* Répartition des états en une barre : les sept
+                              couleurs sont celles des pastilles du haut, une
+                              seconde attribution les ferait diverger. */}
+                          <span className="inline-flex rounded-full overflow-hidden" style={{ width: 64, height: 6 }}>
+                            {Object.keys(ETATS).filter((e) => r.etats[e] > 0).map((e) => (
+                              <span key={e} title={`${ETATS[e].label} : ${r.etats[e]}`}
+                                style={{ flex: r.etats[e], backgroundColor: ETATS[e].color }} />
+                            ))}
+                          </span>
+                          <span style={{ fontFamily: F_MONO }}>{r.total}</span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{ fontFamily: F_MONO }}>
+                      {r.etats.acquis || '—'}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap"
+                      style={{ fontFamily: F_MONO, color: r.etats.bientot ? ETATS.bientot.color : INK_SOFT }}>
+                      {r.etats.bientot || '—'}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap">
+                      <span style={{ fontFamily: F_MONO }}>{r.crises}</span>
+                      <Ecart valeur={r.crises} reference={r.crisesRef} hausseFavorable={false} className="ml-1.5" />
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{ fontFamily: F_MONO }}>
+                      {r.cotations}
+                      <span className="ml-1" style={{ color: INK_SOFT }}>
+                        / {r.seances} séance{r.seances !== 1 ? 's' : ''}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{
+                      fontFamily: F_MONO,
+                      color: r.joursDepuisTrace != null && r.joursDepuisTrace >= DORMANT_JOURS ? ETATS.dormant.color : INK,
+                    }}>
+                      {r.joursDepuisTrace == null ? 'jamais'
+                        : r.joursDepuisTrace === 0 ? "aujourd'hui"
+                          : `il y a ${r.joursDepuisTrace} j`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+              Les objectifs, les cotations et les crises portent sur la période choisie. La dernière
+              trace, non : elle remonte à la plus récente séance, crise ou relevé enregistré, même
+              hors période.
+            </p>
+            </div>
+          </Card>
+        </>
+      )}
+
+      {vue === 'objectif' && (recentes.length === 0 ? (
         <Empty>Aucun objectif coté sur cette période.</Empty>
       ) : (
         <>
@@ -3459,7 +3916,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
             );
           })()}
         </>
-      )}
+      ))}
 
       {apercu && (() => {
         /* La même modale que la fiche personne (GrapheAgrandi) et le même
@@ -8129,6 +8586,11 @@ function ManagerApp() {
      repart de sa valeur initiale à chaque retour. Choix de lecture, jamais
      persistés ni chiffrés — comme `periode` juste au-dessus. */
   const [uniteBord, setUniteBord] = useState('nombre');
+  /* Lecture de l'effectif au Tableau de bord : par objectif (la liste
+     d'origine) ou par personne (le tableau comparatif). Remontée ici pour la
+     même raison qu'`uniteBord` — un aller-retour vers un autre écran ne doit
+     pas ramener le bord à un mode qu'on venait de quitter. */
+  const [vueBord, setVueBord] = useState('objectif');
   const [configCrises, setConfigCrises] = useState(configCriseVide());
   /* Réglages de graphique — style de tracé et lectures superposées. Deux jeux
      séparés : la fiche personne et le document du rapport ont toujours eu des
@@ -8594,10 +9056,16 @@ function ManagerApp() {
           {tab === 'bord' && (
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
+              {/* `onOuvrirCrises` reçoit maintenant les initiales : la file
+                  « À arbitrer » ouvre l'écran Crises déjà resserré sur la
+                  personne dont les crises ont augmenté. La carte du haut, qui
+                  porte sur tout l'effectif, passe explicitement null — elle
+                  était branchée en direct sur le bouton et lui envoyait
+                  l'événement de clic en guise d'initiales. */}
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
-                unite={uniteBord} setUnite={setUniteBord}
+                unite={uniteBord} setUnite={setUniteBord} vue={vueBord} setVue={setVueBord}
                 contexte={contexte} bandeau={bandeauClasse}
-                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
+                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={ouvrirCrises} />
             </>
           )}
           {tab === 'seances' && (
