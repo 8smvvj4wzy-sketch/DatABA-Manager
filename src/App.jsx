@@ -4,6 +4,7 @@ import {
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette, Star,
+  ListChecks, Clock,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -852,6 +853,42 @@ function suiteAuSeuil(points, crit) {
   return suite;
 }
 
+/* Date à laquelle le critère a été atteint pour la première fois, ou null.
+   Pendant exact de `suiteAuSeuil`, qui compte depuis la fin : celle-ci balaie
+   depuis le début et s'arrête au premier point où la suite atteint `needed`.
+
+   `etatDeSerie` ne rend que l'état du moment, si bien que « combien
+   d'objectifs acquis ce trimestre ? » — la question même du bilan — était sans
+   réponse : un objectif acquis en janvier et un autre acquis la semaine
+   dernière s'y lisaient à l'identique.
+
+   Rend la date de la cotation, pas un jour normalisé : c'est celle que
+   `dansPeriode` sait comparer, comme n'importe quelle autre date de
+   l'application. Quand le critère s'exprime en jours, `serieCritere` regroupe
+   par journée et la date rendue est celle de la première cotation de la
+   journée qui a emporté l'acquisition.
+
+   Appelée depuis `analyserObjectif` et `lignesSuiviContinu`, jamais depuis
+   `etatDeSerie` : y ajouter une clé changerait le retour que
+   test_acquisition.mjs compare entier, pour un champ qui n'a rien à voir avec
+   la cascade d'états.
+
+   Limite assumée : c'est la PREMIÈRE atteinte sur les données présentes. Un
+   objectif retombé puis réacquis garde la première, et réimporter une
+   sauvegarde plus complète peut la faire remonter dans le temps — même
+   contrepartie que « le fichier importé gagne ». */
+function dateAcquisition(points, mesures, critere) {
+  if (!critere) return null;
+  const serie = critere.pourcent ? points : mesures;
+  const jugee = serieCritere(serie || [], critere);
+  let suite = 0;
+  for (let i = 0; i < jugee.length; i++) {
+    suite = tientLeSeuil(jugee[i].value, critere) ? suite + 1 : 0;
+    if (suite >= critere.needed) return jugee[i].date;
+  }
+  return null;
+}
+
 /* `guidancesParSource` est `donnees._guidances` : le jeu de l'établissement,
    par tablette, dont `objectiveScoreValue` se sert de repli quand l'objectif
    ne porte pas le sien. Optionnel — sans lui le repli reste celui d'avant. */
@@ -926,6 +963,10 @@ function analyserObjectif(seances, tableParSource, obj, guidancesParSource) {
     sens: critere ? critere.sens : null,
     critPourcent: critere ? critere.pourcent : null,
     prioritaire: points.some((p) => p.favorite) || mesures.some((m) => m.favorite),
+    /* Posée à côté de la cascade d'états, pas dedans : elle répond à « quand »
+       et non à « où en est-on », et `etatDeSerie` est comparée entière par
+       test_acquisition.mjs. */
+    acquisLe: dateAcquisition(points, mesures, critere),
   };
 
   return { ...base, ...etatDeSerie(points, mesures, critere) };
@@ -1165,6 +1206,10 @@ function lignesSuiviContinu(donnees, dejaCotes) {
            ligne qu'un réglage vient de produire, sans reconstituer le nom. */
         origineSuivi: type,
         cleSuivi: cleReg,
+        /* Même champ que sur un objectif de séance : une série promue traverse
+           la même cascade d'états, elle doit aussi savoir dire quand son
+           critère a été atteint. */
+        acquisLe: dateAcquisition(points, mesures, critere),
         ...etatDeSerie(points, mesures, critere),
       });
     };
@@ -1219,6 +1264,37 @@ function lignesSuiviContinu(donnees, dejaCotes) {
   return lignes;
 }
 
+/* Heure locale d'un horodatage, ou null quand la donnée n'en porte pas.
+
+   Une date sans heure (« 2026-06-02 ») est lue par le navigateur comme minuit
+   UTC : la convertir en heure locale fabriquerait une tranche — deux heures du
+   matin sous nos longitudes — que personne n'a observée. Mieux vaut dire
+   « heure inconnue » qu'inventer un créneau. D'où le test sur la présence
+   d'une heure dans la chaîne avant toute conversion ; un horodatage numérique
+   (epoch, `startedAt`) en porte toujours une. */
+function heureDe(valeur) {
+  if (valeur == null) return null;
+  if (typeof valeur === 'string' && !/\d{2}:\d{2}/.test(valeur)) return null;
+  const d = new Date(valeur);
+  return Number.isNaN(d.getTime()) ? null : d.getHours();
+}
+
+/* Tranches de deux heures. Le libellé est zéro-rempli pour que l'ordre
+   alphabétique des en-têtes d'Explorer soit déjà l'ordre chronologique, et
+   « Heure inconnue » se range de lui-même après les chiffres.
+
+   Vocabulaire : « tranche horaire » et jamais « créneau » — `creneau` désigne
+   déjà le matin/après-midi d'un probe à deux prises (PROBE_CRENEAUX, coupure à
+   13 h). Deux définitions de « matin » dans la même application seraient un
+   piège de plus. */
+const TRANCHE_HORAIRE_PAS = 2;
+function libelleTrancheHoraire(h) {
+  if (h == null) return 'Heure inconnue';
+  const debut = Math.floor(h / TRANCHE_HORAIRE_PAS) * TRANCHE_HORAIRE_PAS;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(debut)} h – ${pad(debut + TRANCHE_HORAIRE_PAS)} h`;
+}
+
 /* ==================== Table de faits ====================
    Une ligne par cotation, par crise, par segment de suivi continu et par
    objectif, avec toutes les dimensions résolues. C'est ce qui permet de
@@ -1231,6 +1307,10 @@ function construireFaits(donnees, lignes) {
     const t = (donnees._intervenants || {})[source] || {};
     return t[id] || 'Non renseigné';
   };
+  /* Résolus une fois par fait plutôt que par la dimension : `DIMENSIONS[].get`
+     ne reçoit que le fait, pas le bloc, et la classe comme la tablette
+     demandent de le consulter. */
+  const classeDe = (initiales) => nomClasseDe(donnees, initiales) || 'Sans classe';
 
   donnees.seances.forEach((sess) => {
     /* `libelleSeance` et non `nomAtelier` : sans quoi les séances libres et les
@@ -1267,6 +1347,18 @@ function construireFaits(donnees, lignes) {
           seanceId: sess.id,
           date: sess.date,
           personne: initiales,
+          classe: classeDe(initiales),
+          tablette: sess.source,
+          /* L'heure de la SÉANCE : une cotation n'est pas horodatée pour
+             elle-même côté DatABA. `sess.date` sert de repli quand il porte une
+             heure, ce qui n'est pas toujours le cas. */
+          heure: heureDe(sess.startedAt != null ? sess.startedAt : sess.date),
+          /* Durée de la séance, portée par chacune de ses cotations et
+             dédupliquée à l'agrégation (agg `sommeUnique`, clé `seanceId`) :
+             la poser sur une seule cotation arbitraire attribuerait tout le
+             temps d'une séance au premier objectif venu. */
+          minutesSeance: (sess.endedAt != null && sess.startedAt != null)
+            ? Math.round(Math.max(0, sess.endedAt - sess.startedAt) / 60000) : null,
           atelier,
           intervenant,
           objectif: obj.name,
@@ -1289,6 +1381,9 @@ function construireFaits(donnees, lignes) {
     return {
       date: c.date,
       personne: table[c.studentId] || 'Non renseignée',
+      classe: classeDe(table[c.studentId]),
+      tablette: c.source,
+      heure: heureDe(c.date),
       atelier: nomAtelier(donnees, c.source, c.atelierId),
       /* DatABA note plusieurs intervenants sur une crise (`intervenantIds`).
          Le champ arrivait bien à l'import et n'était lu nulle part : les
@@ -1331,6 +1426,13 @@ function construireFaits(donnees, lignes) {
         suivi.push({
           date: new Date(seg.debut).toISOString(),
           personne: p.initials,
+          classe: classeDe(p.initials),
+          tablette: porteur ? porteur.source : 'Non renseignée',
+          /* L'heure de DÉBUT du segment, celle du relevé qui l'a ouvert. Un
+             segment qui chevauche deux tranches est compté dans celle où il
+             commence — le découper répartirait des minutes que personne n'a
+             relevées ainsi. */
+          heure: heureDe(seg.debut),
           atelier: porteur ? nomAtelier(donnees, porteur.source, porteur.atelierId) : 'Hors atelier',
           intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
           axe,
@@ -1352,6 +1454,9 @@ function construireFaits(donnees, lignes) {
       compteurs.push({
         date: new Date(r.timestamp).toISOString(),
         personne: p.initials,
+        classe: classeDe(p.initials),
+        tablette: r.source,
+        heure: heureDe(r.timestamp),
         compteur: r.nomCompteur,
         atelier: nomAtelier(donnees, r.source, r.atelierId),
         intervenant: nomIntervenant(r.source, r.intervenantId),
@@ -1382,6 +1487,7 @@ function construireFaits(donnees, lignes) {
       return {
         date: dernier.date,
         personne: l.initials,
+        classe: classeDe(l.initials),
         objectif: l.objectif,
         type: (TYPES_COTATION[l.type] || l.type),
         etat: ETAT_RAPPORT[l.etat] || l.etat,
@@ -1572,6 +1678,87 @@ function joursObserves(donnees, initiales) {
     [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => ajouter(r.timestamp));
   }
   return jours;
+}
+
+/* Date de la trace la plus récente de chaque personne — `{ initiales: jour }`.
+   Même notion de trace que `joursObserves` juste au-dessus (une séance, une
+   crise, un relevé d'état ou un appui de compteur suffisent) et même
+   `jourLocal`, mais tout l'effectif en une seule passe : `joursObserves`
+   appelée personne par personne rebalaie les quatre tableaux à chaque appel,
+   soit autant de balayages que de personnes là où un seul suffit.
+   `joursObserves` reste l'autorité sur les jours observés — celle-ci ne répond
+   qu'à « à quand remonte la dernière trace », ce que le Tableau de bord a
+   besoin de savoir pour tout le monde d'un coup.
+
+   Les deux clés de relevés sont lues ensemble, contrairement à
+   `fusionnerImport` qui choisit l'une ou l'autre : sur un bloc consolidé
+   l'une des deux est vide, et une personne dont la tablette n'a pas encore
+   migré n'a de trace que dans `stabilite`.
+
+   Les jours sont comparés comme des chaînes : `AAAA-MM-JJ` se trie dans
+   l'ordre chronologique, aucune conversion en date n'est nécessaire ici. */
+function derniereTraceParPersonne(donnees) {
+  const derniere = {};
+  const iniDe = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+  const poser = (initiales, d) => {
+    if (!initiales) return;
+    const j = jourLocal(d);
+    if (!j) return;
+    if (!derniere[initiales] || j > derniere[initiales]) derniere[initiales] = j;
+  };
+
+  (donnees.seances || []).forEach((s) => {
+    (s.studentIds || []).forEach((sid) => poser(iniDe(s.source, sid), s.date));
+  });
+  (donnees.crises || []).forEach((c) => poser(iniDe(c.source, c.studentId), c.date));
+  [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => {
+    poser(iniDe(r.source, r.studentId), r.timestamp);
+  });
+  return derniere;
+}
+
+/* Nombre de jours entiers écoulés depuis un jour `AAAA-MM-JJ`, à minuit local
+   — la même arithmétique que `etatDeSerie` applique à sa dernière cotation.
+   `maintenant` est passé plutôt que lu sur l'horloge : c'est ce qui rend la
+   dormance testable sans figer le temps du processus. */
+function joursDepuis(jour, maintenant) {
+  if (!jour) return null;
+  const t = new Date(`${jour}T00:00:00`).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((maintenant - t) / 86400000);
+}
+
+/* Ce que chaque tablette a remonté, et jusqu'à quand. `donnees.sources` n'est
+   qu'une liste de noms : une tablette qui a cessé de remonter est aujourd'hui
+   parfaitement invisible — les données consolidées restent, l'écran reste
+   plein, et le cadre décide sur une photo périmée sans rien qui le lui dise.
+
+   La date rendue est celle de la donnée la plus récente, pas celle du dernier
+   import : c'est la question qui compte (« jusqu'où va ce qu'on sait de cette
+   tablette »), et Manager ne consigne de toute façon aucune date d'import.
+
+   Une source présente dans les données mais absente de `donnees.sources` est
+   ajoutée en fin de liste plutôt qu'ignorée : c'est une anomalie, la montrer
+   vaut mieux que la taire. L'ordre d'`donnees.sources` — celui des imports —
+   fait sinon l'ordre d'affichage. */
+function remonteesParSource(donnees) {
+  const par = new Map();
+  const entree = (source) => {
+    if (!par.has(source)) par.set(source, { source, seances: 0, crises: 0, releves: 0, derniere: null });
+    return par.get(source);
+  };
+  (donnees.sources || []).forEach((s) => { if (s) entree(s); });
+  const poser = (source, champ, d) => {
+    if (!source) return;
+    const e = entree(source);
+    e[champ] += 1;
+    const j = jourLocal(d);
+    if (j && (!e.derniere || j > e.derniere)) e.derniere = j;
+  };
+  (donnees.seances || []).forEach((s) => poser(s.source, 'seances', s.date));
+  (donnees.crises || []).forEach((c) => poser(c.source, 'crises', c.date));
+  [...(donnees.suivi || []), ...(donnees.stabilite || [])].forEach((r) => poser(r.source, 'releves', r.timestamp));
+  return Array.from(par.values());
 }
 
 /* Découpage d'une journée en segments, pour la frise de suivi continu. Reçoit
@@ -2031,13 +2218,25 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
    l'écran crierait sur du bruit. En dessous du seuil on affiche « stable »,
    pas rien : l'absence de mouvement est une réponse, le silence n'en est pas
    une. `—` est réservé au cas où la référence n'existe pas. */
+/* Un écart mérite-t-il d'être annoncé ? Deux gardes cumulées : au moins 1 en
+   valeur absolue — deux crises contre une n'est pas un mouvement — et au moins
+   un quart de la référence, sans quoi 182 minutes contre 180 se lirait comme
+   une hausse. Extraite du corps d'`Ecart` pour que la file « À arbitrer »
+   remonte exactement les hausses que le reste de l'application affiche déjà en
+   couleur : une seconde règle écrite en dur ailleurs finirait par diverger,
+   comme le rappelle `tientLeSeuil` pour les seuils d'acquisition. */
+function ecartNet(valeur, reference) {
+  if (valeur == null || reference == null) return false;
+  const delta = valeur - reference;
+  return Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
+}
+
 function Ecart({ valeur, reference, unite = '', hausseFavorable = true, className = '' }) {
   if (valeur == null || reference == null) {
     return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>—</span>;
   }
   const delta = valeur - reference;
-  const net = Math.abs(delta) >= 1 && Math.abs(delta) >= 0.25 * Math.abs(reference);
-  if (!net) {
+  if (!ecartNet(valeur, reference)) {
     return <span className={`text-xs ${className}`} style={{ color: INK_SOFT, fontFamily: F_MONO }}>stable</span>;
   }
   const arrondi = Math.round(delta * 10) / 10;
@@ -3225,7 +3424,184 @@ function CarteStockage({ etat, persistant }) {
 /* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
    montés conditionnellement, un état local d'écran ne survit pas à un
    aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
-function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
+/* Les lignes retenues pour une fenêtre : filtrées par le contexte de lecture,
+   retaillées sur la période, puis vidées de celles qui n'ont plus aucune
+   cotation dedans.
+
+   Une seule définition pour les deux fenêtres du Tableau de bord — la période
+   affichée et celle de comparaison —, sinon l'écart opposerait deux listes
+   construites par deux règles. C'est aussi ce qui permet à l'écran de ne plus
+   jamais toucher `lignes` autrement que par elle : toute lecture y passe
+   forcément par `filtrerLignePeriode`, ce que le contrôle « 2 quater bis »
+   de verifier.sh vérifie par ailleurs. */
+function lignesRetenues(lignes, periode, gardee) {
+  return (lignes || [])
+    .filter((l) => gardee(l.initials))
+    .map((l) => filtrerLignePeriode(l, periode))
+    .filter((l) => l.points.length > 0 || l.mesures.length > 0);
+}
+
+/* Ordre de remontée de la file « À arbitrer ». Il est éditorial et l'assume :
+   une hausse de crises se regarde avant une acquisition qui approche, et une
+   personne dont on n'a plus aucune nouvelle avant un objectif qui stagne. Il
+   ne dit pas quoi décider — chaque ligne n'énonce que le fait et ses chiffres,
+   l'arbitrage reste au cadre. Même forme que le `rang` des états plus bas, et
+   même raison : un ordre écrit une seule fois plutôt qu'un tri recopié. */
+const POIDS_ARBITRAGE = { crises_hausse: 0, bientot: 1, sans_trace: 2, plateau: 3, dormant: 4 };
+
+/* Pastille de couleur de chaque type de situation. Reprend la palette des
+   états là où le type en désigne un — un « bientôt » se reconnaît au même cyan
+   dans la file que dans les pastilles du haut — et `--crisis` pour la hausse
+   de crises, qui n'est pas un état d'acquisition : c'est le token de l'alerte,
+   pas une teinte catégorielle détournée. */
+const COULEUR_ARBITRAGE = {
+  crises_hausse: CRISE,
+  bientot: CAT_CYAN,
+  sans_trace: CAT_SLATE,
+  plateau: CAT_AMBER,
+  dormant: CAT_SLATE,
+};
+
+/* Longueur de la file avant repli. Huit lignes tiennent sous les deux cartes
+   sans repousser la liste des objectifs hors de l'écran ; au-delà, « voir les
+   N autres » déplie. */
+const FILE_ARBITRAGE_REPLIEE = 8;
+
+/* Les situations qui appellent un arbitrage, classées. Ne calcule rien de
+   neuf : `etatDeSerie` produit déjà `streak`, `jours` et `moyenne`, et
+   `ecartNet` décide déjà de ce qu'est une hausse nette. Tout ce que cette
+   fonction fait, c'est les réunir et les ordonner — ils n'existaient jusqu'ici
+   qu'éparpillés derrière sept pastilles à cliquer.
+
+   Rend des données, jamais des phrases : le libellé se compose dans le JSX, où
+   vit le design, et le test porte alors sur les chiffres plutôt que sur une
+   tournure. `recentes` est la liste déjà passée par `filtrerLignePeriode`.
+   `maintenant` est passé plutôt que lu sur l'horloge, pour la même raison que
+   dans `joursDepuis`. */
+function situationsAArbitrer(recentes, crisesPeriode, crisesReference, derniereTrace, maintenant) {
+  const situations = [];
+
+  /* Une personne sans aucune trace récente : le fait porte sur elle, pas sur
+     l'un de ses objectifs. Ses lignes dormantes sont écartées plus bas —
+     quinze lignes qui disent toutes « plus rien depuis trois semaines »
+     noieraient le reste alors qu'elles racontent la même absence. */
+  const sansTrace = new Set();
+  Object.keys(derniereTrace || {}).forEach((initiales) => {
+    const jours = joursDepuis(derniereTrace[initiales], maintenant);
+    if (jours != null && jours >= DORMANT_JOURS) {
+      sansTrace.add(initiales);
+      situations.push({ kind: 'sans_trace', poids: POIDS_ARBITRAGE.sans_trace, initiales, objectif: null, jours });
+    }
+  });
+
+  /* Hausse de crises. Sans période de comparaison il n'y a rien à comparer et
+     aucune ligne n'est produite — le Tableau de bord, lui, retombe toujours
+     sur la période précédente, donc le cas ne s'y présente pas. */
+  if (crisesReference) {
+    Object.keys(crisesPeriode || {}).forEach((initiales) => {
+      const n = crisesPeriode[initiales] || 0;
+      const reference = crisesReference[initiales] || 0;
+      if (n > reference && ecartNet(n, reference)) {
+        situations.push({ kind: 'crises_hausse', poids: POIDS_ARBITRAGE.crises_hausse, initiales, objectif: null, n, reference });
+      }
+    });
+  }
+
+  (recentes || []).forEach((l) => {
+    const base = { initiales: l.initials, objectif: l.objectif };
+    if (l.etat === 'bientot') {
+      situations.push({ kind: 'bientot', poids: POIDS_ARBITRAGE.bientot, ...base, streak: l.streak, needed: l.needed });
+    } else if (l.etat === 'plateau') {
+      situations.push({ kind: 'plateau', poids: POIDS_ARBITRAGE.plateau, ...base, moyenne: l.moyenne, seuil: l.threshold });
+    } else if (l.etat === 'dormant' && !sansTrace.has(l.initials)) {
+      situations.push({ kind: 'dormant', poids: POIDS_ARBITRAGE.dormant, ...base, jours: l.jours });
+    }
+  });
+
+  /* Le poids d'abord, puis l'ampleur du fait à l'intérieur d'un même type : la
+     plus forte hausse en tête des hausses, l'absence la plus longue en tête
+     des dormants. Le plateau n'a pas d'ampleur qui se compare (deux moyennes
+     sous deux seuils différents ne se classent pas) : il rend 0, et le tri
+     stable — garanti par la spécification, comme s'y fie déjà le tri des
+     objectifs prioritaires — lui laisse l'ordre de `recentes`. */
+  const ampleur = (s) => {
+    if (s.kind === 'crises_hausse') return s.n - s.reference;
+    if (s.kind === 'bientot') return s.streak;
+    if (s.kind === 'plateau') return 0;
+    return s.jours || 0;
+  };
+  return situations.sort((a, b) => a.poids - b.poids || ampleur(b) - ampleur(a));
+}
+
+/* Une ligne par personne pour la vue « Par personne » du Tableau de bord.
+
+   Part de `personnes` et non de `recentes` : une personne sans aucune cotation
+   sur la période est précisément celle qu'il faut voir, elle doit apparaître
+   avec ses compteurs à zéro plutôt que disparaître du tableau — c'est
+   exactement l'information que le cadre cherche.
+
+   `derniereTrace` est passée plutôt que recalculée ici : elle ne dépend pas de
+   la période et n'a donc aucune raison d'être refaite à chaque changement de
+   fenêtre. `reference` à null (aucune comparaison réglée) laisse `crisesRef` à
+   null plutôt qu'à zéro : « pas de comparaison » et « zéro crise avant » ne
+   sont pas la même chose, et `Ecart` sait déjà rendre « — » sur null. */
+function revueParPersonne(donnees, personnes, recentes, periode, reference, derniereTrace, maintenant) {
+  const iniDe = (source, sid) => ((donnees._idVersInitiales || {})[source] || {})[sid];
+
+  const lignesDe = new Map();
+  (recentes || []).forEach((l) => {
+    if (!lignesDe.has(l.initials)) lignesDe.set(l.initials, []);
+    lignesDe.get(l.initials).push(l);
+  });
+
+  const crises = {};
+  const crisesRef = {};
+  (donnees.crises || []).forEach((c) => {
+    if ((c.kind || 'crise') !== 'crise') return;
+    const ini = iniDe(c.source, c.studentId);
+    if (!ini) return;
+    if (dansPeriode(c.date, periode)) crises[ini] = (crises[ini] || 0) + 1;
+    if (reference && dansPeriode(c.date, reference)) crisesRef[ini] = (crisesRef[ini] || 0) + 1;
+  });
+
+  const seances = {};
+  (donnees.seances || []).forEach((s) => {
+    if (!dansPeriode(s.date, periode)) return;
+    /* Dédupliqué par personne : une séance ne compte qu'une fois pour elle,
+       même si la tablette a listé deux fois le même identifiant. */
+    new Set((s.studentIds || []).map((sid) => iniDe(s.source, sid))).forEach((ini) => {
+      if (ini) seances[ini] = (seances[ini] || 0) + 1;
+    });
+  });
+
+  return (personnes || []).map((p) => {
+    const siennes = lignesDe.get(p.initials) || [];
+    const etats = {};
+    Object.keys(ETATS).forEach((e) => { etats[e] = 0; });
+    siennes.forEach((l) => { etats[l.etat] = (etats[l.etat] || 0) + 1; });
+    return {
+      initiales: p.initials,
+      etats,
+      total: siennes.length,
+      /* Acquis PENDANT la période, ce qui n'est pas l'état « acquis »
+         d'aujourd'hui : un objectif atteint en janvier est acquis toute
+         l'année, il n'a été acquis qu'une fois. C'est le premier des deux
+         chiffres que demande un bilan trimestriel, et il n'existait pas.
+         La date vient de `dateAcquisition`, calculée sur la série entière —
+         `filtrerLignePeriode` ne retaille que `points` et `mesures`. */
+      acquisPeriode: siennes.filter((l) => l.acquisLe && dansPeriode(l.acquisLe, periode)).length,
+      /* Le nombre de cotations, quelle que soit la série qui les porte : une
+         ligne en mesure brute n'a pas de `points` et s'annoncerait à zéro. */
+      cotations: siennes.reduce((a, l) => a + l.points.length + l.mesures.length, 0),
+      crises: crises[p.initials] || 0,
+      crisesRef: reference ? (crisesRef[p.initials] || 0) : null,
+      seances: seances[p.initials] || 0,
+      joursDepuisTrace: joursDepuis((derniereTrace || {})[p.initials], maintenant),
+    };
+  });
+}
+
+function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, vue, setVue, contexte, bandeau, onOuvrirPersonne, onOuvrirCrises }) {
   const [etatOuvert, setEtatOuvert] = useState(null);
   /* Replié quand des prioritaires occupent déjà l'écran, déplié sinon :
      la liste doit rester le sujet principal de la page. */
@@ -3241,6 +3617,22 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
   const [styleApercu, setStyleApercu] = useState('ligne');
   const [courbesApercu, setCourbesApercu] = useState([]);
   const refApercu = useRef(null);
+  /* File d'arbitrage repliée à ses premières lignes : c'est un rappel en tête
+     d'écran, pas la page elle-même. Local, comme la modale d'aperçu. */
+  const [fileDepliee, setFileDepliee] = useState(false);
+  /* Tri du tableau par personne. Alphabétique au départ, volontairement : la
+     file « À arbitrer » fait déjà le travail de remontée, ce tableau fait
+     celui de la comparaison — et on y cherche quelqu'un par son nom. */
+  const [tri, setTri] = useState({ colonne: 'nom', sens: 1 });
+  const refRevue = useRef(null);
+  /* La dernière trace de chacun ne dépend pas de la période : la recalculer à
+     chaque changement de fenêtre relirait les quatre tableaux pour rien. */
+  const derniereTrace = useMemo(() => derniereTraceParPersonne(donnees),
+    [donnees.seances, donnees.crises, donnees.suivi, donnees.stabilite, donnees._idVersInitiales]);
+  /* Une seule lecture de l'horloge pour tout le rendu : deux appels à
+     `Date.now()` dans la même passe pourraient tomber de part et d'autre de
+     minuit et faire diverger la file et le tableau d'un jour. */
+  const maintenant = Date.now();
   const basculerCourbeApercu = (k) => setCourbesApercu((cur) => (
     cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
   ));
@@ -3266,10 +3658,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
     }
     return true;
   };
-  const recentes = lignes
-    .filter((l) => dansLeContexte(l.initials))
-    .map((l) => filtrerLignePeriode(l, periode))
-    .filter((l) => l.points.length > 0 || l.mesures.length > 0);
+  const recentes = lignesRetenues(lignes, periode, dansLeContexte);
   /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
      qu'un objectif prioritaire existait sur la période, les autres
      disparaissaient et l'intitulé changeait tout seul : d'un appareil à
@@ -3289,6 +3678,12 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      la précédente de même durée — le repli d'origine, désormais calculé par
      periodeComparee plutôt qu'ici en double. */
   const reference = periodeComparee(periode) || periodeComparee({ ...periode, comparer: { mode: 'precedente' } });
+  /* Les mêmes lignes, sur la fenêtre de référence : les sept pastilles
+     n'avaient aucun écart, alors que les sept compteurs de la fiche personne
+     en portent un depuis le début et que la carte crises juste à côté annonce
+     déjà sa tendance. Le même effectif, la même période de référence, deux
+     écrans qui ne disaient pas la même chose. */
+  const recentesRef = reference ? lignesRetenues(lignes, reference, dansLeContexte) : null;
   const precedentes = reference ? crises.filter((c) => dansPeriode(c.date, reference)) : [];
   const tendance = precedentes.length
     ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
@@ -3312,10 +3707,69 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      cinquante, et cliquer une pastille ouvrait des objectifs absents de cette
      liste. */
   const compte = (e) => recentes.filter((l) => l.etat === e).length;
+  const compteRef = (e) => (recentesRef ? recentesRef.filter((l) => l.etat === e).length : null);
+  /* La pastille et son écart se lisent dans la même unité : comparer un
+     effectif à une part n'aurait aucun sens. En pourcentage, l'écart est en
+     points de pourcentage — d'où le suffixe, la même convention que la mesure
+     « Évolution de l'autonomie » d'Explorer. */
+  const valeurEtat = (n, total) => (unite === 'pct' ? Math.round((n / (total || 1)) * 100) : n);
   /* Nombre de cotations d'une ligne, quelle que soit la série qui les porte :
      un objectif suivi en mesure brute (occurrences, minutes) n'a pas de
      `points` et s'affichait « 0 séance » alors qu'il en portait des dizaines. */
   const nbCotations = (l) => l.points.length + l.mesures.length;
+
+  /* ── L'effectif : la file d'arbitrage et le tableau par personne ──
+     Les deux partent de `recentes` comme le reste de l'écran, jamais de
+     `lignes` brut — c'est la faute que le contrôle « 2 quater bis » de
+     verifier.sh verrouille, et elle ferait ici diverger le tableau des sept
+     pastilles posées juste au-dessus. */
+  const personnesRevue = (donnees.personnes || []).filter((p) => dansLeContexte(p.initials));
+  const dansRevue = new Set(personnesRevue.map((p) => p.initials));
+  const parPersonneCrises = (liste) => {
+    const m = {};
+    liste.forEach((c) => {
+      const ini = ((donnees._idVersInitiales || {})[c.source] || {})[c.studentId];
+      if (ini) m[ini] = (m[ini] || 0) + 1;
+    });
+    return m;
+  };
+  /* Bornée aux personnes connues et retenues par la classe : `derniereTrace`
+     couvre tout le bloc, y compris un identifiant d'usager qu'aucune personne
+     ne réclame plus après une purge partielle. */
+  const traceRevue = {};
+  Object.keys(derniereTrace).forEach((ini) => {
+    if (dansRevue.has(ini)) traceRevue[ini] = derniereTrace[ini];
+  });
+  const file = situationsAArbitrer(recentes, parPersonneCrises(recentesCrises),
+    reference ? parPersonneCrises(precedentes) : null, traceRevue, maintenant);
+  const revue = revueParPersonne(donnees, personnesRevue, recentes, periode, reference, traceRevue, maintenant);
+  const COLONNES_REVUE = [
+    { k: 'nom', label: 'Personne', aide: null },
+    { k: 'total', label: 'Objectifs', aide: 'Objectifs cotés sur la période' },
+    { k: 'acquis', label: 'Acquis', aide: 'Objectifs dont le critère a été atteint pendant la période' },
+    { k: 'bientot', label: 'À un pas', aide: 'À une cotation du critère d’acquisition' },
+    { k: 'crises', label: 'Crises', aide: 'Crises sur la période, hors observations' },
+    { k: 'cotations', label: 'Cotations', aide: 'Cotations et séances sur la période' },
+    { k: 'trace', label: 'Dernière trace', aide: 'Dernière séance, crise ou relevé' },
+  ];
+  const valeurTri = (r) => {
+    if (tri.colonne === 'acquis') return r.acquisPeriode;
+    if (tri.colonne === 'bientot') return r.etats.bientot;
+    if (tri.colonne === 'trace') return r.joursDepuisTrace == null ? Infinity : r.joursDepuisTrace;
+    return r[tri.colonne];
+  };
+  const revueTriee = [...revue].sort((a, b) => {
+    if (tri.colonne === 'nom') {
+      return tri.sens * nomAffiche(donnees, a.initiales).localeCompare(nomAffiche(donnees, b.initiales), 'fr');
+    }
+    return tri.sens * (valeurTri(a) - valeurTri(b));
+  });
+  /* Un clic sur une colonne déjà triée inverse le sens. Le nom part croissant,
+     les chiffres décroissants : sur « Crises » ou « À un pas », c'est le haut
+     du tableau qu'on vient regarder. */
+  const trierPar = (k) => setTri((t) => (
+    t.colonne === k ? { colonne: k, sens: -t.sens } : { colonne: k, sens: k === 'nom' ? 1 : -1 }
+  ));
 
   /* Sans séance, il n'y a pas d'objectif à situer — mais un import de relevés
      de suivi seuls n'est pas un import raté : le dire, plutôt que de renvoyer
@@ -3335,9 +3789,19 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
     <div>
       <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecComparaison collant bandeau={bandeau} />
 
-      <div className="flex items-center justify-between gap-3 mb-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
         <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>Vue d'ensemble</span>
-        <BasculeUnite unite={unite} setUnite={setUnite} />
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Deux façons de lire le même effectif sur la même période : la
+              liste des objectifs de tout le monde, ou une ligne par personne.
+              Les deux cartes du haut ne changent pas — elles portent déjà sur
+              l'effectif entier. */}
+          <div className="flex gap-1.5">
+            <Chip label="Par objectif" on={vue === 'objectif'} onClick={() => setVue('objectif')} />
+            <Chip label="Par personne" on={vue === 'personne'} onClick={() => setVue('personne')} />
+          </div>
+          <BasculeUnite unite={unite} setUnite={setUnite} />
+        </div>
       </div>
 
       <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
@@ -3359,10 +3823,23 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                     {unite === 'pct' ? `${Math.round((n / tot) * 100)} %` : n}
                   </div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+                  {recentesRef && (
+                    <Ecart valeur={valeurEtat(n, recentes.length)}
+                      reference={valeurEtat(compteRef(e), recentesRef.length)}
+                      unite={unite === 'pct' ? ' pts' : ''}
+                      hausseFavorable={ETAT_HAUSSE_FAVORABLE[e]} />
+                  )}
                 </button>
               );
             })}
           </div>
+
+          {recentesRef && (
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Écart vs {libelleComparaison(periode) || 'période précédente'}
+              {unite === 'pct' && ', en points de pourcentage'}.
+            </p>
+          )}
 
           {etatOuvert && (
             <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
@@ -3390,7 +3867,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           )}
         </Card>
 
-        <button onClick={onOuvrirCrises} className="rounded-2xl border p-4 text-left"
+        <button onClick={() => onOuvrirCrises(null)} className="rounded-2xl border p-4 text-left"
           style={{ borderColor: BORDER, backgroundColor: CARD }}>
           <div className="flex items-center gap-1.5 mb-3">
             <AlertTriangle size={14} style={{ color: INK_SOFT }} />
@@ -3427,7 +3904,175 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
         </button>
       </div>
 
-      {recentes.length === 0 ? (
+      {file.length > 0 && (() => {
+        /* Chaque ligne énonce un fait et ses chiffres, puis mène là où on peut
+           le vérifier. Elle ne dit pas quoi en faire : le classement remonte,
+           l'arbitrage reste au cadre. */
+        const visibles = fileDepliee ? file : file.slice(0, FILE_ARBITRAGE_REPLIEE);
+        const phrase = (s) => {
+          if (s.kind === 'crises_hausse') {
+            return `${s.n} crise${s.n > 1 ? 's' : ''} sur la période, contre ${s.reference} sur ${libelleComparaison(periode) || 'la précédente'}.`;
+          }
+          if (s.kind === 'bientot') {
+            return `Au seuil sur ${s.streak} cotation${s.streak > 1 ? 's' : ''} consécutive${s.streak > 1 ? 's' : ''}, le critère en demande ${s.needed}.`;
+          }
+          if (s.kind === 'sans_trace') return `Aucune séance, crise ni relevé depuis ${s.jours} jours.`;
+          if (s.kind === 'plateau') {
+            return `Moyenne ${s.moyenne} % sur les cinq dernières cotations, pour un seuil à ${s.seuil} %.`;
+          }
+          return `Plus coté depuis ${s.jours} jours.`;
+        };
+        return (
+          <Card className="mb-4">
+            <div className="flex items-center gap-1.5 mb-3">
+              <ListChecks size={14} style={{ color: INK_SOFT }} />
+              <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+                À arbitrer · {file.length}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {visibles.map((s, i) => (
+                <button key={`${s.kind}|${s.initiales}|${s.objectif || ''}|${i}`}
+                  onClick={() => (s.kind === 'crises_hausse'
+                    ? onOuvrirCrises(s.initiales)
+                    : onOuvrirPersonne(s.initiales, s.objectif || null))}
+                  className="w-full text-left rounded-xl px-3 py-2 flex items-start gap-2.5"
+                  style={{ backgroundColor: PAPER }}>
+                  <span className="mt-1 shrink-0 rounded-full" aria-hidden="true"
+                    style={{ width: 8, height: 8, backgroundColor: COULEUR_ARBITRAGE[s.kind] }} />
+                  <span className="text-sm min-w-0">
+                    <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                      {nomAffiche(donnees, s.initiales)}
+                    </span>
+                    {s.objectif && <> · {libelleAffiche(donnees, s.initiales, s.objectif)}</>}
+                    <span className="block text-xs" style={{ color: INK_SOFT }}>{phrase(s)}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            {file.length > FILE_ARBITRAGE_REPLIEE && (
+              <button onClick={() => setFileDepliee((v) => !v)} className="text-xs mt-2.5 flex items-center gap-1.5"
+                style={{ color: INK_SOFT }}>
+                {fileDepliee ? 'Replier' : `Voir les ${file.length - FILE_ARBITRAGE_REPLIEE} autres`}
+                <span style={{ fontFamily: F_MONO }}>{fileDepliee ? '▴' : '▾'}</span>
+              </button>
+            )}
+          </Card>
+        );
+      })()}
+
+      {vue === 'personne' && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <span className="text-xs uppercase tracking-wide" style={{ color: INK_SOFT }}>
+              L'effectif sur la période — appuyez sur une ligne pour ouvrir la fiche
+            </span>
+            {/* La zone imprimée est le tableau seul : `imprimerZone` marque ses
+                ancêtres et masque leurs frères, donc ni le rail, ni les cartes,
+                ni ce bouton n'en sont. Aucun conteneur `no-print` ne l'englobe
+                — ce serait la page blanche garantie. */}
+            <Btn variant="outline" className="text-xs py-1.5 no-print"
+              onClick={() => imprimerZone(refRevue.current)}>
+              <Printer size={13} /> PDF
+            </Btn>
+          </div>
+          <Card className="overflow-x-auto">
+            {/* La cible d'impression est ce div, pas la Card : `Card` est un
+                composant fonction, il ne reçoit pas de `ref`. La Card devient
+                simplement l'un des ancêtres marqués par `imprimerZone`. */}
+            <div ref={refRevue}>
+            <table className="text-xs" style={{ borderCollapse: 'collapse', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  {COLONNES_REVUE.map((c) => (
+                    <th key={c.k} title={c.aide || undefined}
+                      className={`px-2 py-2 font-medium whitespace-nowrap ${c.k === 'nom' ? 'text-left' : 'text-right'}`}
+                      style={{ borderBottom: `1px solid ${BORDER}`, color: INK_SOFT }}>
+                      <button onClick={() => trierPar(c.k)} className="inline-flex items-center gap-1"
+                        style={{ color: tri.colonne === c.k ? ACCENT : INK_SOFT }}>
+                        {c.label}
+                        {tri.colonne === c.k && (
+                          <span style={{ fontFamily: F_MONO }}>{tri.sens > 0 ? '▴' : '▾'}</span>
+                        )}
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {revueTriee.map((r) => (
+                  <tr key={r.initiales} onClick={() => onOuvrirPersonne(r.initiales, null)}
+                    className="cursor-pointer" style={{ borderBottom: `1px solid ${BORDER}` }}>
+                    <td className="px-2 py-2">
+                      <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                        {nomAffiche(donnees, r.initiales)}
+                      </span>
+                      {nomClasseDe(donnees, r.initiales) && (
+                        <span className="ml-1.5" style={{ color: INK_SOFT }}>· {nomClasseDe(donnees, r.initiales)}</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap">
+                      {r.total === 0 ? (
+                        <span style={{ color: INK_SOFT }}>aucune cotation</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 justify-end">
+                          {/* Répartition des états en une barre : les sept
+                              couleurs sont celles des pastilles du haut, une
+                              seconde attribution les ferait diverger. */}
+                          <span className="inline-flex rounded-full overflow-hidden" style={{ width: 64, height: 6 }}>
+                            {Object.keys(ETATS).filter((e) => r.etats[e] > 0).map((e) => (
+                              <span key={e} title={`${ETATS[e].label} : ${r.etats[e]}`}
+                                style={{ flex: r.etats[e], backgroundColor: ETATS[e].color }} />
+                            ))}
+                          </span>
+                          <span style={{ fontFamily: F_MONO }}>{r.total}</span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap"
+                      style={{ fontFamily: F_MONO, color: r.acquisPeriode ? ETATS.acquis.color : INK_SOFT }}>
+                      {r.acquisPeriode || '—'}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap"
+                      style={{ fontFamily: F_MONO, color: r.etats.bientot ? ETATS.bientot.color : INK_SOFT }}>
+                      {r.etats.bientot || '—'}
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap">
+                      <span style={{ fontFamily: F_MONO }}>{r.crises}</span>
+                      <Ecart valeur={r.crises} reference={r.crisesRef} hausseFavorable={false} className="ml-1.5" />
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{ fontFamily: F_MONO }}>
+                      {r.cotations}
+                      <span className="ml-1" style={{ color: INK_SOFT }}>
+                        / {r.seances} séance{r.seances !== 1 ? 's' : ''}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-right whitespace-nowrap" style={{
+                      fontFamily: F_MONO,
+                      color: r.joursDepuisTrace != null && r.joursDepuisTrace >= DORMANT_JOURS ? ETATS.dormant.color : INK,
+                    }}>
+                      {r.joursDepuisTrace == null ? 'jamais'
+                        : r.joursDepuisTrace === 0 ? "aujourd'hui"
+                          : `il y a ${r.joursDepuisTrace} j`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+              Les objectifs, les cotations et les crises portent sur la période choisie.
+              {' '}<strong style={{ color: INK }}>Acquis</strong> compte les objectifs dont le critère
+              a été atteint pendant cette période — pas ceux qui sont acquis aujourd'hui, qui le
+              restent d'une période à l'autre et se lisent sur la barre des états. La dernière trace
+              ne suit pas la période : elle remonte à la plus récente séance, crise ou relevé
+              enregistré, même hors fenêtre.
+            </p>
+            </div>
+          </Card>
+        </>
+      )}
+
+      {vue === 'objectif' && (recentes.length === 0 ? (
         <Empty>Aucun objectif coté sur cette période.</Empty>
       ) : (
         <>
@@ -3459,7 +4104,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
             );
           })()}
         </>
-      )}
+      ))}
 
       {apercu && (() => {
         /* La même modale que la fiche personne (GrapheAgrandi) et le même
@@ -3669,6 +4314,59 @@ function comparerPaire(paire, donnees) {
   return { lignes, points, pct: points ? Math.round((accords / points) * 100) : null };
 }
 
+/* En dessous de trois cotations, un objectif n'a rien à dire sur qui l'a coté :
+   un seul observateur sur deux séances n'est pas une habitude, c'est un
+   calendrier. */
+const MONO_OBSERVATEUR_MIN = 3;
+
+/* Le complément de l'accord inter-observateurs : les couples personne ×
+   objectif dont toutes les cotations portent le même intervenant.
+
+   `trouverPaires` ne peut montrer que les paires QUI EXISTENT — deux séances
+   du même jour marquées « double cotation ». Là où la double cotation n'a
+   jamais eu lieu, rien ne signale que la série entière repose sur une seule
+   main. C'est ce que cette liste dit, et elle ne dit que cela.
+
+   L'intervenant est identifié par son NOM et non par son identifiant, pour la
+   même raison que `trouverPaires` regroupe par nom d'atelier : les identifiants
+   sont propres à chaque tablette, et la même personne y porte deux id
+   différents. Un intervenant non renseigné écarte le couple : « on ne sait pas
+   qui a coté » n'est pas « une seule personne a coté ».
+
+   Une cotation compte si `valeurCotation` en tire quelque chose — même règle
+   qu'`analyserObjectif`. Un objectif sélectionné mais non coté ne pèse pas. */
+function objectifsMonoObservateur(donnees, minCotations) {
+  const par = new Map();
+  (donnees.seances || []).forEach((sess) => {
+    const table = (donnees._idVersInitiales || {})[sess.source] || {};
+    const nom = ((donnees._intervenants || {})[sess.source] || {})[sess.intervenantId] || null;
+    const guidances = guidancesDe(donnees, sess.source);
+    (sess.studentIds || []).forEach((sid) => {
+      const initiales = table[sid];
+      if (!initiales) return;
+      ((sess.selectedObjectives || {})[sid] || []).forEach((oid) => {
+        const snap = (sess.objectiveSnapshot || {})[oid];
+        const entry = (sess.data || {})[sid] && sess.data[sid][oid];
+        if (!snap || !entry || !valeurCotation(snap, entry, guidances)) return;
+        const cle = `${initiales}|${snap.name}`;
+        if (!par.has(cle)) par.set(cle, { initiales, objectif: snap.name, cotations: 0, intervenants: new Set() });
+        const e = par.get(cle);
+        e.cotations += 1;
+        e.intervenants.add(nom);
+      });
+    });
+  });
+  return Array.from(par.values())
+    .filter((e) => e.cotations >= minCotations && e.intervenants.size === 1 && !e.intervenants.has(null))
+    .map((e) => ({
+      initiales: e.initiales,
+      objectif: e.objectif,
+      cotations: e.cotations,
+      intervenant: Array.from(e.intervenants)[0],
+    }))
+    .sort((a, b) => b.cotations - a.cotations);
+}
+
 /* ==================== Séances ====================
    Deux usages distincts sur le même écran : parcourir ce qui a été importé
    (et retirer ce qui n'aurait pas dû l'être), et vérifier l'accord entre deux
@@ -3685,6 +4383,11 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
   const setOuverte = (v) => majVue({ ouverte: v });
   const setRecherche = (v) => majVue({ recherche: v });
   const setToutes = (v) => majVue({ toutes: v });
+  /* Le dépli de la liste des objectifs mono-observateur rejoint les autres
+     réglages d'écran : il survit à un aller-retour vers une fiche, comme le
+     choix de la paire juste au-dessus de lui. */
+  const monoToutes = !!vue.monoToutes;
+  const setMonoToutes = (f) => majVue({ monoToutes: typeof f === 'function' ? f(monoToutes) : f });
   const setGroupesOuverts = (f) => majVue({ groupesOuverts: typeof f === 'function' ? f(groupesOuverts) : f });
   /* Le tri est « par jour » d'office : à dix séances par jour, une liste à plat
      déborde vite. « Par date » a disparu — le regroupement par jour en tient
@@ -3776,6 +4479,10 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
   const resteAAfficher = groupe ? groupesTous.length - groupesTous.slice(0, LOT).length : filtrees.length - LOT;
 
   const paires = trouverPaires(donnees);
+  /* Porte sur toute la base et non sur la période : c'est l'histoire complète
+     d'un objectif qui dit s'il n'a jamais eu qu'un observateur, pas la fenêtre
+     regardée aujourd'hui. */
+  const mono = objectifsMonoObservateur(donnees, MONO_OBSERVATEUR_MIN);
   const res = choisie ? comparerPaire(choisie, donnees) : null;
   const couleur = res && res.pct != null ? (res.pct >= 80 ? ACQUIS : res.pct >= 60 ? EN_COURS : NON_ACQUIS) : INK_SOFT;
 
@@ -3929,6 +4636,57 @@ function SeancesScreen({ donnees, onSupprimerSeance, densite, vue, setVue, perio
             )}
           </div>
         </div>
+      )}
+
+      {/* Le complément de ce qui précède : là où l'accord inter-observateurs
+          montre les doubles cotations qui ont eu lieu, ce bloc montre les
+          séries où elle n'a jamais eu lieu. Il vit ici parce que c'est la même
+          question — sur quoi repose ce chiffre — et non dans un écran de plus. */}
+      <div className="text-xs uppercase tracking-wide mb-2 mt-6" style={{ color: INK_SOFT }}>
+        Objectifs cotés par un seul observateur
+      </div>
+      {mono.length === 0 ? (
+        <Card>
+          <p className="text-sm" style={{ color: INK_SOFT }}>
+            Aucun objectif d'au moins {MONO_OBSERVATEUR_MIN} cotations n'est resté entre les mains
+            d'un seul intervenant.
+          </p>
+        </Card>
+      ) : (
+        <Card>
+          <div className="space-y-1.5">
+            {mono.slice(0, monoToutes ? mono.length : LOT).map((m, i) => (
+              <button key={`${m.initiales}|${m.objectif}|${i}`}
+                onClick={() => onOuvrirPersonne(m.initiales, m.objectif)}
+                className="w-full text-left rounded-xl px-3 py-2 flex items-start justify-between gap-2"
+                style={{ backgroundColor: PAPER }}>
+                <span className="text-sm min-w-0 break-words">
+                  <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>
+                    {nomAffiche(donnees, m.initiales)}
+                  </span>
+                  {' · '}{libelleAffiche(donnees, m.initiales, m.objectif)}
+                  <span className="block text-xs" style={{ color: INK_SOFT }}>{m.intervenant}</span>
+                </span>
+                <span className="text-xs shrink-0" style={{ fontFamily: F_MONO, color: INK_SOFT }}>
+                  {m.cotations} cotations
+                </span>
+              </button>
+            ))}
+          </div>
+          {mono.length > LOT && (
+            <button onClick={() => setMonoToutes((v) => !v)} className="text-xs mt-2.5"
+              style={{ color: INK_SOFT }}>
+              {monoToutes ? 'Replier' : `Voir les ${mono.length - LOT} autres`}
+            </button>
+          )}
+          <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+            Comptés à partir de {MONO_OBSERVATEUR_MIN} cotations, sur toute la base et non sur la
+            période affichée. DatABA ne note qu'un intervenant par séance : c'est celui qui l'a
+            ouverte qui compte ici, même si d'autres y sont intervenus. Un objectif dont
+            l'intervenant n'est pas renseigné n'apparaît pas — ne pas savoir qui a coté n'est pas
+            savoir qu'une seule personne l'a fait.
+          </p>
+        </Card>
       )}
     </div>
   );
@@ -6304,6 +7062,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
 const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  /* Le temps réellement passé en séance, que DatABA horodate depuis toujours
+     (`startedAt`/`endedAt`) et que Manager n'affichait que sur le détail d'une
+     séance, jamais agrégé. Dédupliqué par séance : sans quoi une séance de
+     45 minutes portant six cotations pèserait 270. Vide quand la tablette n'a
+     pas borné la séance — une durée non mesurée n'est pas une durée nulle. */
+  { k: 'tempsSeance', label: "Temps d'accompagnement", source: 'cotations', agg: 'sommeUnique', champ: 'minutesSeance', cle: 'seanceId', suffixe: ' min', hausseFavorable: true },
   /* Compteur et chronomètre d'appoint, saisis en séance à côté de la cotation.
      « D'appoint » est dans le libellé et pas seulement dans le commentaire :
      ce que compte le widget est décidé objectif par objectif, si bien qu'une
@@ -6351,6 +7115,20 @@ const DIMENSIONS = [
      manuelle. Ne concerne que les deux tables de relevés — une cotation de
      séance et une crise ne se font pas à la pastille. */
   { k: 'origineReleve', label: 'Geste de relevé', get: (f) => f.origine || 'Non renseignée', sources: ['suivi', 'compteurs'] },
+  /* La classe n'était qu'un filtre de contexte : on pouvait resserrer dessus,
+     jamais croiser avec. */
+  { k: 'classe', label: 'Classe', get: (f) => f.classe || 'Sans classe' },
+  /* La tablette d'origine, pendant de la carte « Remontées par tablette » de
+     Gestion : elle dit d'où vient un écart avant de le prendre pour un fait
+     clinique. Absente de la table des objectifs, dont l'état est consolidé
+     toutes tablettes confondues. */
+  { k: 'tablette', label: 'Tablette', get: (f) => f.tablette || 'Non renseignée', sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
+  /* L'heure de la journée. PRODUCT.md la nomme comme l'exemple même du facteur
+     qui trompe une comparaison d'ateliers, et l'horodatage était là depuis le
+     début sans que rien ne sache le lire. Écartée de la table des objectifs,
+     qui n'a pas d'heure du tout — l'y proposer sortirait une colonne
+     entièrement « Heure inconnue ». */
+  { k: 'trancheHoraire', label: 'Tranche horaire', get: (f) => libelleTrancheHoraire(f.heure), sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
@@ -6370,6 +7148,24 @@ function agreger(faits, mesure, total) {
   if (!faits.length) return null;
   if (mesure.agg === 'compte') return faits.length;
   if (mesure.agg === 'distinct') return new Set(faits.map((f) => f[mesure.champ])).size;
+  /* Somme d'une grandeur portée en double par plusieurs faits : la durée d'une
+     séance voyage sur chacune de ses cotations, la sommer telle quelle la
+     multiplierait par leur nombre. `cle` dit ce qui identifie la grandeur, et
+     chaque valeur ne pèse qu'une fois par case. Une séance partagée compte
+     donc une fois dans la case de chaque participant : la somme d'une colonne
+     peut dépasser le total général, comme pour les dimensions à valeurs
+     multiples des crises. */
+  if (mesure.agg === 'sommeUnique') {
+    const vus = new Set();
+    let somme = 0;
+    faits.forEach((f) => {
+      const cle = f[mesure.cle];
+      if (cle == null || vus.has(cle)) return;
+      vus.add(cle);
+      if (f[mesure.champ] != null) somme += f[mesure.champ];
+    });
+    return vus.size ? Math.round(somme) : null;
+  }
   const valeurs = faits.map((f) => f[mesure.champ]).filter((v) => v != null);
   if (!valeurs.length) return null;
   const somme = valeurs.reduce((a, b) => a + b, 0);
@@ -7019,6 +7815,11 @@ function RapportScreen({ donnees, lignes, selection, setSelection, logo, associa
                   {nbCotations} {enMesureEnTete ? 'cotation' : 'séance'}{nbCotations !== 1 ? 's' : ''} sur la période
                   {dernier != null && ` · dernier résultat ${dernier} %`}
                   {libelleCritere(l) && ` · critère ${libelleCritere(l)}`}
+                  {/* La date d'acquisition est calculée sur toute la série, pas
+                      sur la seule période composée : un objectif atteint avant
+                      la fenêtre du bilan reste acquis, et le document doit
+                      pouvoir le dater. */}
+                  {l.acquisLe && ` · acquis le ${new Date(l.acquisLe).toLocaleDateString('fr-FR')}`}
                   {l.phase && ` · phase ${l.phase}`}
                 </div>
 
@@ -7349,6 +8150,9 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
   const [changement, setChangement] = useState(null);
   const [avant, setAvant] = useState('');
 
+  const remontees = remonteesParSource(donnees);
+  const maintenant = Date.now();
+
   const limiteAvant = avant ? new Date(`${avant}T00:00:00`) : null;
   const nbAvant = limiteAvant ? donnees.seances.filter((x) => new Date(x.date) < limiteAvant).length : 0;
   const nbCrisesAvant = limiteAvant ? donnees.crises.filter((x) => new Date(x.date) < limiteAvant).length : 0;
@@ -7533,10 +8337,47 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
           </>
         )}
         {erreur && <p className="text-xs mt-2 rounded-lg px-2.5 py-2" style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS }}>{erreur}</p>}
-        {donnees.sources.length > 0 && (
-          <p className="text-xs mt-3" style={{ color: INK_SOFT }}>Sources importées : {donnees.sources.join(', ')}</p>
-        )}
       </Card>
+
+      {/* Ce que chaque tablette a remonté, et jusqu'à quand. Remplace
+          l'énumération « Sources importées : A, B, C » qui tenait lieu de
+          réponse : une tablette qui a cessé de remonter y était indiscernable
+          d'une tablette à jour, et le poste continuait d'afficher des chiffres
+          complets sur une photo périmée. */}
+      {remontees.length > 0 && (
+        <Card className="mb-4">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Clock size={16} style={{ color: INK_SOFT }} />
+            <span className="font-semibold" style={{ fontFamily: F_DISPLAY }}>Remontées par tablette</span>
+          </div>
+          <div className="space-y-1.5">
+            {remontees.map((r) => {
+              const jours = joursDepuis(r.derniere, maintenant);
+              const muette = jours != null && jours >= DORMANT_JOURS;
+              return (
+                <div key={r.source} className="rounded-xl px-3 py-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"
+                  style={{ backgroundColor: PAPER }}>
+                  <span className="text-sm font-medium" style={{ fontFamily: F_DISPLAY }}>{r.source}</span>
+                  <span className="text-xs" style={{ color: INK_SOFT }}>
+                    <span style={{ fontFamily: F_MONO }}>{r.seances}</span> séance{r.seances !== 1 ? 's' : ''}
+                    {' · '}<span style={{ fontFamily: F_MONO }}>{r.crises}</span> crise{r.crises !== 1 ? 's' : ''}
+                    {' · '}<span style={{ fontFamily: F_MONO }}>{r.releves}</span> relevé{r.releves !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-xs" style={{ fontFamily: F_MONO, color: muette ? ETATS.dormant.color : INK }}>
+                    {r.derniere == null ? 'aucune donnée'
+                      : jours === 0 ? "jusqu'à aujourd'hui"
+                        : `rien depuis ${jours} j`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs mt-2.5" style={{ color: INK_SOFT }}>
+            La date lue est celle de la donnée la plus récente venue de cette tablette, pas celle du
+            dernier import : c'est jusque-là que va ce qu'on sait d'elle.
+          </p>
+        </Card>
+      )}
 
       <CarteStockage etat={etatStockage} persistant={persistant} />
 
@@ -8129,6 +8970,11 @@ function ManagerApp() {
      repart de sa valeur initiale à chaque retour. Choix de lecture, jamais
      persistés ni chiffrés — comme `periode` juste au-dessus. */
   const [uniteBord, setUniteBord] = useState('nombre');
+  /* Lecture de l'effectif au Tableau de bord : par objectif (la liste
+     d'origine) ou par personne (le tableau comparatif). Remontée ici pour la
+     même raison qu'`uniteBord` — un aller-retour vers un autre écran ne doit
+     pas ramener le bord à un mode qu'on venait de quitter. */
+  const [vueBord, setVueBord] = useState('objectif');
   const [configCrises, setConfigCrises] = useState(configCriseVide());
   /* Réglages de graphique — style de tracé et lectures superposées. Deux jeux
      séparés : la fiche personne et le document du rapport ont toujours eu des
@@ -8161,7 +9007,7 @@ function ManagerApp() {
      inter-observateurs, aller lire une fiche et revenir imposait de refaire la
      recherche, le tri, les déplis et le choix de la paire ; un aller-retour
      depuis Explorer reperdait les trois menus du croisement. */
-  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null });
+  const [vueSeances, setVueSeances] = useState({ recherche: '', tri: 'jour', toutes: false, groupesOuverts: [], ouverte: null, paire: null, monoToutes: false });
   const [vuePersonne, setVuePersonne] = useState('objectifs');
   /* `mesure` ne peut pas rester sur le taux d'autonomie moyen, retiré de
      MESURES : la clé n'existant plus, `MESURES.find` rendrait `undefined` et
@@ -8594,10 +9440,16 @@ function ManagerApp() {
           {tab === 'bord' && (
             <>
               <SectionTitle sub="L'avancée récente, d'un coup d'œil." icone={LayoutDashboard}>Tableau de bord</SectionTitle>
+              {/* `onOuvrirCrises` reçoit maintenant les initiales : la file
+                  « À arbitrer » ouvre l'écran Crises déjà resserré sur la
+                  personne dont les crises ont augmenté. La carte du haut, qui
+                  porte sur tout l'effectif, passe explicitement null — elle
+                  était branchée en direct sur le bouton et lui envoyait
+                  l'événement de clic en guise d'initiales. */}
               <TableauDeBord donnees={donnees} lignes={lignes} periode={periode} setPeriode={setPeriode}
-                unite={uniteBord} setUnite={setUniteBord}
+                unite={uniteBord} setUnite={setUniteBord} vue={vueBord} setVue={setVueBord}
                 contexte={contexte} bandeau={bandeauClasse}
-                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={() => ouvrirCrises(null)} />
+                onOuvrirPersonne={ouvrirPersonne} onOuvrirCrises={ouvrirCrises} />
             </>
           )}
           {tab === 'seances' && (

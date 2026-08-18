@@ -68,4 +68,43 @@ t('et tout redevient visible', [absent(onglets),absent(toast)], [false,false]);
 /* Hors impression ciblée, le conteneur no-print doit redevenir masquant */
 t('le no-print reprend son effet une fois le chemin nettoyé', absent(zone), true);
 
+/* ==================== Le tableau de la Revue ====================
+   Seconde cible d'impression ciblée, ajoutée au Tableau de bord. Sa structure
+   diffère de la première sur deux points qui sont précisément ceux qui cassent
+   l'impression, d'où ce second modèle plutôt qu'une assertion de plus :
+   - la cible est un div à l'intérieur d'une Card, donc un niveau plus bas que
+     la zone d'origine (`Card` est un composant fonction : il ne reçoit pas de
+     `ref`, la cible ne peut pas être la Card elle-même) ;
+   - elle a pour frère une barre de commandes qui porte le bouton PDF, lequel
+     ne doit évidemment pas figurer sur le document qu'il déclenche.
+   Le conteneur d'onglets marqué no-print est reconduit : c'est lui qui a déjà
+   produit des pages blanches une fois. */
+const table=noeud('table');
+const divRevue=noeud('divRevue',[table]);
+const carteRevue=noeud('carteRevue',[divRevue]);
+const btnPdf=noeud('btnPdf');btnPdf.classes.add('no-print');
+const barreTitre=noeud('barreTitre',[btnPdf]);
+const carteArbitrage=noeud('carteArbitrage');
+const selecteur=noeud('selecteur');selecteur.classes.add('no-print');
+const bord=noeud('bord',[selecteur,carteArbitrage,barreTitre,carteRevue]);
+const sectionOnglet=noeud('sectionOnglet',[bord]);sectionOnglet.classes.add('no-print');
+const conteneur2=noeud('conteneur',[sectionOnglet]);
+const app2=noeud('app',[conteneur2]);
+const body2=brancher(noeud('body',[app2]));
+
+/* Même marquage et mêmes règles que plus haut, sur ce second arbre. */
+function marquer2(cible){let n=cible.parent;while(n&&n!==body2){n.classes.add('chemin');n=n.parent;}body2.classes.add('chemin');cible.classes.add('zone');}
+function masque2(n){if(n.classes.has('no-print')&&!n.classes.has('chemin'))return true;const p=n.parent;if(!p)return false;return p.classes.has('chemin')&&!n.classes.has('chemin')&&!n.classes.has('zone');}
+function absent2(n){let x=n;while(x){if(masque2(x))return true;x=x.parent;}return false;}
+marquer2(divRevue);
+
+t('le tableau de la Revue est imprimé', absent2(divRevue), false);
+t('son contenu aussi', absent2(table), false);
+t('la Card qui l entoure reste, comme ancêtre du chemin', absent2(carteRevue), false);
+t('le conteneur d onglet no-print ne masque pas la cible', absent2(sectionOnglet), false);
+t('la barre de commandes voisine est retirée', absent2(barreTitre), true);
+t('le bouton PDF ne s imprime pas lui-meme', absent2(btnPdf), true);
+t('la file A arbitrer est retiree', absent2(carteArbitrage), true);
+t('le selecteur de periode est retire', absent2(selecteur), true);
+
 console.log(`\n${ok} réussis, ${ko} échecs`);process.exit(ko?1:0);
