@@ -67,6 +67,12 @@ const code = [
   `const estReleveCompteur = ${extraireLigne('estReleveCompteur')};`,
   `const nomCompteurDe = ${extraireLigne('nomCompteurDe')};`,
   `const nomAtelier = ${extraireLigne('nomAtelier')};`,
+  /* `construireFaits` résout désormais la classe, la tablette et la tranche
+     horaire de chaque fait : ses deux nouveaux auxiliaires suivent. */
+  extraire('nomClasseDe'),
+  extraire('heureDe'),
+  extraire('libelleTrancheHoraire'),
+  `const TRANCHE_HORAIRE_PAS = ${extraireLigne('TRANCHE_HORAIRE_PAS')};`,
   extraire('CRITERES_STABILITE_V3'),
   extraire('UNITES_OBJECTIF_SUIVI'),
   extraire('TYPES_COTATION'),

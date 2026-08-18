@@ -1264,6 +1264,37 @@ function lignesSuiviContinu(donnees, dejaCotes) {
   return lignes;
 }
 
+/* Heure locale d'un horodatage, ou null quand la donnée n'en porte pas.
+
+   Une date sans heure (« 2026-06-02 ») est lue par le navigateur comme minuit
+   UTC : la convertir en heure locale fabriquerait une tranche — deux heures du
+   matin sous nos longitudes — que personne n'a observée. Mieux vaut dire
+   « heure inconnue » qu'inventer un créneau. D'où le test sur la présence
+   d'une heure dans la chaîne avant toute conversion ; un horodatage numérique
+   (epoch, `startedAt`) en porte toujours une. */
+function heureDe(valeur) {
+  if (valeur == null) return null;
+  if (typeof valeur === 'string' && !/\d{2}:\d{2}/.test(valeur)) return null;
+  const d = new Date(valeur);
+  return Number.isNaN(d.getTime()) ? null : d.getHours();
+}
+
+/* Tranches de deux heures. Le libellé est zéro-rempli pour que l'ordre
+   alphabétique des en-têtes d'Explorer soit déjà l'ordre chronologique, et
+   « Heure inconnue » se range de lui-même après les chiffres.
+
+   Vocabulaire : « tranche horaire » et jamais « créneau » — `creneau` désigne
+   déjà le matin/après-midi d'un probe à deux prises (PROBE_CRENEAUX, coupure à
+   13 h). Deux définitions de « matin » dans la même application seraient un
+   piège de plus. */
+const TRANCHE_HORAIRE_PAS = 2;
+function libelleTrancheHoraire(h) {
+  if (h == null) return 'Heure inconnue';
+  const debut = Math.floor(h / TRANCHE_HORAIRE_PAS) * TRANCHE_HORAIRE_PAS;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(debut)} h – ${pad(debut + TRANCHE_HORAIRE_PAS)} h`;
+}
+
 /* ==================== Table de faits ====================
    Une ligne par cotation, par crise, par segment de suivi continu et par
    objectif, avec toutes les dimensions résolues. C'est ce qui permet de
@@ -1276,6 +1307,10 @@ function construireFaits(donnees, lignes) {
     const t = (donnees._intervenants || {})[source] || {};
     return t[id] || 'Non renseigné';
   };
+  /* Résolus une fois par fait plutôt que par la dimension : `DIMENSIONS[].get`
+     ne reçoit que le fait, pas le bloc, et la classe comme la tablette
+     demandent de le consulter. */
+  const classeDe = (initiales) => nomClasseDe(donnees, initiales) || 'Sans classe';
 
   donnees.seances.forEach((sess) => {
     /* `libelleSeance` et non `nomAtelier` : sans quoi les séances libres et les
@@ -1312,6 +1347,18 @@ function construireFaits(donnees, lignes) {
           seanceId: sess.id,
           date: sess.date,
           personne: initiales,
+          classe: classeDe(initiales),
+          tablette: sess.source,
+          /* L'heure de la SÉANCE : une cotation n'est pas horodatée pour
+             elle-même côté DatABA. `sess.date` sert de repli quand il porte une
+             heure, ce qui n'est pas toujours le cas. */
+          heure: heureDe(sess.startedAt != null ? sess.startedAt : sess.date),
+          /* Durée de la séance, portée par chacune de ses cotations et
+             dédupliquée à l'agrégation (agg `sommeUnique`, clé `seanceId`) :
+             la poser sur une seule cotation arbitraire attribuerait tout le
+             temps d'une séance au premier objectif venu. */
+          minutesSeance: (sess.endedAt != null && sess.startedAt != null)
+            ? Math.round(Math.max(0, sess.endedAt - sess.startedAt) / 60000) : null,
           atelier,
           intervenant,
           objectif: obj.name,
@@ -1334,6 +1381,9 @@ function construireFaits(donnees, lignes) {
     return {
       date: c.date,
       personne: table[c.studentId] || 'Non renseignée',
+      classe: classeDe(table[c.studentId]),
+      tablette: c.source,
+      heure: heureDe(c.date),
       atelier: nomAtelier(donnees, c.source, c.atelierId),
       /* DatABA note plusieurs intervenants sur une crise (`intervenantIds`).
          Le champ arrivait bien à l'import et n'était lu nulle part : les
@@ -1376,6 +1426,13 @@ function construireFaits(donnees, lignes) {
         suivi.push({
           date: new Date(seg.debut).toISOString(),
           personne: p.initials,
+          classe: classeDe(p.initials),
+          tablette: porteur ? porteur.source : 'Non renseignée',
+          /* L'heure de DÉBUT du segment, celle du relevé qui l'a ouvert. Un
+             segment qui chevauche deux tranches est compté dans celle où il
+             commence — le découper répartirait des minutes que personne n'a
+             relevées ainsi. */
+          heure: heureDe(seg.debut),
           atelier: porteur ? nomAtelier(donnees, porteur.source, porteur.atelierId) : 'Hors atelier',
           intervenant: porteur ? nomIntervenant(porteur.source, porteur.intervenantId) : 'Non renseigné',
           axe,
@@ -1397,6 +1454,9 @@ function construireFaits(donnees, lignes) {
       compteurs.push({
         date: new Date(r.timestamp).toISOString(),
         personne: p.initials,
+        classe: classeDe(p.initials),
+        tablette: r.source,
+        heure: heureDe(r.timestamp),
         compteur: r.nomCompteur,
         atelier: nomAtelier(donnees, r.source, r.atelierId),
         intervenant: nomIntervenant(r.source, r.intervenantId),
@@ -1427,6 +1487,7 @@ function construireFaits(donnees, lignes) {
       return {
         date: dernier.date,
         personne: l.initials,
+        classe: classeDe(l.initials),
         objectif: l.objectif,
         type: (TYPES_COTATION[l.type] || l.type),
         etat: ETAT_RAPPORT[l.etat] || l.etat,
@@ -3363,6 +3424,23 @@ function CarteStockage({ etat, persistant }) {
 /* `unite` vient de ManagerApp et non d'un useState local : les onglets sont
    montés conditionnellement, un état local d'écran ne survit pas à un
    aller-retour et le choix « pourcentage » repassait en « nombre » tout seul. */
+/* Les lignes retenues pour une fenêtre : filtrées par le contexte de lecture,
+   retaillées sur la période, puis vidées de celles qui n'ont plus aucune
+   cotation dedans.
+
+   Une seule définition pour les deux fenêtres du Tableau de bord — la période
+   affichée et celle de comparaison —, sinon l'écart opposerait deux listes
+   construites par deux règles. C'est aussi ce qui permet à l'écran de ne plus
+   jamais toucher `lignes` autrement que par elle : toute lecture y passe
+   forcément par `filtrerLignePeriode`, ce que le contrôle « 2 quater bis »
+   de verifier.sh vérifie par ailleurs. */
+function lignesRetenues(lignes, periode, gardee) {
+  return (lignes || [])
+    .filter((l) => gardee(l.initials))
+    .map((l) => filtrerLignePeriode(l, periode))
+    .filter((l) => l.points.length > 0 || l.mesures.length > 0);
+}
+
 /* Ordre de remontée de la file « À arbitrer ». Il est éditorial et l'assume :
    une hausse de crises se regarde avant une acquisition qui approche, et une
    personne dont on n'a plus aucune nouvelle avant un objectif qui stagne. Il
@@ -3580,10 +3658,7 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
     }
     return true;
   };
-  const recentes = lignes
-    .filter((l) => dansLeContexte(l.initials))
-    .map((l) => filtrerLignePeriode(l, periode))
-    .filter((l) => l.points.length > 0 || l.mesures.length > 0);
+  const recentes = lignesRetenues(lignes, periode, dansLeContexte);
   /* Deux listes distinctes plutôt qu'un titre qui bascule. Auparavant, dès
      qu'un objectif prioritaire existait sur la période, les autres
      disparaissaient et l'intitulé changeait tout seul : d'un appareil à
@@ -3603,6 +3678,12 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      la précédente de même durée — le repli d'origine, désormais calculé par
      periodeComparee plutôt qu'ici en double. */
   const reference = periodeComparee(periode) || periodeComparee({ ...periode, comparer: { mode: 'precedente' } });
+  /* Les mêmes lignes, sur la fenêtre de référence : les sept pastilles
+     n'avaient aucun écart, alors que les sept compteurs de la fiche personne
+     en portent un depuis le début et que la carte crises juste à côté annonce
+     déjà sa tendance. Le même effectif, la même période de référence, deux
+     écrans qui ne disaient pas la même chose. */
+  const recentesRef = reference ? lignesRetenues(lignes, reference, dansLeContexte) : null;
   const precedentes = reference ? crises.filter((c) => dansPeriode(c.date, reference)) : [];
   const tendance = precedentes.length
     ? Math.round(((recentesCrises.length - precedentes.length) / precedentes.length) * 100)
@@ -3626,6 +3707,12 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
      cinquante, et cliquer une pastille ouvrait des objectifs absents de cette
      liste. */
   const compte = (e) => recentes.filter((l) => l.etat === e).length;
+  const compteRef = (e) => (recentesRef ? recentesRef.filter((l) => l.etat === e).length : null);
+  /* La pastille et son écart se lisent dans la même unité : comparer un
+     effectif à une part n'aurait aucun sens. En pourcentage, l'écart est en
+     points de pourcentage — d'où le suffixe, la même convention que la mesure
+     « Évolution de l'autonomie » d'Explorer. */
+  const valeurEtat = (n, total) => (unite === 'pct' ? Math.round((n / (total || 1)) * 100) : n);
   /* Nombre de cotations d'une ligne, quelle que soit la série qui les porte :
      un objectif suivi en mesure brute (occurrences, minutes) n'a pas de
      `points` et s'affichait « 0 séance » alors qu'il en portait des dizaines. */
@@ -3736,10 +3823,23 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
                     {unite === 'pct' ? `${Math.round((n / tot) * 100)} %` : n}
                   </div>
                   <div className="text-xs" style={{ color: INK_SOFT }}>{ETATS[e].court}</div>
+                  {recentesRef && (
+                    <Ecart valeur={valeurEtat(n, recentes.length)}
+                      reference={valeurEtat(compteRef(e), recentesRef.length)}
+                      unite={unite === 'pct' ? ' pts' : ''}
+                      hausseFavorable={ETAT_HAUSSE_FAVORABLE[e]} />
+                  )}
                 </button>
               );
             })}
           </div>
+
+          {recentesRef && (
+            <p className="text-xs mt-2" style={{ color: INK_SOFT }}>
+              Écart vs {libelleComparaison(periode) || 'période précédente'}
+              {unite === 'pct' && ', en points de pourcentage'}.
+            </p>
+          )}
 
           {etatOuvert && (
             <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${BORDER}` }}>
@@ -6962,6 +7062,12 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
 const MESURES = [
   { k: 'cotations', label: 'Nombre de cotations', source: 'cotations', agg: 'compte', hausseFavorable: true },
   { k: 'seances', label: 'Nombre de séances', source: 'cotations', agg: 'distinct', champ: 'seanceId', hausseFavorable: true },
+  /* Le temps réellement passé en séance, que DatABA horodate depuis toujours
+     (`startedAt`/`endedAt`) et que Manager n'affichait que sur le détail d'une
+     séance, jamais agrégé. Dédupliqué par séance : sans quoi une séance de
+     45 minutes portant six cotations pèserait 270. Vide quand la tablette n'a
+     pas borné la séance — une durée non mesurée n'est pas une durée nulle. */
+  { k: 'tempsSeance', label: "Temps d'accompagnement", source: 'cotations', agg: 'sommeUnique', champ: 'minutesSeance', cle: 'seanceId', suffixe: ' min', hausseFavorable: true },
   /* Compteur et chronomètre d'appoint, saisis en séance à côté de la cotation.
      « D'appoint » est dans le libellé et pas seulement dans le commentaire :
      ce que compte le widget est décidé objectif par objectif, si bien qu'une
@@ -7009,6 +7115,20 @@ const DIMENSIONS = [
      manuelle. Ne concerne que les deux tables de relevés — une cotation de
      séance et une crise ne se font pas à la pastille. */
   { k: 'origineReleve', label: 'Geste de relevé', get: (f) => f.origine || 'Non renseignée', sources: ['suivi', 'compteurs'] },
+  /* La classe n'était qu'un filtre de contexte : on pouvait resserrer dessus,
+     jamais croiser avec. */
+  { k: 'classe', label: 'Classe', get: (f) => f.classe || 'Sans classe' },
+  /* La tablette d'origine, pendant de la carte « Remontées par tablette » de
+     Gestion : elle dit d'où vient un écart avant de le prendre pour un fait
+     clinique. Absente de la table des objectifs, dont l'état est consolidé
+     toutes tablettes confondues. */
+  { k: 'tablette', label: 'Tablette', get: (f) => f.tablette || 'Non renseignée', sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
+  /* L'heure de la journée. PRODUCT.md la nomme comme l'exemple même du facteur
+     qui trompe une comparaison d'ateliers, et l'horodatage était là depuis le
+     début sans que rien ne sache le lire. Écartée de la table des objectifs,
+     qui n'a pas d'heure du tout — l'y proposer sortirait une colonne
+     entièrement « Heure inconnue ». */
+  { k: 'trancheHoraire', label: 'Tranche horaire', get: (f) => libelleTrancheHoraire(f.heure), sources: ['cotations', 'crises', 'suivi', 'compteurs'] },
   { k: 'jour', label: 'Jour de la semaine', get: (f) => new Date(f.date).toLocaleDateString('fr-FR', { weekday: 'long' }) },
   { k: 'semaine', label: 'Semaine', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'semaine'), 'semaine') },
   { k: 'mois', label: 'Mois', get: (f) => etiquetteAgregation(cleAgregation(f.date, 'mois'), 'mois') },
@@ -7028,6 +7148,24 @@ function agreger(faits, mesure, total) {
   if (!faits.length) return null;
   if (mesure.agg === 'compte') return faits.length;
   if (mesure.agg === 'distinct') return new Set(faits.map((f) => f[mesure.champ])).size;
+  /* Somme d'une grandeur portée en double par plusieurs faits : la durée d'une
+     séance voyage sur chacune de ses cotations, la sommer telle quelle la
+     multiplierait par leur nombre. `cle` dit ce qui identifie la grandeur, et
+     chaque valeur ne pèse qu'une fois par case. Une séance partagée compte
+     donc une fois dans la case de chaque participant : la somme d'une colonne
+     peut dépasser le total général, comme pour les dimensions à valeurs
+     multiples des crises. */
+  if (mesure.agg === 'sommeUnique') {
+    const vus = new Set();
+    let somme = 0;
+    faits.forEach((f) => {
+      const cle = f[mesure.cle];
+      if (cle == null || vus.has(cle)) return;
+      vus.add(cle);
+      if (f[mesure.champ] != null) somme += f[mesure.champ];
+    });
+    return vus.size ? Math.round(somme) : null;
+  }
   const valeurs = faits.map((f) => f[mesure.champ]).filter((v) => v != null);
   if (!valeurs.length) return null;
   const somme = valeurs.reduce((a, b) => a + b, 0);
