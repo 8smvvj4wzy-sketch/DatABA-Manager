@@ -14,7 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Le vérificateur passe AVANT le build, et la publication en dépend : un
+  # contrôle rouge n'atteint plus le poste des cadres. Il tournait jusqu'ici
+  # à la main seulement, et rien n'empêchait de publier sans l'avoir lancé.
+  # `typescript` est installé sans être inscrit au package.json : tsc ne sert
+  # qu'à vérifier, il n'a rien à faire dans les dépendances de build.
+  verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm install --no-save typescript
+      - run: ./verifier.sh
+
   build:
+    needs: verifier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

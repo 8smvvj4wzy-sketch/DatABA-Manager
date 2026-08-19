@@ -28,6 +28,19 @@ NOM="$(basename "$PWD")"
 
 echo "════════ Vérification : $NOM ════════"
 
+# `tsc` n'est pas une dépendance du projet : sur un poste il vient d'une
+# installation globale, sur un runner il n'existe pas du tout et la section 1
+# échouerait sans aucun rapport avec le code. On le résout une fois, en
+# acceptant aussi celui que la CI installe dans node_modules.
+if command -v tsc >/dev/null 2>&1; then
+  TSC="tsc"
+elif [ -x ./node_modules/.bin/tsc ]; then
+  TSC="./node_modules/.bin/tsc"
+else
+  echo "  ✗ tsc introuvable (npm install -g typescript, ou npm install --no-save typescript)"
+  exit 1
+fi
+
 # ── 1. Syntaxe et références ───────────────────────────────────────────
 echo
 echo "── 1. Syntaxe (tsc) ──"
@@ -52,7 +65,7 @@ for f in src/*.jsx src/*.js; do
   [ -e "$f" ] || continue
   cp "$f" "$TMP/$(basename "$f")"
 done
-if tsc --project "$TMP/tsconfig.json" 2>&1 | grep -v "Cannot find module" | grep -v "^$" | grep .; then
+if "$TSC" --project "$TMP/tsconfig.json" 2>&1 | grep -v "Cannot find module" | grep -v "^$" | grep .; then
   echo "  ✗ erreurs de syntaxe"
   ECHECS=$((ECHECS + 1))
 else
@@ -72,7 +85,7 @@ cat > "$TMP/tsconfig-refs.json" <<'EOF'
   }
 }
 EOF
-INCONNUS=$(tsc --project "$TMP/tsconfig-refs.json" 2>&1 | grep -E "Cannot find name" | head -20)
+INCONNUS=$("$TSC" --project "$TMP/tsconfig-refs.json" 2>&1 | grep -E "Cannot find name" | head -20)
 if [ -n "$INCONNUS" ]; then
   echo "  ✗ références inconnues :"
   echo "$INCONNUS" | sed 's/^/      /'
