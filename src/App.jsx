@@ -1919,6 +1919,30 @@ function chronologieSuivi(segments, granularite) {
     });
 }
 
+/* Part de chaque critère sur tout un ensemble de segments, indexée par clé de
+   série. C'est ce que `chronologieSuivi` calcule tranche par tranche, calculé
+   ici une fois pour l'ensemble : le graphique trace une évolution, il ne disait
+   nulle part la part du critère sur la période entière.
+
+   Le dénominateur reste celui de SON axe — deux axes se chevauchent dans le
+   temps, additionner leurs durées donnerait un total qui ne correspond à aucune
+   durée réelle. Même règle que `chronologieSuivi` dans sa tranche et que la
+   frise sur son axe : le même critère affiche donc le même pourcentage d'un
+   mode à l'autre. Rien de neuf n'est calculé, c'est `repartitionCriteres`
+   appliqué à chaque axe. */
+function partsParSerie(segments) {
+  const parAxe = new Map();
+  (segments || []).forEach((s) => {
+    if (!parAxe.has(s.nomAxe)) parAxe.set(s.nomAxe, []);
+    parAxe.get(s.nomAxe).push(s);
+  });
+  const parSerie = new Map();
+  parAxe.forEach((siens, nomAxe) => {
+    repartitionCriteres(siens).lignes.forEach((l) => parSerie.set(cleSerieSuivi(nomAxe, l.cle), l));
+  });
+  return parSerie;
+}
+
 /* Clé de série d'un compteur. Espace de clés distinct de celui des critères :
    `cleSerieSuivi` met toujours un nom d'axe avant le séparateur, jamais le
    préfixe réservé ci-dessous. */
@@ -6240,6 +6264,12 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
   const couleursSuivi = couleursSeries(seriesSuivi);
   const suffixeSuivi = uniteSuivi === 'pct' ? ' %' : ' min';
   const tranchesSuivi = chronologieSuivi(segments, gran);
+  /* La part de chaque critère sur la période entière, que la courbe ne dit pas :
+     chacun de ses points ne parle que de sa tranche. Mêmes chiffres que ceux
+     affichés sous « période » dans la Frise du jour — même fonction, même
+     dénominateur par axe. */
+  const partsSuivi = partsParSerie(segments);
+  const partsSuiviRef = referencePeriode ? partsParSerie(segmentsSuivi(relevesRef)) : null;
   /* Une tranche où l'axe du critère n'a rien de borné laisse un trou, pas un
      zéro : le critère n'y était pas à zéro, il n'y a rien eu d'observé sur son
      axe. */
@@ -6289,6 +6319,58 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
         ))}
       </ComposedChart>
     </ResponsiveContainer>
+  );
+
+  /* Le bandeau qui accompagne la courbe : une entrée par série affichée, sa
+     durée cumulée et sa part sur toute la période. Défini une fois et rendu à
+     deux endroits (graphique normal et vue agrandie), comme `grapheSuiviEl` —
+     deux blocs de rendu qui se ressemblent finissent par diverger.
+
+     La pastille reprend `couleursSuivi[s.id]`, la couleur réellement tracée :
+     `couleursSeries` peut décaler une teinte pour garder le contraste, et le
+     bandeau doit se rattacher à la bonne courbe. */
+  const bandeauPeriodeSuivi = (
+    <div className="mt-3">
+      <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>
+        Sur la période{referencePeriode ? ` · écart vs ${libelleComparaison(periode)}` : ''}
+      </div>
+      <div className="space-y-1.5">
+        {seriesSuivi.map((s) => {
+          const l = partsSuivi.get(s.k) || null;
+          const ref = partsSuiviRef ? partsSuiviRef.get(s.k) : null;
+          const favorable = favorablePour(s.valeur);
+          return (
+            <div key={s.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs rounded-lg px-2.5 py-1.5"
+              style={{ backgroundColor: PAPER }}>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: couleursSuivi[s.id] }} />
+                <span className="truncate">{nomSerie(s)}</span>
+              </span>
+              {/* Aucune ligne dans la répartition : rien d'observé, ce n'est pas
+                  un zéro. Le cas ne devrait pas se présenter — un critère
+                  n'entre dans les menus qu'avec au moins un segment borné —
+                  mais la règle vaut ici comme partout. */}
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0" style={{ fontFamily: F_MONO }}>
+                {l ? (
+                  <>
+                    <span className="flex items-center gap-1.5">
+                      <span>{minutes(l.ms)} min</span>
+                      {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" hausseFavorable={favorable} />}
+                    </span>
+                    {l.part != null && (
+                      <span className="flex items-center gap-1.5">
+                        <span>{l.part} %</span>
+                        {referencePeriode && <Ecart valeur={l.part} reference={ref ? ref.part : null} unite=" pts" hausseFavorable={favorable} />}
+                      </span>
+                    )}
+                  </>
+                ) : <span style={{ color: INK_SOFT }}>—</span>}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 
   /* --- Graphique des compteurs d'occurrence --- */
@@ -6575,7 +6657,11 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                     </div>
                   </div>
 
+                  {/* La `ref` ne couvre que le graphique : l'export PNG ne
+                      sérialise que le SVG, le bandeau qui suit lui échappe de
+                      toute façon. */}
                   <div style={{ height: 280 }} ref={refGrapheSuivi}>{grapheSuiviEl}</div>
+                  {bandeauPeriodeSuivi}
 
                   <div className="text-xs mt-2 space-y-1" style={{ color: INK_SOFT }}>
                     {texteSuivi && <div>{texteSuivi}</div>}
@@ -6584,6 +6670,7 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                         ? "Chaque part est calculée sur le temps borné de l'axe du critère, dans sa tranche."
                         : 'Chaque point cumule les minutes du critère sur la tranche.'}
                       {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
+                      {' '}Le bandeau, lui, rapporte chaque critère au temps borné de son axe sur la période entière : c'est le chiffre de la Frise du jour, sous « période ».
                     </div>
                   </div>
                 </>
@@ -6596,6 +6683,7 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                   onExporterPng={() => exporterGraphePng(refGrapheSuiviAgrandi.current, nomFichier('suivi-continu'))}
                   onFermer={() => setAgrandiSuivi(false)}>
                   <div ref={refGrapheSuiviAgrandi} style={{ height: '70vh' }}>{grapheSuiviEl}</div>
+                  {bandeauPeriodeSuivi}
                 </GrapheAgrandi>
               )}
             </Card>
