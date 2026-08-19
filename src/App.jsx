@@ -4,7 +4,7 @@ import {
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
   Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette, Star,
-  ListChecks, Clock,
+  ListChecks, Clock, WifiOff,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -390,6 +390,27 @@ async function demanderStockagePersistant() {
     if (navigator.storage.persisted && await navigator.storage.persisted()) return true;
     return await navigator.storage.persist();
   } catch (e) { return null; }
+}
+
+/* État lu pour la carte « Hors ligne » de Gestion (CarteHorsLigne). Rien
+   n'affichait ce que le service worker avait réellement mis en cache : un
+   poste pouvait fonctionner en ligne des semaines sans qu'aucun signal ne
+   dise que le hors-ligne, lui, était cassé (voir CLAUDE.md, piège « Le
+   hors-ligne ne se découvre pas à l'exécution »). Interroge public/sw.js par
+   MessageChannel plutôt que de deviner depuis la page : la liste des
+   fichiers attendus n'existe plus que côté service worker, injectée au
+   build. */
+async function etatHorsLigneDe() {
+  if (!('serviceWorker' in navigator)) return { actif: false, raison: 'non-supporte' };
+  if (!navigator.serviceWorker.controller) return { actif: false, raison: 'aucun-controleur' };
+  const reponse = await new Promise((resolve) => {
+    const canal = new MessageChannel();
+    const delai = setTimeout(() => resolve(null), 2000);
+    canal.port1.onmessage = (e) => { clearTimeout(delai); resolve(e.data); };
+    navigator.serviceWorker.controller.postMessage({ type: 'etat' }, [canal.port2]);
+  });
+  if (!reponse) return { actif: true, raison: 'sans-reponse' };
+  return { actif: true, version: reponse.version, attendus: reponse.attendus, presents: reponse.presents };
 }
 
 /* Résultat d'une lecture. `etat` vaut :
@@ -3416,6 +3437,55 @@ function CarteStockage({ etat, persistant }) {
           enregistrement. Un export régulier reste la seule sauvegarde qui ne dépend pas du navigateur.
         </p>
       )}
+    </Card>
+  );
+}
+
+/* Carte « Hors ligne » : dit si l'application est prête à s'ouvrir sans
+   réseau, ce qu'aucun écran ne disait avant cette version. Calquée sur
+   CarteStockage — même carte, mêmes tokens, même lecture en dl/dt/dd — pas de
+   bandeau d'alerte : sur un poste local, être hors réseau est l'état normal,
+   pas un incident à signaler comme une écriture en échec. */
+function CarteHorsLigne({ etat, onRafraichir }) {
+  const pret = !!(etat && etat.actif && etat.attendus != null && etat.presents === etat.attendus);
+  const raison = !etat ? null
+    : etat.raison === 'non-supporte' ? "ce navigateur ne prend pas en charge les applications hors connexion"
+      : etat.raison === 'aucun-controleur' ? "pas encore actif sur cette page — un rechargement suffit, une fois la première ouverture terminée"
+        : etat.raison === 'sans-reponse' ? "actif, mais n'a pas répondu à temps à l'interrogation"
+          : null;
+  return (
+    <Card className="mb-4">
+      <div className="flex items-center gap-1.5 mb-2">
+        <WifiOff size={16} style={{ color: INK_SOFT }} />
+        <span className="text-sm font-semibold" style={{ fontFamily: F_DISPLAY }}>Hors ligne</span>
+      </div>
+      <p className="text-xs mb-3" style={{ color: INK_SOFT }}>
+        Une ouverture en ligne suffit à rendre l'application utilisable ensuite sans réseau : les
+        fichiers de cette version sont alors mis de côté sur ce poste. Une nouvelle mise en ligne de
+        l'application redemande une ouverture en ligne — une seule — avant que le hors-ligne
+        fonctionne à nouveau, cette fois avec la nouvelle version.
+      </p>
+      {etat && raison && (
+        <p className="text-xs mb-3 rounded-lg px-2.5 py-2"
+          style={{ color: texteLisibleSur(NON_ACQUIS), backgroundColor: NON_ACQUIS, printColorAdjust: 'exact' }}>
+          <strong>{etat.actif ? 'État incertain.' : 'Non disponible.'}</strong> {raison}
+        </p>
+      )}
+      <dl className="text-xs" style={{ color: INK_SOFT }}>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Prêt sans réseau</dt>
+          <dd className="text-right" style={{ color: INK }}>
+            {!etat ? 'vérification en cours…'
+              : !etat.actif || etat.raison === 'sans-reponse' ? 'inconnu'
+                : pret ? 'oui' : `non — ${etat.presents ?? 0} sur ${etat.attendus ?? '?'} fichiers en cache`}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3 py-1" style={{ borderTop: `1px solid ${BORDER}` }}>
+          <dt>Version en cache</dt>
+          <dd style={{ color: INK }}>{etat && etat.version ? etat.version : '—'}</dd>
+        </div>
+      </dl>
+      <Btn variant="ghost" onClick={onRafraichir} className="mt-2 text-xs">Revérifier</Btn>
     </Card>
   );
 }
@@ -8138,7 +8208,7 @@ function construirePaquetExport(donnees, initialesRetenues, periode) {
   };
 }
 
-function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify, etatStockage, persistant }) {
+function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChangerMotDePasse, onRetirerProtection, onPurger, notify, etatStockage, persistant, etatHorsLigne, onRafraichirHorsLigne }) {
   const [fichier, setFichier] = useState(null);
   const [enveloppe, setEnveloppe] = useState(null);
   const [passphrase, setPassphrase] = useState('');
@@ -8380,6 +8450,7 @@ function GestionScreen({ donnees, securite, accent, onAccent, onImported, onChan
       )}
 
       <CarteStockage etat={etatStockage} persistant={persistant} />
+      <CarteHorsLigne etat={etatHorsLigne} onRafraichir={onRafraichirHorsLigne} />
 
       <Card className="mb-4">
         <div className="flex items-center gap-1.5 mb-2">
@@ -8946,6 +9017,8 @@ function ManagerApp() {
      pas écraser des données peut-être encore intactes. */
   const [blocIllisible, setBlocIllisible] = useState(null);
   const [persistant, setPersistant] = useState(null);
+  const [etatHorsLigne, setEtatHorsLigne] = useState(null);
+  function rafraichirEtatHorsLigne() { etatHorsLigneDe().then(setEtatHorsLigne); }
   const [securite, setSecurite] = useState({ pinHash: null, pinSalt: null });
   const [secuLue, setSecuLue] = useState(false);
   const [verrouille, setVerrouille] = useState(true);
@@ -9044,6 +9117,7 @@ function ManagerApp() {
     } catch (e) { /* réglages illisibles */ }
     setSecuLue(true);
     demanderStockagePersistant().then(setPersistant);
+    rafraichirEtatHorsLigne();
   }, []);
 
   function ecrireSecurite(s) {
@@ -9500,7 +9574,8 @@ function ManagerApp() {
                 accent={accent} onAccent={choisirAccent} onImported={onImported}
                 onChangerMotDePasse={changerMotDePasse} onRetirerProtection={retirerProtection}
                 onPurger={purger} notify={notify}
-                etatStockage={etatStockage} persistant={persistant} />
+                etatStockage={etatStockage} persistant={persistant}
+                etatHorsLigne={etatHorsLigne} onRafraichirHorsLigne={rafraichirEtatHorsLigne} />
             </>
           )}
         </div>

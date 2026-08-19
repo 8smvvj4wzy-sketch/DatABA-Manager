@@ -185,7 +185,9 @@ porte toujours son propre token de texte).
 ## Typography
 
 Identique à DatABA : Space Grotesk (titres/boutons), IBM Plex Sans (texte),
-IBM Plex Mono (libellés courts, chiffres, séances/crises comptées).
+IBM Plex Mono (libellés courts, chiffres, séances/crises comptées). Polices
+embarquées (`src/polices/`, `@font-face` dans `src/index.css`) plutôt que
+chargées depuis Google Fonts : nécessaire au hors-ligne, voir CLAUDE.md.
 
 ## Layout
 

@@ -10,27 +10,19 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 );
 
 /* Service worker : permet à l'application de fonctionner sans réseau.
-   Enregistré après le chargement pour ne pas ralentir le premier affichage. */
+   Enregistré après le chargement pour ne pas ralentir le premier affichage.
+   La liste des fichiers à mettre en cache n'est plus dictée par la page — le
+   build (vite.config.js, scripts/precache.mjs) l'injecte directement dans
+   sw.js. La dicter ici obligeait à une visite en ligne complète et réussie
+   avant que le hors-ligne fonctionne, et un ordre d'activation mal posé côté
+   service worker faisait écrire cette liste dans un cache déjà promis à la
+   suppression (voir CLAUDE.md, piège « Le hors-ligne ne se découvre pas à
+   l'exécution ») : la page n'a donc plus rien à transmettre au premier
+   chargement, seulement à interroger ensuite (CarteHorsLigne, src/App.jsx). */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     const base = import.meta.env.BASE_URL || './';
-    navigator.serviceWorker.register(`${base}sw.js`).then(() => {
-      /* On transmet la liste des fichiers réellement chargés : leurs noms
-         portent une empreinte qui change à chaque version, le service worker
-         ne peut donc pas les deviner. C'est ce qui rend le hors-ligne fiable
-         dès la première visite. */
-      const envoyer = () => {
-        if (!navigator.serviceWorker.controller) return;
-        const urls = performance
-          .getEntriesByType('resource')
-          .map((r) => r.name)
-          .filter((u) => u.startsWith(window.location.origin))
-          .filter((u) => /\.(js|css|woff2?|png|svg|webmanifest)(\?|$)/i.test(u));
-        navigator.serviceWorker.controller.postMessage({ type: 'cache-assets', urls });
-      };
-      if (navigator.serviceWorker.controller) envoyer();
-      else navigator.serviceWorker.addEventListener('controllerchange', envoyer);
-    }).catch(() => {
+    navigator.serviceWorker.register(`${base}sw.js`).catch(() => {
       /* Sans HTTPS, l'enregistrement échoue : l'application fonctionne quand
          même, mais sans mode hors connexion. */
     });
