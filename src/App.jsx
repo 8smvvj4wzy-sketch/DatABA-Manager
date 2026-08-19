@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, CalendarDays, Users, FileText, Settings,
   Lock, Download, Upload, TrendingUp, AlertTriangle, Target, Trash2,
-  Radar as RadarIcon, Activity, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
+  Radar as RadarIcon, Table2, Printer, X, Check, Grid3x3, Layers, Sun, Moon,
   ChevronLeft, ChevronRight, ChevronDown, Minimize2, Maximize2, Palette, Star,
   ListChecks, Clock, WifiOff,
 } from 'lucide-react';
@@ -1808,31 +1808,25 @@ function segmentsJournee(relevesJour) {
 /* Part du temps passée dans chaque critère, sur un ensemble de segments
    (une journée, ou plusieurs journées mises bout à bout sur une période). Les
    segments non bornés (`ms: null`) sont exclus du dénominateur et comptés à
-   part : un pourcentage ne doit jamais reposer sur une durée devinée. */
+   part : un pourcentage ne doit jamais reposer sur une durée devinée.
+
+   Une durée et une part, rien d'autre. Un relevé d'état dure, il ne se compte
+   pas : ce qui se compte, ce sont les appuis de compteur, qui ont leur propre
+   lecture sur le même écran. La seconde lecture « en occurrences » qui vivait
+   ici mêlait les deux natures. */
 function repartitionCriteres(segments) {
   const bornes = segments.filter((s) => s.ms != null);
   const total = bornes.reduce((a, s) => a + s.ms, 0);
   const parCritere = new Map();
   bornes.forEach((s) => {
-    if (!parCritere.has(s.cle)) parCritere.set(s.cle, { cle: s.cle, meta: s.meta, ms: 0, n: 0 });
-    const e = parCritere.get(s.cle);
-    e.ms += s.ms;
-    e.n += 1;
+    if (!parCritere.has(s.cle)) parCritere.set(s.cle, { cle: s.cle, meta: s.meta, ms: 0 });
+    parCritere.get(s.cle).ms += s.ms;
   });
   return {
     totalMs: total,
-    /* Nombre de segments bornés : le dénominateur des occurrences. Il diffère
-       de `segments.length` — un relevé jamais borné ne compte pas plus ici que
-       dans les durées, sans quoi les deux lectures ne parleraient pas du même
-       ensemble de faits. */
-    totalN: bornes.length,
     nonBornes: segments.length - bornes.length,
     lignes: Array.from(parCritere.values())
-      .map((e) => ({
-        ...e,
-        part: total ? Math.round((e.ms / total) * 100) : null,
-        partN: bornes.length ? Math.round((e.n / bornes.length) * 100) : null,
-      }))
+      .map((e) => ({ ...e, part: total ? Math.round((e.ms / total) * 100) : null }))
       .sort((a, b) => b.ms - a.ms),
   };
 }
@@ -1876,9 +1870,9 @@ const cleSerieSuivi = (nomAxe, cle) => `${nomAxe}||${cle}`;
 /* Chronologie du suivi continu, tranche par tranche — l'équivalent de
    `chronologieCrises` pour les segments de suivi.
 
-   `mesure` vaut 'duree' (chaque segment pèse ses minutes) ou 'occurrences'
-   (chaque segment pèse 1) : un critère peut occuper peu de temps en revenant
-   souvent, ou l'inverse.
+   Chaque segment pèse ses minutes, jamais 1 : un relevé d'état dure, il ne se
+   compte pas. La lecture « en occurrences » qui doublait celle-ci mêlait les
+   relevés d'état aux appuis de compteur, que `chronologieCompteurs` lit à part.
 
    La part est rapportée au total de **son propre axe sur sa propre tranche**,
    jamais au total général : les axes sont indépendants et se chevauchent dans
@@ -1890,20 +1884,18 @@ const cleSerieSuivi = (nomAxe, cle) => `${nomAxe}||${cle}`;
    Les segments non bornés sont exclus, même règle que partout ailleurs, et une
    tranche qui n'en contient aucun n'est pas créée : elle sortirait comme un
    zéro qu'elle n'est pas. */
-function chronologieSuivi(segments, granularite, mesure) {
-  const occurrences = mesure === 'occurrences';
-  /* Cumul en unité brute (millisecondes ou nombre de segments), converti en
-     minutes seulement à la sortie : arrondir chaque segment avant de sommer
-     ferait disparaître les segments de moins de trente secondes et la somme
-     des minutes cesserait d'égaler la durée du tout. */
-  const poids = (s) => (occurrences ? 1 : s.ms);
+function chronologieSuivi(segments, granularite) {
+  /* Cumul en millisecondes, converti en minutes seulement à la sortie :
+     arrondir chaque segment avant de sommer ferait disparaître les segments de
+     moins de trente secondes et la somme des minutes cesserait d'égaler la
+     durée du tout. */
   const tranches = new Map();
   (segments || []).forEach((s) => {
     if (s.ms == null) return;
     const cle = cleAgregation(s.debut, granularite);
     if (!tranches.has(cle)) tranches.set(cle, { cle, series: new Map(), totauxAxe: new Map() });
     const t = tranches.get(cle);
-    const p = poids(s);
+    const p = s.ms;
     const k = cleSerieSuivi(s.nomAxe, s.cle);
     if (!t.series.has(k)) t.series.set(k, { nomAxe: s.nomAxe, cle: s.cle, meta: s.meta, brut: 0 });
     t.series.get(k).brut += p;
@@ -1919,7 +1911,7 @@ function chronologieSuivi(segments, granularite, mesure) {
           nomAxe: v.nomAxe,
           cle: v.cle,
           meta: v.meta,
-          valeur: occurrences ? v.brut : Math.round(v.brut / 60000),
+          valeur: Math.round(v.brut / 60000),
           part: total ? Math.round((v.brut / total) * 100) : null,
         };
       });
@@ -2193,8 +2185,8 @@ function SelecteurPeriode({ periode, setPeriode, avecGranularite, avecComparaiso
             </div>
           )}
           {/* Le réglage est proposé sur tout un écran, mais ne sert pas sous
-             toutes ses sous-vues (le croisement, par exemple) : le dire
-             plutôt que de laisser deviner pourquoi rien ne change. */}
+             toutes ses sous-vues (les crises d'une personne, par exemple) : le
+             dire plutôt que de laisser deviner pourquoi rien ne change. */}
           {cmp && !comparaisonUtile && (
             <p className="text-xs mt-1" style={{ color: INK_SOFT, fontStyle: 'italic' }}>
               Cette vue n'affiche pas encore d'écart avec la période de comparaison.
@@ -3512,23 +3504,27 @@ function lignesRetenues(lignes, periode, gardee) {
 }
 
 /* Ordre de remontée de la file « À arbitrer ». Il est éditorial et l'assume :
-   une hausse de crises se regarde avant une acquisition qui approche, et une
-   personne dont on n'a plus aucune nouvelle avant un objectif qui stagne. Il
-   ne dit pas quoi décider — chaque ligne n'énonce que le fait et ses chiffres,
-   l'arbitrage reste au cadre. Même forme que le `rang` des états plus bas, et
-   même raison : un ordre écrit une seule fois plutôt qu'un tri recopié. */
-const POIDS_ARBITRAGE = { crises_hausse: 0, bientot: 1, sans_trace: 2, plateau: 3, dormant: 4 };
+   une hausse de crises se regarde avant une personne dont on n'a plus aucune
+   nouvelle, et celle-ci avant un objectif qui stagne, jamais coté ou plus coté.
+   Il ne dit pas quoi décider — chaque ligne n'énonce que le fait et ses
+   chiffres, l'arbitrage reste au cadre. Même forme que le `rang` des états plus
+   bas, et même raison : un ordre écrit une seule fois plutôt qu'un tri recopié.
+
+   « Bientôt acquis » n'y figure pas, et c'est délibéré : une acquisition qui
+   approche est une bonne nouvelle en cours de route, elle n'appelle aucune
+   décision. Elle reste lisible dans les pastilles d'états du haut. */
+const POIDS_ARBITRAGE = { crises_hausse: 0, sans_trace: 1, plateau: 2, non_acquis: 3, dormant: 4 };
 
 /* Pastille de couleur de chaque type de situation. Reprend la palette des
-   états là où le type en désigne un — un « bientôt » se reconnaît au même cyan
+   états là où le type en désigne un — un plateau se reconnaît au même ambre
    dans la file que dans les pastilles du haut — et `--crisis` pour la hausse
    de crises, qui n'est pas un état d'acquisition : c'est le token de l'alerte,
    pas une teinte catégorielle détournée. */
 const COULEUR_ARBITRAGE = {
   crises_hausse: CRISE,
-  bientot: CAT_CYAN,
   sans_trace: CAT_SLATE,
   plateau: CAT_AMBER,
+  non_acquis: CAT_CORAL,
   dormant: CAT_SLATE,
 };
 
@@ -3577,12 +3573,17 @@ function situationsAArbitrer(recentes, crisesPeriode, crisesReference, derniereT
     });
   }
 
+  /* Un objectif jamais coté ne porte aucun chiffre : `etatDeSerie` ne rend
+     `non_acquis` que lorsque `points` ET `mesures` sont vides. La règle de
+     non-redondance ci-dessus ne s'y applique pas non plus — elle existe pour ne
+     pas répéter quinze fois « plus rien depuis N jours », et « jamais coté »
+     n'est pas cette absence-là. */
   (recentes || []).forEach((l) => {
     const base = { initiales: l.initials, objectif: l.objectif };
-    if (l.etat === 'bientot') {
-      situations.push({ kind: 'bientot', poids: POIDS_ARBITRAGE.bientot, ...base, streak: l.streak, needed: l.needed });
-    } else if (l.etat === 'plateau') {
+    if (l.etat === 'plateau') {
       situations.push({ kind: 'plateau', poids: POIDS_ARBITRAGE.plateau, ...base, moyenne: l.moyenne, seuil: l.threshold });
+    } else if (l.etat === 'non_acquis') {
+      situations.push({ kind: 'non_acquis', poids: POIDS_ARBITRAGE.non_acquis, ...base });
     } else if (l.etat === 'dormant' && !sansTrace.has(l.initials)) {
       situations.push({ kind: 'dormant', poids: POIDS_ARBITRAGE.dormant, ...base, jours: l.jours });
     }
@@ -3590,14 +3591,14 @@ function situationsAArbitrer(recentes, crisesPeriode, crisesReference, derniereT
 
   /* Le poids d'abord, puis l'ampleur du fait à l'intérieur d'un même type : la
      plus forte hausse en tête des hausses, l'absence la plus longue en tête
-     des dormants. Le plateau n'a pas d'ampleur qui se compare (deux moyennes
-     sous deux seuils différents ne se classent pas) : il rend 0, et le tri
+     des dormants. Ni le plateau ni l'objectif jamais coté n'ont d'ampleur qui
+     se compare (deux moyennes sous deux seuils différents ne se classent pas,
+     et « jamais » ne se compare pas à « jamais ») : ils rendent 0, et le tri
      stable — garanti par la spécification, comme s'y fie déjà le tri des
-     objectifs prioritaires — lui laisse l'ordre de `recentes`. */
+     objectifs prioritaires — leur laisse l'ordre de `recentes`. */
   const ampleur = (s) => {
     if (s.kind === 'crises_hausse') return s.n - s.reference;
-    if (s.kind === 'bientot') return s.streak;
-    if (s.kind === 'plateau') return 0;
+    if (s.kind === 'plateau' || s.kind === 'non_acquis') return 0;
     return s.jours || 0;
   };
   return situations.sort((a, b) => a.poids - b.poids || ampleur(b) - ampleur(a));
@@ -3983,13 +3984,15 @@ function TableauDeBord({ donnees, lignes, periode, setPeriode, unite, setUnite, 
           if (s.kind === 'crises_hausse') {
             return `${s.n} crise${s.n > 1 ? 's' : ''} sur la période, contre ${s.reference} sur ${libelleComparaison(periode) || 'la précédente'}.`;
           }
-          if (s.kind === 'bientot') {
-            return `Au seuil sur ${s.streak} cotation${s.streak > 1 ? 's' : ''} consécutive${s.streak > 1 ? 's' : ''}, le critère en demande ${s.needed}.`;
-          }
           if (s.kind === 'sans_trace') return `Aucune séance, crise ni relevé depuis ${s.jours} jours.`;
           if (s.kind === 'plateau') {
             return `Moyenne ${s.moyenne} % sur les cinq dernières cotations, pour un seuil à ${s.seuil} %.`;
           }
+          /* Formulation volontairement neutre : la ligne peut venir d'un
+             objectif de séance jamais coté comme d'un axe de suivi promu en
+             objectif sans aucun relevé — « inscrit en séance » serait faux
+             dans le second cas. */
+          if (s.kind === 'non_acquis') return 'Aucune cotation à ce jour.';
           return `Plus coté depuis ${s.jours} jours.`;
         };
         return (
@@ -5896,11 +5899,16 @@ function CarteObjectif({ ligne, donnees, personne, style, courbes, deplie, pourP
    de bord et `config` du bilan de crise. */
 /* Unités qu'un critère de suivi continu peut apporter comme objectif, jour par
    jour. Un compteur n'a pas ce choix — il compte toujours ses appuis, voir
-   UNITES_OBJECTIF_SUIVI et lignesSuiviContinu. */
+   UNITES_OBJECTIF_SUIVI et lignesSuiviContinu.
+
+   Une durée et une part, rien d'autre : un relevé d'état dure, il ne se compte
+   pas. « Nombre d'épisodes » ne se propose donc plus. L'unité reste connue de
+   UNITES_OBJECTIF_SUIVI et de valeurJourSuivi pour les objectifs déjà réglés
+   ainsi — la retirer de là rebaptiserait leur unité en silence, par le repli
+   de lignesSuiviContinu. */
 const UNITES_CHOIX_CRITERE = [
   { k: 'part', label: 'Part du temps borné (%)' },
   { k: 'minutes', label: 'Minutes cumulées' },
-  { k: 'episodes', label: "Nombre d'épisodes" },
 ];
 
 /* Réglage « compte comme un objectif » d'un critère ou d'un compteur — pose ou
@@ -5909,6 +5917,13 @@ const UNITES_CHOIX_CRITERE = [
 function ReglageObjectifSuivi({ reglage, uniteChoix, onChange }) {
   const actif = !!(reglage && reglage.actif);
   const unite = (reglage && reglage.unite) || (uniteChoix ? uniteChoix[0].k : 'occurrences');
+  /* Une unité réglée avant d'être retirée du choix (les épisodes) reste dans la
+     liste tant qu'elle est posée : un `<select>` dont la `value` n'est dans
+     aucune `<option>` s'affiche vide, et le réglage deviendrait illisible sans
+     avoir changé. Elle ne revient pas une fois remplacée. */
+  const options = uniteChoix && !uniteChoix.some((u) => u.k === unite)
+    ? [...uniteChoix, { k: unite, label: (UNITES_OBJECTIF_SUIVI[unite] || {}).label || unite }]
+    : uniteChoix;
   const seuilPose = reglage && reglage.seuil != null;
   const seuil = seuilPose ? reglage.seuil : '';
   const jours = (reglage && reglage.jours) || 1;
@@ -5923,12 +5938,12 @@ function ReglageObjectifSuivi({ reglage, uniteChoix, onChange }) {
       </label>
       {actif && (
         <div className="flex flex-wrap items-end gap-2 pl-5">
-          {uniteChoix && (
+          {options && (
             <div>
               <div className="text-xs mb-1" style={{ color: INK_SOFT }}>Valeur retenue chaque jour</div>
               <select value={unite} onChange={(e) => maj({ unite: e.target.value })}
                 className="rounded-lg border px-2 py-1 text-xs" style={{ borderColor: BORDER, color: INK }}>
-                {uniteChoix.map((u) => <option key={u.k} value={u.k}>{u.label}</option>)}
+                {options.map((u) => <option key={u.k} value={u.k}>{u.label}</option>)}
               </select>
             </div>
           )}
@@ -6072,7 +6087,7 @@ function texteTendances(series, fits, croisement) {
 
 /* ==================== Suivi continu d'une personne ====================
    Trois lectures des mêmes relevés, exclusives à l'écran : la frise d'une
-   journée avec la répartition sur la période, le graphique du suivi continu
+   journée avec ses chiffres et ceux de la période, le graphique du suivi continu
    (N critères, chacun avec sa tendance) et celui des compteurs d'occurrence —
    deux natures de données, deux graphiques agrandissables et exportables,
    plutôt qu'un seul contraint à cohabiter.
@@ -6095,7 +6110,6 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
      elle. */
   const [selectionSuivi, setSelectionSuivi] = useState([]);
   const [selectionCompteurs, setSelectionCompteurs] = useState([]);
-  const [mesureSuivi, setMesureSuivi] = useState('duree');
   const [uniteSuivi, setUniteSuivi] = useState('pct');
   /* Une tendance par série affichée, pas une lecture superposée globale : ce
      n'est donc pas COURBES_LECTURE, un simple interrupteur suffit par
@@ -6224,8 +6238,8 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
     .filter(Boolean)
     .map((o, i) => ({ ...o, id: `s${i}`, couleurNaturelle: o.meta.color }));
   const couleursSuivi = couleursSeries(seriesSuivi);
-  const suffixeSuivi = uniteSuivi === 'pct' ? ' %' : (mesureSuivi === 'occurrences' ? '' : ' min');
-  const tranchesSuivi = chronologieSuivi(segments, gran, mesureSuivi);
+  const suffixeSuivi = uniteSuivi === 'pct' ? ' %' : ' min';
+  const tranchesSuivi = chronologieSuivi(segments, gran);
   /* Une tranche où l'axe du critère n'a rien de borné laisse un trou, pas un
      zéro : le critère n'y était pas à zéro, il n'y a rien eu d'observé sur son
      axe. */
@@ -6377,6 +6391,10 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
               const segmentsJour = segmentsJournee(rsJour);
               const repar = repartitionCriteres(segmentsSuivi(rs));
               const reparRef = referencePeriode ? repartitionCriteres(segmentsSuivi(parAxeRef.get(nomAxeVal) || [])) : null;
+              /* La journée affichée, lue par la même fonction que la période :
+                 la frise la dessine déjà, ses chiffres se lisaient jusqu'ici à
+                 l'œil sur la piste. */
+              const reparJour = repartitionCriteres(segmentsJour);
               return (
                 <Card key={nomAxeVal}>
                   <div className="text-sm font-semibold mb-2" style={{ fontFamily: F_DISPLAY }}>
@@ -6390,11 +6408,12 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                   )}
 
                   <div className="text-xs uppercase tracking-wide mb-1.5" style={{ color: INK_SOFT }}>
-                    Sur la période{referencePeriode ? ` · écart vs ${libelleComparaison(periode)}` : ''}
+                    Ce jour-là · sur la période{referencePeriode ? ` · écart vs ${libelleComparaison(periode)}` : ''}
                   </div>
                   <div className="space-y-1.5">
                     {repar.lignes.map((l) => {
                       const ref = reparRef ? reparRef.lignes.find((x) => x.cle === l.cle) : null;
+                      const jour = reparJour.lignes.find((x) => x.cle === l.cle) || null;
                       const cleSerie = `critere:${cleSerieSuivi(nomAxeVal, l.cle)}`;
                       const cleReg = cleObjectifSuivi(personne, cleSerie);
                       const reglage = reglageDe(cleSerie);
@@ -6417,22 +6436,29 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                                 </span>
                               )}
                             </span>
-                            {/* Durée et occurrences côte à côte : un critère peut
-                                peser peu de temps en revenant souvent. Chacun avec
-                                sa part et son écart, pour lire la même période sous
-                                les deux angles. */}
+                            {/* La journée affichée puis la période, chacune avec sa
+                                durée et sa part. Deux groupes étiquetés plutôt que
+                                deux chiffres nus : sans libellé, rien ne dirait
+                                lequel des deux pourcentages est celui du jour.
+                                Un critère absent de la journée rend « — » et
+                                jamais 0 — rien n'y a été observé, ce n'est pas un
+                                zéro (même règle que valeurJourSuivi). */}
                             <span className="flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0" style={{ fontFamily: F_MONO }}>
                               <span className="flex items-center gap-1.5">
+                                <span style={{ color: INK_SOFT, fontFamily: F_BODY }}>jour</span>
+                                {jour ? (
+                                  <>
+                                    <span>{minutes(jour.ms)} min</span>
+                                    {jour.part != null && <span style={{ color: INK_SOFT }}>{jour.part} %</span>}
+                                  </>
+                                ) : <span style={{ color: INK_SOFT }}>—</span>}
+                              </span>
+                              <span className="flex items-center gap-1.5">
+                                <span style={{ color: INK_SOFT, fontFamily: F_BODY }}>période</span>
                                 <span>{minutes(l.ms)} min</span>
                                 {referencePeriode && <Ecart valeur={minutes(l.ms)} reference={ref ? minutes(ref.ms) : null} unite=" min" hausseFavorable={favorable} />}
                                 {l.part != null && <span style={{ color: INK_SOFT }}>{l.part} %</span>}
                                 {referencePeriode && l.part != null && <Ecart valeur={l.part} reference={ref ? ref.part : null} unite=" pts" hausseFavorable={favorable} />}
-                              </span>
-                              <span className="flex items-center gap-1.5">
-                                <span>{l.n} occ.</span>
-                                {referencePeriode && <Ecart valeur={l.n} reference={ref ? ref.n : null} hausseFavorable={favorable} />}
-                                {l.partN != null && <span style={{ color: INK_SOFT }}>{l.partN} %</span>}
-                                {referencePeriode && l.partN != null && <Ecart valeur={l.partN} reference={ref ? ref.partN : null} unite=" pts" hausseFavorable={favorable} />}
                               </span>
                               {onObjectifSuivi && (
                                 <button type="button" onClick={() => setReglageOuvert(ouvert ? null : cleReg)}
@@ -6531,11 +6557,9 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
               ) : (
                 <>
                   <div className="flex flex-wrap items-center gap-3 mb-3">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs mr-1" style={{ color: INK_SOFT }}>Mesure</span>
-                      <Chip label="Durée" on={mesureSuivi === 'duree'} onClick={() => setMesureSuivi('duree')} />
-                      <Chip label="Occurrences" on={mesureSuivi === 'occurrences'} onClick={() => setMesureSuivi('occurrences')} />
-                    </div>
+                    {/* Pas de bascule « Mesure » ici : un relevé d'état dure, il
+                        ne se compte pas. Le comptage est celui des appuis de
+                        compteur, dans le graphique suivant. */}
                     <BasculeUnite unite={uniteSuivi} setUnite={setUniteSuivi} />
                     <div className="flex items-center gap-1.5">
                       <Chip label="Courbes" on={styleSuivi === 'lignes'} onClick={() => setStyleSuivi('lignes')} />
@@ -6557,8 +6581,8 @@ function SuiviContinuVue({ donnees, personne, periode, lignes, onObjectifSuivi }
                     {texteSuivi && <div>{texteSuivi}</div>}
                     <div>
                       {uniteSuivi === 'pct'
-                        ? `Chaque part est calculée sur ${mesureSuivi === 'occurrences' ? 'le nombre de relevés bornés' : 'le temps borné'} de l'axe du critère, dans sa tranche.`
-                        : `Chaque point cumule ${mesureSuivi === 'occurrences' ? 'les relevés bornés' : 'les minutes'} du critère sur la tranche.`}
+                        ? "Chaque part est calculée sur le temps borné de l'axe du critère, dans sa tranche."
+                        : 'Chaque point cumule les minutes du critère sur la tranche.'}
                       {' '}Une tranche sans durée connue n'apparaît pas, et un critère laisse un trou plutôt qu'un zéro quand son axe n'a rien de coté.
                     </div>
                   </div>
@@ -6825,19 +6849,8 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
     return ini === personne && dansPeriode(c.date, periode);
   });
 
+  /* Granularité de l'aperçu des crises, sous la sous-vue Crises. */
   const gran = periode.granularite || 'semaine';
-  const paquets = new Map();
-  const touche = (k) => {
-    if (!paquets.has(k)) paquets.set(k, { somme: 0, n: 0, crises: 0 });
-    return paquets.get(k);
-  };
-  siennes.forEach((l) => l.points.forEach((pt) => { const e = touche(cleAgregation(pt.date, gran)); e.somme += pt.value; e.n += 1; }));
-  crisesPersonne.forEach((c) => { touche(cleAgregation(c.date, gran)).crises += 1; });
-  const croisement = Array.from(paquets.entries()).sort((a, b) => a[0] - b[0]).map(([k, e]) => ({
-    label: etiquetteAgregation(k, gran),
-    autonomie: e.n ? Math.round(e.somme / e.n) : null,
-    crises: e.crises,
-  }));
 
   const compte = (e) => siennes.filter((l) => l.etat === e).length;
   const compteRef = (e) => siennesRef.filter((l) => l.etat === e).length;
@@ -6884,7 +6897,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
           { k: 'radar', l: 'Radar', icone: RadarIcon },
           { k: 'crises', l: 'Crises', icone: AlertTriangle },
           { k: 'suivi', l: 'Suivi continu', icone: Layers },
-          { k: 'croisement', l: 'Croisement', icone: Activity },
         ].map((v) => {
           const Icone = v.icone;
           return (
@@ -6899,9 +6911,9 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
 
       {/* Type de graphique et courbes de tendance ne concernent que le bilan
          des objectifs : passés à `extra` seulement dans cette sous-vue,
-         plutôt que rendus (et donc collants) sous les quatre autres, où ils
+         plutôt que rendus (et donc collants) sous les trois autres, où ils
          ne s'appliquent pas. */}
-      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'croisement' || vue === 'suivi'}
+      <SelecteurPeriode periode={periode} setPeriode={setPeriode} avecGranularite={vue === 'suivi'}
         avecComparaison collant bandeau={bandeau}
         comparaisonUtile={vue === 'objectifs' || vue === 'suivi' || vue === 'radar'}
         resumeExtra={vue === 'objectifs' ? resumeGraphePersonnes : null}
@@ -7061,7 +7073,7 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
       {vue === 'crises' && (
         <>
           {/* Ne s'affiche que dans cette sous-vue : elle précédait auparavant
-              Objectifs, Radar, Suivi et Croisement sans y avoir de sens. */}
+              Objectifs, Radar et Suivi sans y avoir de sens. */}
           <ApercuCrises donnees={donnees} personne={personne} crises={crisesPersonne}
             periode={periode} granularite={gran} onOuvrir={() => onOuvrirCrises(personne)} />
           {crisesPersonne.length === 0 ? <Empty>Aucune crise consignée sur la période.</Empty> : (
@@ -7097,29 +7109,6 @@ function PersonnesScreen({ donnees, lignes, focus, setFocus, contexte, setContex
           lignes={lignes} onObjectifSuivi={onObjectifSuivi} />
       )}
 
-      {vue === 'croisement' && (
-        croisement.length < 2 ? <Empty>Il faut au moins deux semaines de données pour un croisement lisible.</Empty> : (
-          <Card>
-            <div className="text-xs mb-2" style={{ color: INK_SOFT }}>
-              Par {gran === 'jour' ? 'jour' : gran === 'mois' ? 'mois' : 'semaine'} : autonomie moyenne (courbe) et nombre de crises (barres)
-            </div>
-            <div style={{ height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={croisement} margin={{ top: 8, right: 8, bottom: 4, left: -14 }}>
-                  <CartesianGrid stroke={BORDER} vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={{ stroke: BORDER }} tickLine={false} />
-                  <YAxis yAxisId="g" domain={[0, 100]} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={40} />
-                  <YAxis yAxisId="d" orientation="right" allowDecimals={false} tick={{ fontSize: 11, fill: INK_SOFT, fontFamily: F_MONO }} axisLine={false} tickLine={false} width={30} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: `1px solid ${BORDER}`, backgroundColor: CARD, color: INK, fontFamily: F_BODY, fontSize: 12 }} labelFormatter={(l) => l} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Bar yAxisId="d" dataKey="crises" name="Crises" fill={CRISE} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  <Line yAxisId="g" type="monotone" dataKey="autonomie" name="Autonomie (%)" stroke={ACQUIS} strokeWidth={2.5} dot={{ r: 3 }} connectNulls isAnimationActive={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-        )
-      )}
       </div>
     </div>
   );

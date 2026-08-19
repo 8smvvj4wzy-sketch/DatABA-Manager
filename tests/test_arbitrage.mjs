@@ -113,7 +113,7 @@ t('aucune situation sur une base saine',
   ), []);
 
 const recentes = [
-  ligne('L.M.', 'Demander de l’aide', { etat: 'bientot', streak: 4, needed: 5 }),
+  ligne('L.M.', 'Demander de l’aide', { etat: 'non_acquis' }),
   ligne('L.M.', 'Attendre son tour', { etat: 'plateau', moyenne: 62, threshold: 80 }),
   ligne('L.M.', 'Ranger', { etat: 'dormant', jours: 27 }),
   ligne('T.B.', 'Saluer', { etat: 'dormant', jours: 24 }),
@@ -122,12 +122,15 @@ const recentes = [
 const recentesTrace = { 'L.M.': '2026-06-29', 'T.B.': '2026-06-01' };
 const file = situationsAArbitrer(recentes, { 'L.M.': 11, 'T.B.': 1 }, { 'L.M.': 5, 'T.B.': 1 }, recentesTrace, T0);
 
-t('chaque fait porte ses chiffres, pas une phrase',
-  file.find((s) => s.kind === 'bientot'),
-  { kind: 'bientot', poids: 1, initiales: 'L.M.', objectif: 'Demander de l’aide', streak: 4, needed: 5 });
+/* Un objectif jamais coté n'a aucun chiffre à porter : `etatDeSerie` ne rend
+   `non_acquis` que lorsque `points` ET `mesures` sont vides. La ligne se
+   réduit donc à son identité — c'est la phrase de l'écran qui dit le fait. */
+t('un objectif jamais coté remonte sans chiffre',
+  file.find((s) => s.kind === 'non_acquis'),
+  { kind: 'non_acquis', poids: 3, initiales: 'L.M.', objectif: 'Demander de l’aide' });
 t('le plateau porte sa moyenne et son seuil',
   file.find((s) => s.kind === 'plateau'),
-  { kind: 'plateau', poids: 3, initiales: 'L.M.', objectif: 'Attendre son tour', moyenne: 62, seuil: 80 });
+  { kind: 'plateau', poids: 2, initiales: 'L.M.', objectif: 'Attendre son tour', moyenne: 62, seuil: 80 });
 t('la hausse de crises porte les deux chiffres comparés',
   file.find((s) => s.kind === 'crises_hausse'),
   { kind: 'crises_hausse', poids: 0, initiales: 'L.M.', objectif: null, n: 11, reference: 5 });
@@ -142,7 +145,12 @@ t('mais un objectif dormant chez une personne active remonte bien',
 
 /* L'ordre de remontée. */
 t('le poids classe les types',
-  file.map((s) => s.kind), ['crises_hausse', 'bientot', 'sans_trace', 'plateau', 'dormant']);
+  file.map((s) => s.kind), ['crises_hausse', 'sans_trace', 'plateau', 'non_acquis', 'dormant']);
+
+/* « Bientôt acquis » ne remonte plus : une acquisition qui approche est une
+   bonne nouvelle en cours de route, elle n'appelle aucune décision. */
+t('un objectif bientôt acquis ne remonte pas',
+  situationsAArbitrer([ligne('A', 'Un', { etat: 'bientot', streak: 4, needed: 5 })], {}, {}, {}, T0), []);
 
 const deuxHausses = situationsAArbitrer(
   [], { A: 11, B: 30 }, { A: 5, B: 10 }, {}, T0,
@@ -162,6 +170,23 @@ const deuxPlateaux = situationsAArbitrer([
   ligne('B', 'Deux', { etat: 'plateau', moyenne: 30, threshold: 40 }),
 ], {}, {}, {}, T0);
 t('deux plateaux gardent l’ordre de la liste', deuxPlateaux.map((s) => s.initiales), ['A', 'B']);
+
+/* Même raison pour deux objectifs jamais cotés : « jamais » ne se compare pas
+   à « jamais ». */
+const deuxJamais = situationsAArbitrer([
+  ligne('A', 'Un', { etat: 'non_acquis' }),
+  ligne('B', 'Deux', { etat: 'non_acquis' }),
+], {}, {}, {}, T0);
+t('deux objectifs jamais cotés gardent l’ordre de la liste',
+  deuxJamais.map((s) => s.initiales), ['A', 'B']);
+
+/* La non-redondance ne s'applique pas à « jamais coté » : elle existe pour ne
+   pas répéter la même absence récente, et « jamais coté » n'est pas celle-là.
+   A n'a plus aucune trace ET porte un objectif jamais coté : les deux lignes
+   sortent. */
+t('une personne sans trace remonte quand même ses objectifs jamais cotés',
+  situationsAArbitrer([ligne('A', 'Un', { etat: 'non_acquis' })], {}, {}, { A: '2026-06-01' }, T0)
+    .map((s) => s.kind), ['sans_trace', 'non_acquis']);
 
 /* Sans période de comparaison, aucune hausse n'est annoncée : il n'y a rien à
    comparer, et zéro n'est pas une référence. */
