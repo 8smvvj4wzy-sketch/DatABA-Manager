@@ -4,44 +4,64 @@
    en arrière-plan. Sans ce garde-fou, une connexion lente laisse un écran
    blanc plusieurs minutes.
 
-   APRÈS CHAQUE MISE EN LIGNE : incrémentez CACHE_VERSION. */
-const CACHE_VERSION = 'v36';
+   La liste des fichiers à précacher et la version du cache ne sont plus
+   posées à la main : le build (vite.config.js, scripts/precache.mjs) les
+   calcule à partir des fichiers réellement produits et remplace les trois
+   lignes suivantes. En développement (`vite dev`) ou sous les tests, ces
+   valeurs par défaut s'appliquent telles quelles — la coquille seule, jamais
+   une version « dev » qui resterait active en production (voir la section
+   « 4. Hors ligne » de verifier.sh, qui vérifie justement l'inverse). */
+const OBLIGATOIRES = /* injecté au build */ ['./', './index.html', './manifest.webmanifest'];
+const FACULTATIFS = /* injecté au build */ [];
+const CACHE_VERSION = /* injecté au build */ 'dev';
 const CACHE_NAME = `aba-cadre-${CACHE_VERSION}`;
 const NETWORK_TIMEOUT_MS = 2500;
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
+  /* Le précache d'abord, la prise de contrôle ensuite. Avant cette version,
+     self.skipWaiting() était le tout premier appel : sur une mise en ligne,
+     l'ancien service worker restait le contrôleur actif le temps que la page
+     charge, et une page qui lui envoyait entre-temps la liste des fichiers à
+     mettre en cache (ancien mécanisme dans src/main.jsx, retiré) écrivait
+     dans SON cache à lui — pendant que le nouveau service worker, déjà
+     activé, avait déjà supprimé ce même cache à l'activation (voir plus bas).
+     Le cache effectivement servi ne contenait plus alors que la coquille :
+     aucun .js, aucun .css. L'application s'ouvrait normalement en ligne, et
+     se retrouvait cassée hors connexion jusqu'au rechargement suivant — sans
+     qu'aucun signal ne le dise (voir CarteHorsLigne, src/App.jsx). */
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) =>
-      cache.addAll(['./', './index.html', './manifest.webmanifest']).catch(() => {})
-    )
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+      // Obligatoire : un seul absent et cache.addAll rejette tout le lot —
+      // l'installation échoue, l'ancien service worker (qui fonctionne
+      // toujours) reste actif. Mieux vaut une version qui marche qu'une
+      // nouvelle au cache creux.
+      await cache.addAll(OBLIGATOIRES);
+      // Facultatif : chacun pour soi, une image manquante n'empêche rien.
+      await Promise.all(FACULTATIFS.map((url) => cache.add(url).catch(() => {})));
+      self.skipWaiting();
+    })()
   );
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
-});
-
-/* --- Mise en cache des fichiers compilés ---
-   Leur nom contient une empreinte qui change à chaque version : impossible de
-   les lister ici. La page envoie donc elle-même, une fois chargée, la liste
-   des fichiers qu'elle a réellement utilisés. Sans cela, seule la coquille
-   était mise en cache et l'application ne s'ouvrait pas hors connexion. */
-self.addEventListener('message', (event) => {
-  const data = event.data || {};
-  if (data.type !== 'cache-assets' || !Array.isArray(data.urls)) return;
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) =>
-      Promise.all(
-        data.urls.map((url) =>
-          cache.match(url).then((deja) => (deja ? null : cache.add(url).catch(() => null)))
-        )
-      )
-    )
+    (async () => {
+      /* Relecture avant purge — même principe que sauverDonnees côté
+         données : une écriture n'est réussie qu'une fois relue. Si le
+         nouveau cache n'a pas la totalité de l'obligatoire (installation
+         interrompue, quota), les anciens caches restent en place plutôt que
+         de laisser le poste sans rien de servable hors connexion. */
+      const cache = await caches.open(CACHE_NAME);
+      const complet = (
+        await Promise.all(OBLIGATOIRES.map((url) => cache.match(url)))
+      ).every(Boolean);
+      if (complet) {
+        const cles = await caches.keys();
+        await Promise.all(cles.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)));
+      }
+      await self.clients.claim();
+    })()
   );
 });
 
@@ -77,7 +97,30 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copie));
         }
         return r;
-      }).catch(() => enCache);
+      }).catch(() => enCache || Response.error());
+      // enCache est ici toujours undefined (la branche if l'aurait déjà
+      // rendu) : Response.error() évite de passer undefined à respondWith,
+      // qui lèverait au lieu de laisser la requête échouer proprement.
     })
+  );
+});
+
+/* État lu par la carte « Hors ligne » de l'écran Gestion (CarteHorsLigne,
+   src/App.jsx) : combien de fichiers attendus sont effectivement en cache,
+   sous quelle version. Remplace l'ancien message « cache-assets » — la page
+   ne dicte plus rien au service worker, elle ne fait qu'interroger son état. */
+self.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type !== 'etat') return;
+  const port = event.ports && event.ports[0];
+  if (!port) return;
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+      const presents = (
+        await Promise.all(OBLIGATOIRES.map((url) => cache.match(url)))
+      ).filter(Boolean).length;
+      port.postMessage({ version: CACHE_VERSION, attendus: OBLIGATOIRES.length, presents });
+    })()
   );
 });

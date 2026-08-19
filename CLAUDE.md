@@ -43,12 +43,16 @@ apparues entre deux sessions. Éditer plutôt que régénérer.
 ./verifier.sh
 ```
 
-Les 27 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
+Les 33 suites de `tests/` doivent rester vertes. Ne rien livrer sur un contrôle
 rouge.
 
 ## Après chaque mise en ligne
 
-**Incrémenter `CACHE_VERSION` dans `public/sw.js`.**
+Rien à faire à la main. `CACHE_VERSION` (`public/sw.js`) est dérivée du
+contenu réel des fichiers produits par `npm run build`
+(`scripts/precache.mjs`, injectée par `vite.config.js`) — elle change dès
+qu'un fichier change, et seulement alors. Le bump manuel qu'elle remplaçait
+était de toute façon insuffisant : voir le piège ci-dessous.
 
 ## Pièges connus
 
@@ -227,6 +231,36 @@ rouge.
   simple aller-retour. La durée de l'absence se compare à
   `DELAI_VERROUILLAGE` (`doitVerrouillerAuRetour`), pas la seule perte de
   focus.
+- **Le hors-ligne ne se découvre pas à l'exécution.** `public/sw.js` ne peut
+  pas deviner les noms hachés des fichiers compilés
+  (`assets/index-XXXXXX.js`) : jusqu'à ce que ce piège soit corrigé, c'est
+  `src/main.jsx` qui les découvrait après coup (`performance.getEntriesByType`)
+  et les envoyait au service worker par `postMessage`. Deux défauts
+  s'additionnaient. D'abord un ordre d'activation cassé :
+  `self.skipWaiting()` était appelé avant tout précache, et `activate`
+  supprimait sans condition tous les caches autres que le sien ; sur une mise
+  en ligne, l'ancien service worker (encore actif le temps que la page
+  réponde) écrivait la liste reçue dans SON cache, pendant que le nouveau,
+  déjà activé, l'avait déjà supprimé — le cache effectivement servi ne
+  contenait plus que la coquille, aucun `.js`, aucun `.css`. Ensuite un
+  défaut structurel : la liste n'existant qu'à l'exécution, le hors-ligne ne
+  pouvait jamais fonctionner à la première ouverture d'une version, seulement
+  après une visite en ligne entière et réussie — sur un dépôt qui publie à
+  chaque push (`.github/workflows/deploy.yml`), cette fenêtre ne s'ouvrait
+  presque jamais. La liste des fichiers à précacher et la version de cache
+  sont maintenant calculées par `scripts/precache.mjs` à partir des fichiers
+  réellement produits, et injectées dans `dist/sw.js` par `vite.config.js` —
+  la page n'a plus rien à dicter, seulement à interroger (`CarteHorsLigne`,
+  écran Gestion). Tout nouveau fichier servi à l'exécution doit entrer dans
+  cette liste au build, jamais dans un message envoyé après coup — et les
+  polices (`src/polices/`) sont embarquées pour la même raison : une police
+  chargée depuis `fonts.googleapis.com` n'est plus servable dès que le
+  navigateur n'en a pas déjà sa propre copie en cache HTTP.
+  `tests/test_horsligne.mjs` rejoue la régression (ordre `skipWaiting`,
+  purge conditionnelle à l'activation, réponses hors ligne) sur un faux
+  service worker ; `verifier.sh` (section « 4. Hors ligne ») construit
+  réellement le projet et vérifie que rien, dans `dist/`, ne dépend plus du
+  réseau.
 
 ## Principes produit
 

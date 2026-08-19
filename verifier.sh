@@ -16,6 +16,8 @@
 #   2 septies. localStorage touché sans passer par le préfixe aba-cadre:
 #   2 octies. écriture du bloc consolidé hors de sa couche de stockage
 #   3. suite de tests Node autonome
+#   4. hors ligne — build réel, précache injecté complet, aucune dépendance
+#      réseau au chargement (ignoré si node_modules est absent)
 
 set -u
 RACINE="$(cd "$(dirname "$0")" && pwd)"
@@ -351,6 +353,57 @@ if [ -d tests ] && ls tests/*.mjs >/dev/null 2>&1; then
   [ "$N_KO" -gt 0 ] && ECHECS=$((ECHECS + 1))
 else
   echo "  ⚠ aucun test trouvé dans tests/"
+fi
+
+# ── 4. Hors ligne ────────────────────────────────────────────────────
+# tests/test_horsligne.mjs (section 3) couvre precache.mjs et sw.js en
+# environnement simulé ; ce contrôle-ci construit réellement le projet et
+# relit dist/, seul moyen de vérifier que l'injection du build (vite.config.js)
+# a effectivement eu lieu et que rien, à l'exécution, ne dépend plus du
+# réseau — voir CLAUDE.md, piège « Le hors-ligne ne se découvre pas à
+# l'exécution ».
+echo
+echo "── 4. Hors ligne ──"
+if [ -d node_modules ]; then
+  if SORTIE_BUILD=$(npm run build 2>&1); then
+    if [ -f dist/sw.js ]; then
+      HORS_LIGNE_OK=1
+      for f in dist/assets/*; do
+        [ -e "$f" ] || continue
+        NOM_ASSET="./assets/$(basename "$f")"
+        if ! grep -qF "\"$NOM_ASSET\"" dist/sw.js; then
+          echo "  ✗ absent du précache injecté : $NOM_ASSET"
+          HORS_LIGNE_OK=0
+        fi
+      done
+      if grep -q 'CACHE_VERSION = "dev"' dist/sw.js; then
+        echo "  ✗ CACHE_VERSION n'a pas été injectée par le build (reste à 'dev')"
+        HORS_LIGNE_OK=0
+      fi
+      # Aucune dépendance réseau au chargement : un lien Google Fonts ou un
+      # script tiers réintroduirait la panne réglée par cette section — seuls
+      # dist/index.html et les feuilles de style compilées sont regardés, pas
+      # le bundle JS, où une URL http:// peut légitimement n'être qu'une
+      # chaîne de caractères (xmlns SVG, par exemple).
+      URLS_EXTERNES=$(grep -ohE "https?://[^\"' )]+" dist/index.html dist/assets/*.css 2>/dev/null)
+      if [ -n "$URLS_EXTERNES" ]; then
+        echo "  ✗ dépendance réseau externe détectée :"
+        echo "$URLS_EXTERNES" | sed 's/^/      /'
+        HORS_LIGNE_OK=0
+      fi
+      [ "$HORS_LIGNE_OK" -eq 1 ] && echo "  ✓ précache complet, aucune dépendance réseau externe" \
+        || ECHECS=$((ECHECS + 1))
+    else
+      echo "  ✗ dist/sw.js introuvable après le build"
+      ECHECS=$((ECHECS + 1))
+    fi
+  else
+    echo "  ✗ le build a échoué :"
+    echo "$SORTIE_BUILD" | sed 's/^/      /' | tail -20
+    ECHECS=$((ECHECS + 1))
+  fi
+else
+  echo "  ⚠ node_modules absent (npm install requis), section ignorée"
 fi
 
 echo

@@ -20,6 +20,17 @@ ou se retire depuis l'onglet Gestion.
 Ouvrez l'adresse dans **Chrome** ou **Edge** : une icône d'installation apparaît
 dans la barre d'adresse (ou menu **⋮ → Installer l'application…**).
 
+## Fonctionner sans réseau
+
+Une seule ouverture en ligne suffit : l'application enregistre alors sur ce
+poste tout ce qu'il lui faut pour fonctionner ensuite sans réseau — y compris
+ses polices, qui ne sont plus chargées depuis internet. Une nouvelle mise en
+ligne de l'application redemande une ouverture en ligne, une seule, avant que
+le hors-ligne fonctionne à nouveau, cette fois avec la nouvelle version.
+
+L'onglet **Gestion** dit si le poste est prêt : carte « Hors ligne », sous
+« Enregistrement sur ce poste ».
+
 ## Choisir la période
 
 Trois façons de définir la fenêtre d'observation, disponibles partout :
