@@ -43,7 +43,8 @@ function extraireLigne(nom) {
 
 const NOMS = [
   'jourLocal', 'segmentsJournee', 'cleAgregation', 'etiquetteAgregation',
-  'tendanceLineaire', 'segmentsSuivi', 'chronologieSuivi', 'croisementTendances',
+  'tendanceLineaire', 'segmentsSuivi', 'chronologieSuivi', 'repartitionCriteres',
+  'partsParSerie', 'croisementTendances',
 ];
 const code = [
   `const cleSerieSuivi = ${extraireLigne('cleSerieSuivi')};`,
@@ -52,7 +53,7 @@ const code = [
 ].join('\n');
 // eslint-disable-next-line no-new-func
 const {
-  segmentsSuivi, chronologieSuivi, croisementTendances, tendanceLineaire, cleSerieSuivi,
+  segmentsSuivi, chronologieSuivi, partsParSerie, croisementTendances, tendanceLineaire, cleSerieSuivi,
 } = new Function(code)();
 
 /* Relevés tels que les rend `suiviDePersonne` : l'axe et le critère sont déjà
@@ -164,6 +165,38 @@ const courts = segmentsSuivi([
 ]);
 t('l arrondi en minutes se fait sur le cumul, pas segment par segment',
   chronologieSuivi(courts, 'jour')[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur, 1);
+
+/* ==================== partsParSerie ==================== */
+
+/* La part sur la période entière, celle que le bandeau du graphique affiche.
+   Même dénominateur par axe que `chronologieSuivi` dans sa tranche : sans ça,
+   le même critère annoncerait deux pourcentages différents selon qu'on le lit
+   sous la courbe ou dans la Frise du jour. */
+const parts = partsParSerie(segs);
+t('une entrée par critère borné, indexée par clé de série',
+  Array.from(parts.keys()).sort(),
+  [cleSerieSuivi(ACTIVITE, 'travail'), cleSerieSuivi(HUMEUR, 'agite'), cleSerieSuivi(HUMEUR, 'calme')].sort());
+t('LE POINT CLÉ : la part se rapporte à son propre axe, pas au total général',
+  [parts.get(cleSerieSuivi(HUMEUR, 'calme')).part,
+    parts.get(cleSerieSuivi(HUMEUR, 'agite')).part,
+    parts.get(cleSerieSuivi(ACTIVITE, 'travail')).part], [67, 33, 100]);
+t('les mêmes chiffres que la courbe sur une période d une seule tranche',
+  parts.get(cleSerieSuivi(HUMEUR, 'calme')).part,
+  parJour[0].series[cleSerieSuivi(HUMEUR, 'calme')].part);
+t('la durée cumulée reste en millisecondes, comme repartitionCriteres',
+  parts.get(cleSerieSuivi(HUMEUR, 'calme')).ms, 60 * 60000);
+t('un segment non borné ne produit aucune entrée',
+  parts.has(cleSerieSuivi(ACTIVITE, 'pause')), false);
+
+/* Plusieurs journées cumulées : la part porte sur le tout, pas sur la dernière
+   tranche. Calme pèse 60 + 120 minutes sur 210 d'humeur bornée. */
+const partsCumul = partsParSerie(troisJours);
+t('la part cumule toutes les tranches de la période',
+  [partsCumul.get(cleSerieSuivi(HUMEUR, 'calme')).part,
+    partsCumul.get(cleSerieSuivi(HUMEUR, 'agite')).part], [86, 14]);
+
+t('aucun segment : aucune part', partsParSerie([]).size, 0);
+t('aucun segment : rien à indexer non plus sur null', partsParSerie(null).size, 0);
 
 /* ==================== croisementTendances ==================== */
 
