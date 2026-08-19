@@ -103,7 +103,7 @@ t('un horodatage illisible est écarté', segmentsSuivi([rel(HUMEUR, calme, 'pas
 
 /* ==================== chronologieSuivi ==================== */
 
-const parJour = chronologieSuivi(segs, 'jour', 'duree');
+const parJour = chronologieSuivi(segs, 'jour');
 t('une seule tranche pour une seule journée', parJour.length, 1);
 t('la durée est rendue en minutes',
   [parJour[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur,
@@ -118,13 +118,12 @@ t('les parts se rapportent à leur propre axe',
 t('un segment non borné n entre dans aucune part',
   parJour[0].series[cleSerieSuivi(ACTIVITE, 'pause')], undefined);
 
-const parJourOcc = chronologieSuivi(segs, 'jour', 'occurrences');
-t('en occurrences, chaque segment pèse 1 quelle que soit sa durée',
-  [parJourOcc[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur,
-    parJourOcc[0].series[cleSerieSuivi(HUMEUR, 'agite')].valeur], [1, 1]);
-t('la part des occurrences suit le même dénominateur par axe',
-  [parJourOcc[0].series[cleSerieSuivi(HUMEUR, 'calme')].part,
-    parJourOcc[0].series[cleSerieSuivi(ACTIVITE, 'travail')].part], [50, 100]);
+/* Un relevé d'état dure, il ne se compte pas : la chronologie ne connaît plus
+   qu'une mesure. Le comptage, c'est celui des appuis de compteur, que
+   `chronologieCompteurs` lit à part. Un troisième argument resté d'une ancienne
+   lecture « en occurrences » ne doit donc rien changer. */
+t('aucune seconde lecture en occurrences',
+  chronologieSuivi(segs, 'jour', 'occurrences')[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur, 60);
 
 /* Trois journées de la même semaine, plus une de la semaine suivante. */
 const troisJours = segmentsSuivi([
@@ -135,8 +134,8 @@ const troisJours = segmentsSuivi([
   rel(HUMEUR, calme, '2026-05-11T09:00:00'),
   rel(HUMEUR, calme, '2026-05-11T11:00:00', true),
 ]);
-t('par jour : une tranche par journée', chronologieSuivi(troisJours, 'jour', 'duree').length, 3);
-const parSemaine = chronologieSuivi(troisJours, 'semaine', 'duree');
+t('par jour : une tranche par journée', chronologieSuivi(troisJours, 'jour').length, 3);
+const parSemaine = chronologieSuivi(troisJours, 'semaine');
 t('par semaine : lundi et mardi se regroupent, la semaine suivante non', parSemaine.length, 2);
 t('la semaine cumule les journées qu elle contient',
   [parSemaine[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur,
@@ -152,8 +151,8 @@ const avecJourneeVide = segmentsSuivi([
   rel(HUMEUR, agite, '2026-05-06T09:00:00'),
 ]);
 t('une tranche sans durée connue n est pas créée',
-  chronologieSuivi(avecJourneeVide, 'jour', 'duree').length, 1);
-t('aucun segment : aucune tranche', chronologieSuivi([], 'jour', 'duree'), []);
+  chronologieSuivi(avecJourneeVide, 'jour').length, 1);
+t('aucun segment : aucune tranche', chronologieSuivi([], 'jour'), []);
 
 /* Les minutes se cumulent avant d'être arrondies : deux segments de vingt
    secondes font quarante secondes, pas deux fois zéro minute. */
@@ -164,7 +163,7 @@ const courts = segmentsSuivi([
   rel(HUMEUR, calme, '2026-05-04T10:00:40', true),
 ]);
 t('l arrondi en minutes se fait sur le cumul, pas segment par segment',
-  chronologieSuivi(courts, 'jour', 'duree')[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur, 1);
+  chronologieSuivi(courts, 'jour')[0].series[cleSerieSuivi(HUMEUR, 'calme')].valeur, 1);
 
 /* ==================== croisementTendances ==================== */
 

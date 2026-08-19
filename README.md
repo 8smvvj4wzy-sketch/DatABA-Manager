@@ -52,11 +52,15 @@ objectifs — chaque état portant son **écart avec la période de comparaison*
 et volume de crises avec sa tendance.
 
 Vient ensuite **« À arbitrer »** : les situations qui appellent une décision,
-classées. Une hausse nette de crises, un objectif au seuil à une cotation de
-l'acquisition, une personne dont plus rien ne remonte, un objectif qui stagne
-sous son seuil, un objectif qui n'est plus coté. Chaque ligne énonce le fait et
-ses chiffres — « au seuil sur 4 cotations consécutives, le critère en demande
-5 » — puis mène là où on peut le vérifier.
+classées. Une hausse nette de crises, une personne dont plus rien ne remonte, un
+objectif qui stagne sous son seuil, un objectif jamais coté, un objectif qui
+n'est plus coté. Chaque ligne énonce le fait et ses chiffres — « moyenne 62 %
+sur les cinq dernières cotations, pour un seuil à 80 % » — puis mène là où on
+peut le vérifier.
+
+> Un objectif **bientôt acquis** n'y figure pas : une acquisition qui approche
+> est une bonne nouvelle en cours de route, elle n'appelle aucune décision. Elle
+> reste lisible dans les pastilles d'états, plus bas.
 
 > Une personne dont plus aucune trace ne remonte apparaît **une seule fois**, et
 > non une fois par objectif dormant : quinze lignes racontant la même absence
@@ -105,10 +109,9 @@ les cotations portent le même intervenant, à partir de trois cotations.
 > n'apparaît pas — ne pas savoir qui a coté n'est pas savoir qu'une seule
 > personne l'a fait.
 
-**Personnes accompagnées** — le suivi complet, avec cinq vues : **Bilan des
+**Personnes accompagnées** — le suivi complet, avec quatre vues : **Bilan des
 objectifs**, **Radar** (quels objectifs sont travaillés et à quel niveau),
-**Crises**, **Suivi continu** et **Croisement autonomie/crises**. La période est
-ajustable partout.
+**Crises** et **Suivi continu**. La période est ajustable partout.
 
 En haut de la fiche, un **aperçu des crises** de la période : les occurrences
 seules, en barres, avec une **courbe de tendance** et la mention « en hausse »

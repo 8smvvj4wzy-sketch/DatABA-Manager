@@ -78,22 +78,16 @@ const parts = repar.lignes.reduce((a, l) => a + l.part, 0);
 t('les parts des segments bornés totalisent 100 %', parts, 100);
 const ligneStable = repar.lignes.find((l) => l.cle === 'stable');
 t('stable cumule ses deux segments', ligneStable.ms, 90 * 60000);
-t('stable compte deux relevés', ligneStable.n, 2);
+t('stable pèse les trois quarts du temps borné', ligneStable.part, 75);
 
-/* Occurrences : le même ensemble de faits que les durées, lu autrement. Un
-   critère peut peser peu de temps en revenant souvent — d'où une part propre,
-   sur le nombre de segments bornés et non sur leur durée. Le segment non borné
-   est écarté des deux lectures, sans quoi elles ne parleraient pas des mêmes
-   relevés. */
-t('le dénominateur des occurrences ne compte que les segments bornés', repar.totalN, 3);
-const ligneCrise = repar.lignes.find((l) => l.cle === 'crise');
-t('crise : une occurrence bornée sur trois', [ligneCrise.n, ligneCrise.partN], [1, 33]);
-t('stable : deux occurrences sur trois', ligneStable.partN, 67);
-t('les parts d occurrences ne suivent pas celles des durées',
-  [ligneStable.part, ligneStable.partN], [75, 67]);
+/* Une durée et une part, rien d'autre. Un relevé d'état dure, il ne se compte
+   pas : la seconde lecture « en occurrences » qui vivait ici mêlait les relevés
+   d'état aux appuis de compteur, qui se comptent à part. */
+t('aucun comptage de segments ne sort de la répartition',
+  repar.lignes.every((l) => l.n === undefined && l.partN === undefined), true);
+t('ni de dénominateur de comptage', repar.totalN, undefined);
 
 t('aucun segment : rien à répartir', repartitionCriteres([]).lignes, []);
-t('aucun segment : aucun dénominateur d occurrences', repartitionCriteres([]).totalN, 0);
 t('tous les segments non bornés : aucune part calculable', repartitionCriteres([
   { debut: 0, fin: null, meta: stable, cle: 'stable', ms: null },
 ]).lignes, []);
